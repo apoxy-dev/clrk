@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+    branches: [main]
+jobs:
+  trigger-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger apoxy-cloud build
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.APOXY_CLOUD_PAT }}
+          repository: apoxy-dev/apoxy-cloud
+          event-type: clrk-build
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
