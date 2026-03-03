@@ -8,6 +8,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -25,12 +26,12 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		MetricsBindAddress:     ":8082",
+		Metrics:                metricsserver.Options{BindAddress: ":8082"},
 		HealthProbeBindAddress: ":8083",
 		LeaderElection:         false,
 	})
 	if err != nil {
-		log.Error(err, "unable to create manager")
+		log.Error(err, "Unable to create manager")
 		os.Exit(1)
 	}
 
@@ -40,24 +41,24 @@ func main() {
 	// if err := mgr.Add(&worker.Runtime{
 	// 	Client: mgr.GetClient(),
 	// }); err != nil {
-	// 	log.Error(err, "unable to add worker runtime")
+	// 	log.Error(err, "Unable to add worker runtime")
 	// 	os.Exit(1)
 	// }
 	//
 	// import "github.com/apoxy-dev/clrk/internal/worker"
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Error(err, "unable to set up health check")
+		log.Error(err, "Unable to set up health check")
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Error(err, "unable to set up ready check")
+		log.Error(err, "Unable to set up ready check")
 		os.Exit(1)
 	}
 
-	log.Info("starting worker")
+	log.Info("Starting worker")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		log.Error(err, "problem running worker")
+		log.Error(err, "Problem running worker")
 		os.Exit(1)
 	}
 }
