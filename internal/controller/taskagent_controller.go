@@ -11,8 +11,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+)
+
+const (
+	defaultGatewayClassName = "envoy"
+	envoyGatewayGroup       = "gateway.envoyproxy.io"
 )
 
 // TaskAgentReconciler reconciles TaskAgent objects.
@@ -28,6 +34,8 @@ type TaskAgentReconciler struct {
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates/status,verbs=get
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch
 
 func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ta clrkv1alpha1.TaskAgent
@@ -154,6 +162,77 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	setCondition(&ta.Status.Conditions, sandboxReady)
 
+	// Create or update Gateway.
+	desiredGW := desiredGateway(&ta)
+	if err := ctrl.SetControllerReference(&ta, desiredGW, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting Gateway owner reference: %w", err)
+	}
+	var existingGW gwapiv1.Gateway
+	gwKey := types.NamespacedName{Name: ta.Name, Namespace: ta.Namespace}
+	if err := r.Get(ctx, gwKey, &existingGW); apierrors.IsNotFound(err) {
+		logger.Info("Creating Gateway", "name", desiredGW.Name)
+		if err := r.Create(ctx, desiredGW); err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating Gateway: %w", err)
+		}
+		existingGW = *desiredGW
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting Gateway: %w", err)
+	} else {
+		existingGW.Spec = desiredGW.Spec
+		if err := r.Update(ctx, &existingGW); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating Gateway: %w", err)
+		}
+	}
+
+	// Set GatewayReady condition based on Gateway status.
+	gatewayReady := metav1.Condition{
+		Type:               "GatewayReady",
+		ObservedGeneration: ta.Generation,
+		LastTransitionTime: now,
+	}
+	programmed := false
+	for _, cond := range existingGW.Status.Conditions {
+		if cond.Type == string(gwapiv1.GatewayConditionProgrammed) && cond.Status == metav1.ConditionTrue {
+			programmed = true
+			break
+		}
+	}
+	if programmed {
+		gatewayReady.Status = metav1.ConditionTrue
+		gatewayReady.Reason = "GatewayProgrammed"
+		gatewayReady.Message = "Gateway has Programmed=True"
+	} else if existingGW.CreationTimestamp.IsZero() {
+		gatewayReady.Status = metav1.ConditionFalse
+		gatewayReady.Reason = "GatewayCreated"
+		gatewayReady.Message = "Gateway created, not yet provisioned"
+	} else {
+		gatewayReady.Status = metav1.ConditionFalse
+		gatewayReady.Reason = "GatewayNotProgrammed"
+		gatewayReady.Message = "Gateway exists but Programmed != True"
+	}
+	setCondition(&ta.Status.Conditions, gatewayReady)
+
+	// Create or update HTTPRoute.
+	desiredHR := desiredHTTPRoute(&ta)
+	if err := ctrl.SetControllerReference(&ta, desiredHR, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting HTTPRoute owner reference: %w", err)
+	}
+	var existingHR gwapiv1.HTTPRoute
+	hrKey := types.NamespacedName{Name: ta.Name, Namespace: ta.Namespace}
+	if err := r.Get(ctx, hrKey, &existingHR); apierrors.IsNotFound(err) {
+		logger.Info("Creating HTTPRoute", "name", desiredHR.Name)
+		if err := r.Create(ctx, desiredHR); err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating HTTPRoute: %w", err)
+		}
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting HTTPRoute: %w", err)
+	} else {
+		existingHR.Spec = desiredHR.Spec
+		if err := r.Update(ctx, &existingHR); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating HTTPRoute: %w", err)
+		}
+	}
+
 	// Accepted condition — spec is structurally valid.
 	accepted := metav1.Condition{
 		Type:               "Accepted",
@@ -179,5 +258,99 @@ func (r *TaskAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.TaskAgent{}).
 		Owns(&clrkv1alpha1.SandboxState{}).
+		Owns(&gwapiv1.Gateway{}).
+		Owns(&gwapiv1.HTTPRoute{}).
 		Complete(r)
+}
+
+func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
+	return &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ta.Name,
+			Namespace: ta.Namespace,
+			Labels: map[string]string{
+				"clrk.apoxy.dev/taskagent":  ta.Name,
+				"clrk.apoxy.dev/component": "ingress",
+			},
+		},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: gwapiv1.ObjectName(defaultGatewayClassName),
+			Listeners: []gwapiv1.Listener{
+				{
+					Name:     "http",
+					Port:     80,
+					Protocol: gwapiv1.HTTPProtocolType,
+				},
+			},
+		},
+	}
+}
+
+func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
+	extProcGroup := gwapiv1.Group(envoyGatewayGroup)
+	extProcKind := gwapiv1.Kind("ExternalProcessor")
+	extProcName := gwapiv1.ObjectName(ta.Name + "-ext-proc")
+
+	resolverGroup := gwapiv1.Group(envoyGatewayGroup)
+	resolverKind := gwapiv1.Kind("DynamicResolver")
+	resolverName := gwapiv1.ObjectName(ta.Name + "-resolver")
+
+	pathPrefix := gwapiv1.PathMatchPathPrefix
+
+	return &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ta.Name,
+			Namespace: ta.Namespace,
+			Labels: map[string]string{
+				"clrk.apoxy.dev/taskagent":  ta.Name,
+				"clrk.apoxy.dev/component": "ingress",
+			},
+		},
+		Spec: gwapiv1.HTTPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{
+				ParentRefs: []gwapiv1.ParentReference{
+					{
+						Name: gwapiv1.ObjectName(ta.Name),
+					},
+				},
+			},
+			Rules: []gwapiv1.HTTPRouteRule{
+				{
+					Matches: []gwapiv1.HTTPRouteMatch{
+						{
+							Path: &gwapiv1.HTTPPathMatch{
+								Type:  &pathPrefix,
+								Value: ptrTo("/"),
+							},
+						},
+					},
+					Filters: []gwapiv1.HTTPRouteFilter{
+						{
+							Type: gwapiv1.HTTPRouteFilterExtensionRef,
+							ExtensionRef: &gwapiv1.LocalObjectReference{
+								Group: extProcGroup,
+								Kind:  extProcKind,
+								Name:  extProcName,
+							},
+						},
+					},
+					BackendRefs: []gwapiv1.HTTPBackendRef{
+						{
+							BackendRef: gwapiv1.BackendRef{
+								BackendObjectReference: gwapiv1.BackendObjectReference{
+									Group: (*gwapiv1.Group)(&resolverGroup),
+									Kind:  (*gwapiv1.Kind)(&resolverKind),
+									Name:  resolverName,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func ptrTo(s string) *string {
+	return &s
 }

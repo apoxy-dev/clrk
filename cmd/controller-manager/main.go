@@ -10,6 +10,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/controller"
 )
@@ -19,6 +21,7 @@ var scheme = runtime.NewScheme()
 func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = clrkv1alpha1.AddToScheme(scheme)
+	_ = gwapiv1.AddToScheme(scheme)
 }
 
 func main() {
