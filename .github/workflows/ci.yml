@@ -6,10 +6,17 @@ jobs:
   trigger-build:
     runs-on: ubuntu-latest
     steps:
+      - name: Setup App Token
+        id: setup-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - name: Trigger apoxy-cloud build
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.APOXY_CLOUD_PAT }}
+          token: ${{ steps.setup-token.outputs.token }}
           repository: apoxy-dev/apoxy-cloud
           event-type: clrk-build
           client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
