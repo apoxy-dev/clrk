@@ -5,9 +5,11 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -26,6 +28,7 @@ type WorkerPoolReconciler struct {
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
 
 func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -59,6 +62,30 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		existing.Spec = deploy.Spec
 		if err := r.Update(ctx, &existing); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating deployment: %w", err)
+		}
+	}
+
+	// CreateOrUpdate the Service.
+	svc := r.desiredService(&wp)
+	if err := ctrl.SetControllerReference(&wp, svc, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting Service owner reference: %w", err)
+	}
+
+	var existingSvc corev1.Service
+	err = r.Get(ctx, client.ObjectKeyFromObject(svc), &existingSvc)
+	if apierrors.IsNotFound(err) {
+		logger.Info("Creating Service", "name", svc.Name)
+		if err := r.Create(ctx, svc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating service: %w", err)
+		}
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting service: %w", err)
+	} else {
+		existingSvc.Spec.Selector = svc.Spec.Selector
+		existingSvc.Spec.Ports = svc.Spec.Ports
+		existingSvc.Spec.Type = svc.Spec.Type
+		if err := r.Update(ctx, &existingSvc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating service: %w", err)
 		}
 	}
 
@@ -180,10 +207,35 @@ func (r *WorkerPoolReconciler) desiredDeployment(wp *clrkv1alpha1.WorkerPool) *a
 	}
 }
 
+func (r *WorkerPoolReconciler) desiredService(wp *clrkv1alpha1.WorkerPool) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      wp.Name + "-workers",
+			Namespace: wp.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"clrk.apoxy.dev/workerpool": wp.Name,
+				"clrk.apoxy.dev/component": "worker",
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "http",
+					Port:       8080,
+					TargetPort: intstr.FromInt32(8080),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+}
+
 func (r *WorkerPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.WorkerPool{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
 

@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -25,6 +26,8 @@ type TaskAgentReconciler struct {
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates/status,verbs=get
 
 func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ta clrkv1alpha1.TaskAgent
@@ -97,6 +100,60 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	setCondition(&ta.Status.Conditions, egressConfigured)
 
+	// Create or update SandboxState.
+	logger := log.FromContext(ctx)
+	ss := &clrkv1alpha1.SandboxState{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ta.Name,
+			Namespace: ta.Namespace,
+		},
+	}
+	var existingSS clrkv1alpha1.SandboxState
+	ssKey := types.NamespacedName{Name: ta.Name, Namespace: ta.Namespace}
+	if err := r.Get(ctx, ssKey, &existingSS); apierrors.IsNotFound(err) {
+		ss.Spec = clrkv1alpha1.SandboxStateSpec{
+			AgentRef:  ta.Name,
+			PoolRef:   ta.Spec.WorkerPoolRef,
+			Sandbox:   ta.Spec.Sandbox,
+			Resources: ta.Spec.Resources,
+		}
+		if err := ctrl.SetControllerReference(&ta, ss, r.Scheme); err != nil {
+			return ctrl.Result{}, fmt.Errorf("setting SandboxState owner reference: %w", err)
+		}
+		logger.Info("Creating SandboxState", "name", ss.Name)
+		if err := r.Create(ctx, ss); err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating SandboxState: %w", err)
+		}
+		existingSS = *ss
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting SandboxState: %w", err)
+	} else {
+		existingSS.Spec.AgentRef = ta.Name
+		existingSS.Spec.PoolRef = ta.Spec.WorkerPoolRef
+		existingSS.Spec.Sandbox = ta.Spec.Sandbox
+		existingSS.Spec.Resources = ta.Spec.Resources
+		if err := r.Update(ctx, &existingSS); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating SandboxState: %w", err)
+		}
+	}
+
+	// Set SandboxReady condition based on SandboxState status.
+	sandboxReady := metav1.Condition{
+		Type:               "SandboxReady",
+		ObservedGeneration: ta.Generation,
+		LastTransitionTime: now,
+	}
+	if existingSS.Status.ReadyWorkers >= 1 {
+		sandboxReady.Status = metav1.ConditionTrue
+		sandboxReady.Reason = "WorkersReady"
+		sandboxReady.Message = fmt.Sprintf("%d worker(s) have sandbox ready", existingSS.Status.ReadyWorkers)
+	} else {
+		sandboxReady.Status = metav1.ConditionFalse
+		sandboxReady.Reason = "NoWorkersReady"
+		sandboxReady.Message = "no workers have sandbox ready"
+	}
+	setCondition(&ta.Status.Conditions, sandboxReady)
+
 	// Accepted condition — spec is structurally valid.
 	accepted := metav1.Condition{
 		Type:               "Accepted",
@@ -121,5 +178,6 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *TaskAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.TaskAgent{}).
+		Owns(&clrkv1alpha1.SandboxState{}).
 		Complete(r)
 }
