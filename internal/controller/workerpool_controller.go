@@ -7,6 +7,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -161,8 +162,8 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		progressing.Message = "deployment rollout complete"
 	}
 
-	setCondition(&wp.Status.Conditions, available)
-	setCondition(&wp.Status.Conditions, progressing)
+	meta.SetStatusCondition(&wp.Status.Conditions, available)
+	meta.SetStatusCondition(&wp.Status.Conditions, progressing)
 
 	if err := r.Status().Update(ctx, &wp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
@@ -239,18 +240,4 @@ func (r *WorkerPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// setCondition adds or updates a condition in the slice, preserving
-// LastTransitionTime when status hasn't changed.
-func setCondition(conditions *[]metav1.Condition, cond metav1.Condition) {
-	for i, existing := range *conditions {
-		if existing.Type == cond.Type {
-			if existing.Status == cond.Status {
-				cond.LastTransitionTime = existing.LastTransitionTime
-			}
-			(*conditions)[i] = cond
-			return
-		}
-	}
-	*conditions = append(*conditions, cond)
-}
 

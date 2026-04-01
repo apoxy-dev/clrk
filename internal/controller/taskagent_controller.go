@@ -3,11 +3,18 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
+
+	"reflect"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -19,10 +26,16 @@ import (
 const (
 	defaultGatewayClassName = "envoy"
 	envoyGatewayGroup       = "gateway.envoyproxy.io"
+
+	labelAgent      = "clrk.apoxy.dev/agent"
+	labelAgentKind  = "clrk.apoxy.dev/agent-kind"
+	labelGeneration = "clrk.apoxy.dev/generation"
+	labelComponent  = "clrk.apoxy.dev/component"
+
+	maxRevisionHistory = 10
 )
 
 // TaskAgentReconciler reconciles TaskAgent objects.
-// It validates WorkerPool and EgressGateway refs and sets status conditions.
 type TaskAgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -32,12 +45,14 @@ type TaskAgentReconciler struct {
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=sandboxstates/status,verbs=get
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=agentsandboxrevisions,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=agentsandboxrevisions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch
 
 func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
 	var ta clrkv1alpha1.TaskAgent
 	if err := r.Get(ctx, req.NamespacedName, &ta); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -48,7 +63,7 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	now := metav1.Now()
 
-	// Validate WorkerPool ref.
+	// 1. Validate WorkerPool ref.
 	wpReady := metav1.Condition{
 		Type:               "WorkerPoolReady",
 		ObservedGeneration: ta.Generation,
@@ -69,9 +84,9 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		wpReady.Reason = "WorkerPoolFound"
 		wpReady.Message = fmt.Sprintf("WorkerPool %q exists", ta.Spec.WorkerPoolRef)
 	}
-	setCondition(&ta.Status.Conditions, wpReady)
+	meta.SetStatusCondition(&ta.Status.Conditions, wpReady)
 
-	// Validate egress refs.
+	// 2. Validate egress refs.
 	egressConfigured := metav1.Condition{
 		Type:               "EgressConfigured",
 		ObservedGeneration: ta.Generation,
@@ -80,7 +95,7 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if len(ta.Spec.EgressRefs) == 0 {
 		egressConfigured.Status = metav1.ConditionTrue
 		egressConfigured.Reason = "NoEgressRefs"
-		egressConfigured.Message = "no egress refs configured"
+		egressConfigured.Message = "No egress refs configured"
 	} else {
 		allFound := true
 		var missing []string
@@ -99,70 +114,65 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if allFound {
 			egressConfigured.Status = metav1.ConditionTrue
 			egressConfigured.Reason = "AllEgressRefsFound"
-			egressConfigured.Message = "all egress gateway refs resolved"
+			egressConfigured.Message = "All egress gateway refs resolved"
 		} else {
 			egressConfigured.Status = metav1.ConditionFalse
 			egressConfigured.Reason = "EgressRefsNotFound"
-			egressConfigured.Message = fmt.Sprintf("missing EgressGateway(s): %v", missing)
+			egressConfigured.Message = fmt.Sprintf("Missing EgressGateway(s): %v", missing)
 		}
 	}
-	setCondition(&ta.Status.Conditions, egressConfigured)
+	meta.SetStatusCondition(&ta.Status.Conditions, egressConfigured)
 
-	// Create or update SandboxState.
-	logger := log.FromContext(ctx)
-	ss := &clrkv1alpha1.SandboxState{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ta.Name,
-			Namespace: ta.Namespace,
-		},
-	}
-	var existingSS clrkv1alpha1.SandboxState
-	ssKey := types.NamespacedName{Name: ta.Name, Namespace: ta.Namespace}
-	if err := r.Get(ctx, ssKey, &existingSS); apierrors.IsNotFound(err) {
-		ss.Spec = clrkv1alpha1.SandboxStateSpec{
-			AgentRef:  ta.Name,
-			PoolRef:   ta.Spec.WorkerPoolRef,
-			Sandbox:   ta.Spec.Sandbox,
-			Resources: ta.Spec.Resources,
+	// 3. Create or get AgentSandboxRevision.
+	revisionName := fmt.Sprintf("%s-%05d", ta.Name, ta.Generation)
+	var rev clrkv1alpha1.AgentSandboxRevision
+	revKey := types.NamespacedName{Name: revisionName, Namespace: ta.Namespace}
+	if err := r.Get(ctx, revKey, &rev); apierrors.IsNotFound(err) {
+		rev = clrkv1alpha1.AgentSandboxRevision{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      revisionName,
+				Namespace: ta.Namespace,
+				Labels: map[string]string{
+					labelAgent:      ta.Name,
+					labelAgentKind:  "TaskAgent",
+					labelGeneration: strconv.FormatInt(ta.Generation, 10),
+				},
+				Annotations: ta.Spec.Template.Annotations,
+			},
+			Spec: ta.Spec.Template.Spec,
 		}
-		if err := ctrl.SetControllerReference(&ta, ss, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("setting SandboxState owner reference: %w", err)
+		if err := ctrl.SetControllerReference(&ta, &rev, r.Scheme); err != nil {
+			return ctrl.Result{}, fmt.Errorf("setting AgentSandboxRevision owner reference: %w", err)
 		}
-		logger.Info("Creating SandboxState", "name", ss.Name)
-		if err := r.Create(ctx, ss); err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating SandboxState: %w", err)
+		logger.Info("Creating AgentSandboxRevision", "name", revisionName)
+		if err := r.Create(ctx, &rev); err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating AgentSandboxRevision: %w", err)
 		}
-		existingSS = *ss
 	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting SandboxState: %w", err)
-	} else {
-		existingSS.Spec.AgentRef = ta.Name
-		existingSS.Spec.PoolRef = ta.Spec.WorkerPoolRef
-		existingSS.Spec.Sandbox = ta.Spec.Sandbox
-		existingSS.Spec.Resources = ta.Spec.Resources
-		if err := r.Update(ctx, &existingSS); err != nil {
-			return ctrl.Result{}, fmt.Errorf("updating SandboxState: %w", err)
-		}
+		return ctrl.Result{}, fmt.Errorf("getting AgentSandboxRevision: %w", err)
 	}
+	ta.Status.LatestCreatedRevisionName = revisionName
 
-	// Set SandboxReady condition based on SandboxState status.
-	sandboxReady := metav1.Condition{
-		Type:               "SandboxReady",
+	// 4. Set RevisionReady condition and update LatestReadyRevisionName.
+	revisionReady := metav1.Condition{
+		Type:               "RevisionReady",
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
 	}
-	if existingSS.Status.ReadyWorkers >= 1 {
-		sandboxReady.Status = metav1.ConditionTrue
-		sandboxReady.Reason = "WorkersReady"
-		sandboxReady.Message = fmt.Sprintf("%d worker(s) have sandbox ready", existingSS.Status.ReadyWorkers)
+	if rev.Status.ReadyWorkers >= 1 {
+		ta.Status.LatestReadyRevisionName = revisionName
+		revisionReady.Status = metav1.ConditionTrue
+		revisionReady.Reason = "RevisionReady"
+		revisionReady.Message = fmt.Sprintf("Revision %q has %d ready worker(s)", revisionName, rev.Status.ReadyWorkers)
 	} else {
-		sandboxReady.Status = metav1.ConditionFalse
-		sandboxReady.Reason = "NoWorkersReady"
-		sandboxReady.Message = "no workers have sandbox ready"
+		// Keep previous latestReadyRevisionName if the new revision isn't ready yet.
+		revisionReady.Status = metav1.ConditionFalse
+		revisionReady.Reason = "NoWorkersReady"
+		revisionReady.Message = fmt.Sprintf("Revision %q has no ready workers", revisionName)
 	}
-	setCondition(&ta.Status.Conditions, sandboxReady)
+	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
 
-	// Create or update Gateway.
+	// 5. Create or update Gateway.
 	desiredGW := desiredGateway(&ta)
 	if err := ctrl.SetControllerReference(&ta, desiredGW, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting Gateway owner reference: %w", err)
@@ -177,14 +187,14 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		existingGW = *desiredGW
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting Gateway: %w", err)
-	} else {
+	} else if !reflect.DeepEqual(existingGW.Spec, desiredGW.Spec) {
 		existingGW.Spec = desiredGW.Spec
 		if err := r.Update(ctx, &existingGW); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating Gateway: %w", err)
 		}
 	}
 
-	// Set GatewayReady condition based on Gateway status.
+	// Set GatewayReady condition.
 	gatewayReady := metav1.Condition{
 		Type:               "GatewayReady",
 		ObservedGeneration: ta.Generation,
@@ -201,18 +211,14 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		gatewayReady.Status = metav1.ConditionTrue
 		gatewayReady.Reason = "GatewayProgrammed"
 		gatewayReady.Message = "Gateway has Programmed=True"
-	} else if existingGW.CreationTimestamp.IsZero() {
-		gatewayReady.Status = metav1.ConditionFalse
-		gatewayReady.Reason = "GatewayCreated"
-		gatewayReady.Message = "Gateway created, not yet provisioned"
 	} else {
 		gatewayReady.Status = metav1.ConditionFalse
 		gatewayReady.Reason = "GatewayNotProgrammed"
 		gatewayReady.Message = "Gateway exists but Programmed != True"
 	}
-	setCondition(&ta.Status.Conditions, gatewayReady)
+	meta.SetStatusCondition(&ta.Status.Conditions, gatewayReady)
 
-	// Create or update HTTPRoute.
+	// 6. Create or update HTTPRoute.
 	desiredHR := desiredHTTPRoute(&ta)
 	if err := ctrl.SetControllerReference(&ta, desiredHR, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting HTTPRoute owner reference: %w", err)
@@ -226,27 +232,32 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting HTTPRoute: %w", err)
-	} else {
+	} else if !reflect.DeepEqual(existingHR.Spec, desiredHR.Spec) {
 		existingHR.Spec = desiredHR.Spec
 		if err := r.Update(ctx, &existingHR); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating HTTPRoute: %w", err)
 		}
 	}
 
-	// Accepted condition — spec is structurally valid.
+	// 7. Accepted condition.
 	accepted := metav1.Condition{
 		Type:               "Accepted",
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
 		Reason:             "SpecValid",
-		Message:            "spec is structurally valid",
+		Message:            "Spec is structurally valid",
 	}
-	setCondition(&ta.Status.Conditions, accepted)
+	meta.SetStatusCondition(&ta.Status.Conditions, accepted)
 
-	// TODO: CronJob management for spec.schedule will be added once the
-	// ingress/execution path is implemented.
+	// 8. Revision GC.
+	if ta.Generation > maxRevisionHistory {
+		if err := r.gcRevisions(ctx, &ta); err != nil {
+			logger.Error(err, "Revision GC failed")
+		}
+	}
 
+	ta.Status.ObservedGeneration = ta.Generation
 	if err := r.Status().Update(ctx, &ta); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
@@ -254,10 +265,56 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, nil
 }
 
+// gcRevisions deletes old AgentSandboxRevisions beyond the history limit,
+// keeping the latest created and latest ready revisions.
+func (r *TaskAgentReconciler) gcRevisions(ctx context.Context, ta *clrkv1alpha1.TaskAgent) error {
+	var revList clrkv1alpha1.AgentSandboxRevisionList
+	if err := r.List(ctx, &revList, &client.ListOptions{
+		Namespace:     ta.Namespace,
+		LabelSelector: labels.SelectorFromSet(map[string]string{labelAgent: ta.Name}),
+	}); err != nil {
+		return fmt.Errorf("listing revisions: %w", err)
+	}
+
+	keep := map[string]bool{
+		ta.Status.LatestCreatedRevisionName: true,
+		ta.Status.LatestReadyRevisionName:   true,
+	}
+
+	// Sort oldest first by creation timestamp.
+	sort.Slice(revList.Items, func(i, j int) bool {
+		return revList.Items[i].CreationTimestamp.Before(&revList.Items[j].CreationTimestamp)
+	})
+
+	// Delete oldest revisions beyond the history limit that aren't in the keep set.
+	excess := len(revList.Items) - maxRevisionHistory
+	if excess <= 0 {
+		return nil
+	}
+
+	logger := log.FromContext(ctx)
+	deleted := 0
+	for i := range revList.Items {
+		if deleted >= excess {
+			break
+		}
+		name := revList.Items[i].Name
+		if keep[name] {
+			continue
+		}
+		logger.Info("Deleting old AgentSandboxRevision", "name", name)
+		if err := r.Delete(ctx, &revList.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting revision %q: %w", name, err)
+		}
+		deleted++
+	}
+	return nil
+}
+
 func (r *TaskAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.TaskAgent{}).
-		Owns(&clrkv1alpha1.SandboxState{}).
+		Owns(&clrkv1alpha1.AgentSandboxRevision{}).
 		Owns(&gwapiv1.Gateway{}).
 		Owns(&gwapiv1.HTTPRoute{}).
 		Complete(r)
@@ -269,8 +326,8 @@ func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
 			Name:      ta.Name,
 			Namespace: ta.Namespace,
 			Labels: map[string]string{
-				"clrk.apoxy.dev/taskagent":  ta.Name,
-				"clrk.apoxy.dev/component": "ingress",
+				labelAgent:  ta.Name,
+				labelComponent: "ingress",
 			},
 		},
 		Spec: gwapiv1.GatewaySpec{
@@ -302,8 +359,8 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 			Name:      ta.Name,
 			Namespace: ta.Namespace,
 			Labels: map[string]string{
-				"clrk.apoxy.dev/taskagent":  ta.Name,
-				"clrk.apoxy.dev/component": "ingress",
+				labelAgent:  ta.Name,
+				labelComponent: "ingress",
 			},
 		},
 		Spec: gwapiv1.HTTPRouteSpec{
@@ -320,7 +377,7 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 						{
 							Path: &gwapiv1.HTTPPathMatch{
 								Type:  &pathPrefix,
-								Value: ptrTo("/"),
+								Value: ptr.To("/"),
 							},
 						},
 					},
@@ -351,6 +408,4 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 	}
 }
 
-func ptrTo(s string) *string {
-	return &s
-}
+

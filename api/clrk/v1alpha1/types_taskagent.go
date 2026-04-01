@@ -12,8 +12,9 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ta
-// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.sandbox.image`
+// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.template.spec.image`
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.workerPoolRef`
+// +kubebuilder:printcolumn:name="Latest Ready",type=string,JSONPath=`.status.latestReadyRevisionName`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeExecutions`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type TaskAgent struct {
@@ -24,8 +25,9 @@ type TaskAgent struct {
 }
 
 type TaskAgentSpec struct {
-	// Sandbox defines the OCI image and process configuration.
-	Sandbox AgentSandbox `json:"sandbox"`
+	// Template defines the sandbox revision template. Changes to this
+	// field trigger creation of a new AgentSandboxRevision.
+	Template AgentSandboxRevisionTemplate `json:"template"`
 
 	// WorkerPoolRef references a WorkerPool resource by name in the same namespace.
 	WorkerPoolRef string `json:"workerPoolRef"`
@@ -77,6 +79,15 @@ type TaskAgentStatus struct {
 	// ActiveExecutions is the number of currently running executions.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions,omitempty"`
+	// LatestCreatedRevisionName is the name of the last created AgentSandboxRevision.
+	// +optional
+	LatestCreatedRevisionName string `json:"latestCreatedRevisionName,omitempty"`
+	// LatestReadyRevisionName is the name of the last revision that became ready.
+	// +optional
+	LatestReadyRevisionName string `json:"latestReadyRevisionName,omitempty"`
+	// ObservedGeneration is the generation most recently observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true
