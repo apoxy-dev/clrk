@@ -11,6 +11,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/worker"
 )
 
 var scheme = runtime.NewScheme()
@@ -35,17 +36,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: Register the worker runtime as a manager.Runnable once
-	// internal/worker is implemented.
-	//
-	// if err := mgr.Add(&worker.Runtime{
-	// 	Client: mgr.GetClient(),
-	// }); err != nil {
-	// 	log.Error(err, "Unable to add worker runtime")
-	// 	os.Exit(1)
-	// }
-	//
-	// import "github.com/apoxy-dev/clrk/internal/worker"
+	poolName := os.Getenv("CLRK_POOL_NAME")
+	podName := os.Getenv("POD_NAME")
+	namespace := os.Getenv("POD_NAMESPACE")
+
+	if err := mgr.Add(&worker.Runtime{
+		Client:    mgr.GetClient(),
+		Manager:   mgr,
+		PoolName:  poolName,
+		PodName:   podName,
+		Namespace: namespace,
+	}); err != nil {
+		log.Error(err, "Unable to add worker runtime")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "Unable to set up health check")
