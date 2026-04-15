@@ -4,6 +4,7 @@ package worker
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"sync"
 
 	ocispecv1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sync/singleflight"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/file"
@@ -32,6 +34,7 @@ type ImageStore struct {
 
 	mu     sync.Mutex
 	images map[string]*ImageInfo // imageRef → info
+	flight singleflight.Group    // Deduplicates concurrent pulls for the same image.
 }
 
 // ImageInfo holds metadata for a pulled image.
@@ -51,6 +54,7 @@ func NewImageStore(baseDir string) *ImageStore {
 
 // EnsureImage pulls and extracts the OCI image if not cached.
 // Returns image info including the path to the extracted rootfs directory.
+// Concurrent calls for the same imageRef are deduplicated via singleflight.
 func (s *ImageStore) EnsureImage(ctx context.Context, imageRef string) (*ImageInfo, error) {
 	s.mu.Lock()
 	if info, ok := s.images[imageRef]; ok {
@@ -59,6 +63,27 @@ func (s *ImageStore) EnsureImage(ctx context.Context, imageRef string) (*ImageIn
 	}
 	s.mu.Unlock()
 
+	// Deduplicate concurrent pulls for the same image.
+	v, err, _ := s.flight.Do(imageRef, func() (interface{}, error) {
+		// Re-check cache inside singleflight to handle the case where a
+		// previous flight completed between our cache check and entering Do.
+		s.mu.Lock()
+		if info, ok := s.images[imageRef]; ok {
+			s.mu.Unlock()
+			return info, nil
+		}
+		s.mu.Unlock()
+
+		return s.pullAndExtract(ctx, imageRef)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*ImageInfo), nil
+}
+
+// pullAndExtract does the actual OCI pull and layer extraction.
+func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*ImageInfo, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("image", imageRef)
 	log.Info("Pulling OCI image")
 
@@ -150,17 +175,19 @@ func (s *ImageStore) EnsureImage(ctx context.Context, imageRef string) (*ImageIn
 // extractLayer extracts a tar (optionally gzipped) layer into the rootfs directory,
 // handling OCI whiteout files for layer squashing.
 func extractLayer(rootFS string, data []byte, mediaType string) error {
-	var r io.Reader = strings.NewReader(string(data))
+	var r io.Reader = bytes.NewReader(data)
 
 	// Handle gzip-compressed layers.
 	if strings.Contains(mediaType, "gzip") {
-		gr, err := gzip.NewReader(strings.NewReader(string(data)))
+		gr, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return fmt.Errorf("creating gzip reader: %w", err)
 		}
 		defer gr.Close()
 		r = gr
 	}
+
+	cleanRoot := filepath.Clean(rootFS)
 
 	tr := tar.NewReader(r)
 	for {
@@ -178,6 +205,9 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 		if base == ".wh..wh..opq" {
 			// Opaque whiteout: remove all children of this directory.
 			target := filepath.Join(rootFS, dir)
+			if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
+				continue
+			}
 			entries, _ := os.ReadDir(target)
 			for _, e := range entries {
 				os.RemoveAll(filepath.Join(target, e.Name()))
@@ -187,13 +217,16 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 		if strings.HasPrefix(base, ".wh.") {
 			// File whiteout: remove the named file.
 			target := filepath.Join(rootFS, dir, strings.TrimPrefix(base, ".wh."))
+			if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
+				continue
+			}
 			os.RemoveAll(target)
 			continue
 		}
 
 		target := filepath.Join(rootFS, hdr.Name)
 		// Guard against path traversal.
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(rootFS)) {
+		if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
 			continue
 		}
 

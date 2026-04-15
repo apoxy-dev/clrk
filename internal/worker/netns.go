@@ -35,19 +35,25 @@ type NetNSConfig struct {
 // ...etc. Wraps into the third octet as needed.
 var ipCounter atomic.Uint64
 
-func allocateIPs() (gw netip.Addr, container netip.Addr) {
+// maxSubnets is the number of /30 subnets available in 10.200.0.0/16.
+const maxSubnets = 16384
+
+func allocateIPs() (gw netip.Addr, container netip.Addr, err error) {
 	n := uint32(ipCounter.Add(1))
+	if n > maxSubnets {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("IP pool exhausted: %d exceeds %d available /30 subnets", n, maxSubnets)
+	}
 	offset := n * 4 // each /30 consumes 4 addresses
 	prefix := netip.AddrFrom4([4]byte{10, 200, 0, 0})
 	base := prefix.As4()
 	// Add offset to the 16-bit host part (octets 2-3 of the host portion).
-	hostBits := uint16(base[2])<<8 | uint16(base[3])
-	hostBits += uint16(offset)
+	hostBits := uint32(base[2])<<8 | uint32(base[3])
+	hostBits += offset
 	base[2] = byte(hostBits >> 8)
 	base[3] = byte(hostBits)
 	gw = netip.AddrFrom4([4]byte{base[0], base[1], base[2], base[3] + 1})
 	container = netip.AddrFrom4([4]byte{base[0], base[1], base[2], base[3] + 2})
-	return gw, container
+	return gw, container, nil
 }
 
 // SetupNetNS creates a named network namespace with a TAP device inside it.
@@ -59,7 +65,10 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 	nsPath := fmt.Sprintf("/run/netns/%s", nsName)
 	tapName := "tap0"
 
-	gw, ctrIP := allocateIPs()
+	gw, ctrIP, err := allocateIPs()
+	if err != nil {
+		return nil, fmt.Errorf("allocating IPs: %w", err)
+	}
 	log.Info("Setting up network namespace", "nsPath", nsPath, "containerIP", ctrIP, "gatewayIP", gw)
 
 	// Save the current network namespace to restore later.

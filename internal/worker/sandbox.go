@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -77,15 +76,9 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 		return nil, fmt.Errorf("ensuring image: %w", err)
 	}
 
-	// 2. Create per-sandbox rootfs directory (read-only bind of shared image rootfs).
-	// For MVP, we symlink to the shared rootfs. Upgrade to overlayfs for writable layers if needed.
-	sandboxRootFS := filepath.Join(m.rootDir, string(id))
-	if err := os.MkdirAll(sandboxRootFS, 0755); err != nil {
-		return nil, fmt.Errorf("creating sandbox rootfs dir: %w", err)
-	}
-	// Copy the image rootfs path — libcontainer will use this as the container rootfs.
-	// Since rootfs is read-only, multiple sandboxes can share the same extracted image.
-	sandboxRootFS = imgInfo.RootFS
+	// Use the shared image rootfs directly. Multiple sandboxes share the same
+	// extracted image since the rootfs is mounted read-only by libcontainer.
+	sandboxRootFS := imgInfo.RootFS
 
 	// 3. Setup per-run netns + TAP.
 	nsCfg, err := SetupNetNS(ctx, id)
@@ -144,13 +137,16 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	}
 
 	// Build process args from spec, falling back to image entrypoint.
-	args := sb.Sandbox.Command
-	if len(args) == 0 {
+	// Copy the command slice to avoid aliasing the spec's backing array.
+	var args []string
+	if len(sb.Sandbox.Command) > 0 {
+		args = append([]string(nil), sb.Sandbox.Command...)
+	} else {
 		imgInfo, err := m.imageStore.EnsureImage(ctx, sb.Sandbox.Image)
 		if err != nil {
 			return fmt.Errorf("getting image info: %w", err)
 		}
-		args = imgInfo.Entrypoint
+		args = append([]string(nil), imgInfo.Entrypoint...)
 	}
 	args = append(args, sb.Sandbox.Args...)
 
