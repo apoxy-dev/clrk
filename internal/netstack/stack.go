@@ -137,9 +137,11 @@ func (s *SandboxStack) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
-	s.pump.Close()
+	// Remove NIC and close endpoint first to deregister the WriteNotify
+	// callback before closing the pump's wakeup channel.
 	s.ipstack.RemoveNIC(s.nicID)
 	s.ep.Close()
+	s.pump.Close()
 	return nil
 }
 

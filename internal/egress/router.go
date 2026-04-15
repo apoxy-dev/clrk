@@ -6,6 +6,7 @@ package egress
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync/atomic"
@@ -63,11 +64,33 @@ func (r *Router) Route(_ context.Context, dst netip.AddrPort, proto clrkv1alpha1
 	return &RouteResult{Action: ActionPassthrough}
 }
 
-// DialContext implements the netstack.Dialer interface. It dials the upstream
-// directly (passthrough).
+// DialContext implements the netstack.Dialer interface. It consults the routing
+// table and applies the egress policy before dialing.
 func (r *Router) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	var d net.Dialer
-	return d.DialContext(ctx, network, addr)
+	dst, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing destination address: %w", err)
+	}
+
+	var proto clrkv1alpha1.L4Protocol
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		proto = clrkv1alpha1.L4ProtocolTCP
+	case "udp", "udp4", "udp6":
+		proto = clrkv1alpha1.L4ProtocolUDP
+	}
+
+	result := r.Route(ctx, dst, proto)
+	switch result.Action {
+	case ActionDeny:
+		return nil, fmt.Errorf("connection to %s denied by egress policy", addr)
+	case ActionBackendRef:
+		var d net.Dialer
+		return d.DialContext(ctx, network, result.BackendAddr)
+	default:
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
 }
 
 // Rebuild atomically swaps the route table with one compiled from the

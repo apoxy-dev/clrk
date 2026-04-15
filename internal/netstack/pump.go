@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -41,6 +42,8 @@ type PacketPump struct {
 	ep    *channel.Endpoint
 	mtu   uint32
 
+	closed atomic.Bool
+
 	// Coalesced wakeup channel: the endpoint notifies us when it has outbound
 	// packets. We batch-drain in the outbound goroutine.
 	wakeOutbound chan struct{}
@@ -61,6 +64,9 @@ func NewPacketPump(tapFD *os.File, ep *channel.Endpoint, mtu uint32) *PacketPump
 // WriteNotify implements channel.Notification. Called by gVisor when the
 // endpoint has an outbound packet ready.
 func (p *PacketPump) WriteNotify() {
+	if p.closed.Load() {
+		return
+	}
 	select {
 	case p.wakeOutbound <- struct{}{}:
 	default:
@@ -84,6 +90,7 @@ func (p *PacketPump) Run() error {
 
 // Close shuts down the pump by closing the wakeup channel.
 func (p *PacketPump) Close() {
+	p.closed.Store(true)
 	close(p.wakeOutbound)
 }
 
@@ -165,6 +172,7 @@ func (p *PacketPump) outbound() error {
 
 			ipBytes := view.AsSlice()
 			if len(ipBytes) == 0 {
+				view.Release()
 				continue
 			}
 
@@ -177,6 +185,7 @@ func (p *PacketPump) outbound() error {
 				ethertype = uint16(header.IPv6ProtocolNumber)
 			default:
 				slog.Debug("Outbound packet with unknown IP version", slog.Int("version", int(ipBytes[0]>>4)))
+				view.Release()
 				continue
 			}
 
@@ -186,6 +195,8 @@ func (p *PacketPump) outbound() error {
 			frame := make([]byte, 0, len(prefix)+len(ipBytes))
 			frame = append(frame, prefix...)
 			frame = append(frame, ipBytes...)
+
+			view.Release()
 
 			if _, err := p.tapFD.Write(frame); err != nil {
 				slog.Warn("Error writing to TAP", slog.Any("error", err))

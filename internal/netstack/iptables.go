@@ -25,9 +25,10 @@ func (t *snatTarget) Action(
 	_ stack.AddressableEndpoint,
 ) (stack.RuleVerdict, int) {
 	if t.addr.Len() == 0 {
-		return stack.RuleDrop, 0
+		// No gateway address configured for this protocol; pass through
+		// without SNAT rather than dropping.
+		return stack.RuleAccept, 0
 	}
-	t.SNATTarget.Addr = t.addr
 	return t.SNATTarget.Action(pkt, hook, r, nil)
 }
 
@@ -38,21 +39,30 @@ type IPTables struct {
 }
 
 func newIPTables(v4Addr, v6Addr tcpip.Address) *IPTables {
+	v4snat := &snatTarget{
+		SNATTarget: stack.SNATTarget{
+			NetworkProtocol: header.IPv4ProtocolNumber,
+			ChangeAddress:   true,
+		},
+		addr: v4Addr,
+	}
+	// Set Addr at construction time to avoid a data race in Action().
+	v4snat.SNATTarget.Addr = v4Addr
+
+	v6snat := &snatTarget{
+		SNATTarget: stack.SNATTarget{
+			NetworkProtocol: header.IPv6ProtocolNumber,
+			ChangeAddress:   true,
+		},
+		addr: v6Addr,
+	}
+	if v6Addr.Len() > 0 {
+		v6snat.SNATTarget.Addr = v6Addr
+	}
+
 	return &IPTables{
-		snatV4: &snatTarget{
-			SNATTarget: stack.SNATTarget{
-				NetworkProtocol: header.IPv4ProtocolNumber,
-				ChangeAddress:   true,
-			},
-			addr: v4Addr,
-		},
-		snatV6: &snatTarget{
-			SNATTarget: stack.SNATTarget{
-				NetworkProtocol: header.IPv6ProtocolNumber,
-				ChangeAddress:   true,
-			},
-			addr: v6Addr,
-		},
+		snatV4: v4snat,
+		snatV6: v6snat,
 	}
 }
 

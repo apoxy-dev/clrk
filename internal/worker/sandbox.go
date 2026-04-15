@@ -191,9 +191,11 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 
 	// Start the per-sandbox netstack pump in a background goroutine.
 	// It runs until the sandbox is deleted and its stack is closed.
+	// Use a background context so the netstack outlives the caller's
+	// request-scoped context (e.g. reconciler).
 	if stack, ok := sb.Stack.(*netstack.SandboxStack); ok {
 		go func() {
-			if err := stack.Start(ctx, m.dialer); err != nil {
+			if err := stack.Start(context.Background(), m.dialer); err != nil {
 				log.Error(err, "Netstack pump exited")
 			}
 		}()
