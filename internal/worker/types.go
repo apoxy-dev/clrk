@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"io"
 	"os"
 	"time"
 
@@ -39,6 +40,7 @@ type SandboxInstance struct {
 	TAPName   string   // TAP device name in the netns.
 	TAPFD     *os.File // Host-side TAP fd for netstack (APO-536).
 	RootFS    string   // Extracted rootfs path.
+	Stack     io.Closer // Per-sandbox netstack (*netstack.SandboxStack on linux).
 
 	Sandbox   clrkv1alpha1.AgentSandbox
 	Resources clrkv1alpha1.ExecutionResources

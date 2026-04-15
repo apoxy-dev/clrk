@@ -7,6 +7,9 @@ import (
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egress"
 )
 
 const (
@@ -33,9 +36,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}
 
+	// Initialize egress router.
+	router := egress.NewRouter(clrkv1alpha1.EgressPolicyAllowAll)
+
 	// Initialize components.
 	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, imageStore)
+	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, imageStore, router)
 
 	// Clean up orphaned containers from previous incarnation.
 	if err := sandboxMgr.Cleanup(ctx); err != nil {
@@ -52,6 +58,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	if err := watcher.setupWithManager(r.Manager); err != nil {
 		return fmt.Errorf("setting up sandbox watcher: %w", err)
+	}
+
+	// Set up egress CRD watcher to rebuild routing table on changes.
+	egressWatcher := egress.NewConfigWatcher(r.Client, router, r.Namespace)
+	if err := egressWatcher.SetupWithManager(r.Manager); err != nil {
+		return fmt.Errorf("setting up egress config watcher: %w", err)
 	}
 
 	// Start heartbeat goroutine.

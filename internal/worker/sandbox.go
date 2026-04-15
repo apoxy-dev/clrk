@@ -25,6 +25,7 @@ import (
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/netstack"
 )
 
 func init() {
@@ -40,17 +41,19 @@ type SandboxManager struct {
 	stateDir   string // libcontainer state dir (e.g. /run/clrk/state).
 	rootDir    string // Per-sandbox rootfs overlay dir (e.g. /run/clrk/rootfs).
 	imageStore *ImageStore
+	dialer     netstack.Dialer // Egress dialer for sandbox netstacks.
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
 }
 
 // NewSandboxManager creates a new SandboxManager.
-func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore) *SandboxManager {
+func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
 	return &SandboxManager{
 		stateDir:   stateDir,
 		rootDir:    rootDir,
 		imageStore: imageStore,
+		dialer:     dialer,
 		sandboxes:  make(map[SandboxID]*SandboxInstance),
 	}
 }
@@ -86,18 +89,26 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 		return nil, fmt.Errorf("setting up netns: %w", err)
 	}
 
-	// 4. Build libcontainer config.
+	// 4. Create per-sandbox netstack.
+	stack, err := netstack.NewSandboxStack(nsCfg.TAPFD, nsCfg.GW)
+	if err != nil {
+		TeardownNetNS(nsCfg)
+		return nil, fmt.Errorf("creating sandbox netstack: %w", err)
+	}
+
+	// 5. Build libcontainer config.
 	cfg := baseConfig(string(id), sandboxRootFS, spec)
 
-	// 5. Create container (does NOT start it).
+	// 6. Create container (does NOT start it).
 	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)
 	if err != nil {
+		stack.Close()
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("creating container: %w", err)
 	}
 	_ = ctr // Container is persisted in stateDir; we Load() it later for Start.
 
-	// 6. Track instance.
+	// 7. Track instance.
 	sb := &SandboxInstance{
 		ID:        id,
 		AgentRef:  spec.AgentRef,
@@ -106,6 +117,7 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 		NetNS:     nsCfg.NSPath,
 		TAPName:   nsCfg.TAPName,
 		TAPFD:     nsCfg.TAPFD,
+		Stack:     stack,
 		Sandbox:   spec.Sandbox,
 		Resources: spec.Resources,
 		CreatedAt: time.Now(),
@@ -176,6 +188,16 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	}
 
 	log.Info("Starting sandbox", "args", args)
+
+	// Start the per-sandbox netstack pump in a background goroutine.
+	// It runs until the sandbox is deleted and its stack is closed.
+	if stack, ok := sb.Stack.(*netstack.SandboxStack); ok {
+		go func() {
+			if err := stack.Start(ctx, m.dialer); err != nil {
+				log.Error(err, "Netstack pump exited")
+			}
+		}()
+	}
 
 	if err := ctr.Run(p); err != nil {
 		ctr.Destroy()
@@ -255,6 +277,13 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 		return ErrNotFound
 	}
 	m.mu.Unlock()
+
+	// Close the netstack before destroying the container and netns.
+	if sb.Stack != nil {
+		if err := sb.Stack.Close(); err != nil {
+			log.Error(err, "Failed to close netstack")
+		}
+	}
 
 	ctr, err := libcontainer.Load(m.stateDir, string(id))
 	if err != nil && err != libcontainer.ErrNotExist {
