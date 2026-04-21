@@ -90,6 +90,8 @@ type AIProviderRouteStatus struct {
 // AIProviderRoute matches outbound requests to AI provider APIs and
 // applies provider-aware policy.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=aipr
@@ -101,6 +103,7 @@ type AIProviderRoute struct {
 	Status            AIProviderRouteStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // AIProviderRouteList contains a list of AIProviderRoute resources.
@@ -108,8 +111,4 @@ type AIProviderRouteList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []AIProviderRoute `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&AIProviderRoute{}, &AIProviderRouteList{})
 }

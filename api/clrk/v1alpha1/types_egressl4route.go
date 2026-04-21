@@ -93,6 +93,8 @@ type EgressL4RouteStatus struct {
 // EgressL4Route provides destination CIDR, port, and protocol matching
 // for raw L4 egress traffic.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=el4r
@@ -104,6 +106,7 @@ type EgressL4Route struct {
 	Status            EgressL4RouteStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // EgressL4RouteList contains a list of EgressL4Route resources.
@@ -111,8 +114,4 @@ type EgressL4RouteList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []EgressL4Route `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&EgressL4Route{}, &EgressL4RouteList{})
 }

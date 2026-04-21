@@ -53,6 +53,8 @@ type CredentialInjectionSpec struct {
 	ProviderAuth *ProviderAuthConfig `json:"providerAuth,omitempty"`
 }
 
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=cip
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.target`
@@ -63,6 +65,7 @@ type CredentialInjectionPolicy struct {
 	Spec              CredentialInjectionSpec `json:"spec"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // CredentialInjectionPolicyList contains a list of CredentialInjectionPolicy resources.
@@ -95,6 +98,8 @@ type RateLimitSpec struct {
 	Scope RateLimitScope `json:"scope,omitempty"`
 }
 
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=rlp
 // +kubebuilder:printcolumn:name="Requests",type=integer,JSONPath=`.spec.requests`
@@ -107,6 +112,7 @@ type RateLimitPolicy struct {
 	Spec              RateLimitSpec `json:"spec"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // RateLimitPolicyList contains a list of RateLimitPolicy resources.
@@ -128,6 +134,8 @@ type LoggingSpec struct {
 	SinkRef         *string  `json:"sinkRef,omitempty"`
 }
 
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=lp
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -137,6 +145,7 @@ type LoggingPolicy struct {
 	Spec              LoggingSpec `json:"spec"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // LoggingPolicyList contains a list of LoggingPolicy resources.
@@ -170,6 +179,8 @@ type EgressDenyPolicySpec struct {
 // EgressDenyPolicy attaches to any route via targetRef to invert it from
 // "allow" to "deny".
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=edp
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -179,6 +190,7 @@ type EgressDenyPolicy struct {
 	Spec              EgressDenyPolicySpec `json:"spec"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // EgressDenyPolicyList contains a list of EgressDenyPolicy resources.
@@ -186,13 +198,4 @@ type EgressDenyPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []EgressDenyPolicy `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(
-		&CredentialInjectionPolicy{}, &CredentialInjectionPolicyList{},
-		&RateLimitPolicy{}, &RateLimitPolicyList{},
-		&LoggingPolicy{}, &LoggingPolicyList{},
-		&EgressDenyPolicy{}, &EgressDenyPolicyList{},
-	)
 }
