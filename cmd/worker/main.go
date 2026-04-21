@@ -11,6 +11,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/config"
 	"github.com/apoxy-dev/clrk/internal/worker"
 )
 
@@ -25,7 +26,13 @@ func main() {
 	ctrl.SetLogger(zap.New())
 	log := ctrl.Log.WithName("worker")
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restCfg, err := config.FromEnv()
+	if err != nil {
+		log.Error(err, "Unable to build rest.Config")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: ":8082"},
 		HealthProbeBindAddress: ":8083",

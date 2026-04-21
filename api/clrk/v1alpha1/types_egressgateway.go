@@ -104,6 +104,8 @@ type EgressGatewayStatus struct {
 // EgressGateway defines a transparent egress proxy that intercepts outbound
 // traffic from agent sandboxes.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=egw
@@ -117,6 +119,7 @@ type EgressGateway struct {
 	Status            EgressGatewayStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // EgressGatewayList contains a list of EgressGateway resources.
@@ -124,8 +127,4 @@ type EgressGatewayList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []EgressGateway `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&EgressGateway{}, &EgressGatewayList{})
 }

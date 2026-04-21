@@ -9,6 +9,8 @@ import (
 // Teams own their pools with independent sizing, node placement, and runtime
 // configuration. Agents reference WorkerPool by name in the same namespace.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=wp
@@ -78,6 +80,7 @@ type WorkerPoolCapacity struct {
 	AvailableExecutions int32 `json:"availableExecutions,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // WorkerPoolList contains a list of WorkerPool resources.
@@ -85,8 +88,4 @@ type WorkerPoolList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []WorkerPool `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&WorkerPool{}, &WorkerPoolList{})
 }

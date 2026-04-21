@@ -58,6 +58,8 @@ type WorkerSandboxStatus struct {
 // configuration. Created automatically when a TaskAgent or DaemonAgent
 // template changes. Named "{agent-name}-{5-digit-generation}".
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=asr
@@ -72,6 +74,7 @@ type AgentSandboxRevision struct {
 	Status            AgentSandboxRevisionStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // AgentSandboxRevisionList contains a list of AgentSandboxRevision resources.
@@ -79,8 +82,4 @@ type AgentSandboxRevisionList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []AgentSandboxRevision `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&AgentSandboxRevision{}, &AgentSandboxRevisionList{})
 }

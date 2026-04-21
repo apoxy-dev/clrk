@@ -1,76 +1,105 @@
 package main
 
 import (
+	"flag"
+	"log/slog"
 	"os"
+	"path/filepath"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/pkg/apiserver"
 )
 
-var scheme = runtime.NewScheme()
-
-func init() {
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = clrkv1alpha1.AddToScheme(scheme)
-	_ = gwapiv1.AddToScheme(scheme)
-}
-
 func main() {
-	ctrl.SetLogger(zap.New())
+	var (
+		dbPath         = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
+		bindAddr       = flag.String("bind-addr", "0.0.0.0", "Apiserver bind address.")
+		bindPort       = flag.Int("bind-port", 8443, "Apiserver bind port.")
+		certDir        = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
+		leaderElection = flag.Bool("leader-election", false, "Enable leader election.")
+		leaderID       = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
+		leaderNS       = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
+		metricsAddr    = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
+		healthAddr     = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
+	)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("controller-manager")
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: ":8080"},
-		HealthProbeBindAddress: ":8081",
-		LeaderElection:         true,
-		LeaderElectionID:       "clrk-controller-manager",
-	})
-	if err != nil {
-		log.Error(err, "Unable to create manager")
+	mgr := apiserver.New()
+	ctx := ctrl.SetupSignalHandler()
+
+	opts := []apiserver.Option{
+		apiserver.WithSQLitePath(*dbPath),
+		apiserver.WithBindAddress(*bindAddr),
+		apiserver.WithBindPort(*bindPort),
+		apiserver.WithMetricsBindAddress(*metricsAddr),
+		apiserver.WithHealthBindAddress(*healthAddr),
+		apiserver.WithResources(
+			&clrkv1alpha1.TaskAgent{},
+			&clrkv1alpha1.DaemonAgent{},
+			&clrkv1alpha1.WorkerPool{},
+			&clrkv1alpha1.AgentSandboxRevision{},
+			&clrkv1alpha1.EgressGateway{},
+			&clrkv1alpha1.EgressL4Route{},
+			&clrkv1alpha1.MCPRoute{},
+			&clrkv1alpha1.AIProviderRoute{},
+			&clrkv1alpha1.CredentialInjectionPolicy{},
+			&clrkv1alpha1.RateLimitPolicy{},
+			&clrkv1alpha1.LoggingPolicy{},
+			&clrkv1alpha1.EgressDenyPolicy{},
+		),
+	}
+	if *certDir != "" {
+		opts = append(opts, apiserver.WithCertDir(*certDir))
+	}
+	if *leaderElection {
+		opts = append(opts, apiserver.WithLeaderElection(*leaderID, *leaderNS))
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgr.Start(ctx, opts...)
+	}()
+
+	if err, open := <-mgr.ReadyCh; open && err != nil {
+		log.Error(err, "Apiserver failed to become ready")
 		os.Exit(1)
 	}
 
+	cm := mgr.CtrlManager()
 	if err := (&controller.WorkerPoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Error(err, "Unable to create controller", "controller", "WorkerPool")
+		Client: cm.GetClient(),
+		Scheme: cm.GetScheme(),
+	}).SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "WorkerPool")
 		os.Exit(1)
 	}
-
 	if err := (&controller.TaskAgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Error(err, "Unable to create controller", "controller", "TaskAgent")
+		Client: cm.GetClient(),
+		Scheme: cm.GetScheme(),
+	}).SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "TaskAgent")
 		os.Exit(1)
 	}
 
-	// TODO: Wire up remaining reconcilers.
-	// if err := (&controller.DaemonAgentReconciler{...}).SetupWithManager(mgr); err != nil { ... }
+	slog.Info("Controller-manager running", "apiserver", *bindAddr, "port", *bindPort, "db", *dbPath)
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Error(err, "Unable to set up health check")
+	if err := <-errCh; err != nil {
+		log.Error(err, "Manager exited with error")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Error(err, "Unable to set up ready check")
-		os.Exit(1)
-	}
+}
 
-	log.Info("Starting controller-manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		log.Error(err, "Problem running manager")
-		os.Exit(1)
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/var/lib/clrk/data.db"
 	}
+	return filepath.Join(home, ".clrk", "data.db")
 }

@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.6
+# Stage 1: builder — worker uses libcontainer and libseccomp; requires a real
+# linux userland with CGO.
+FROM golang:1.24-bookworm AS builder
+
+RUN apt-get update -qq && \
+    apt-get install -qq -y --no-install-recommends \
+        ca-certificates \
+        libseccomp-dev \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=1 GOOS=linux
+RUN go build -o /out/worker ./cmd/worker
+
+# Stage 2: runtime — debian slim. The worker runs libcontainer / runc / gvisor
+# so it needs real linux userland utilities (iptables, libseccomp).
+FROM debian:bookworm-slim
+
+RUN apt-get update -qq && \
+    apt-get install -qq -y --no-install-recommends \
+        ca-certificates \
+        iptables \
+        libseccomp2 \
+        tini && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/worker /usr/local/bin/worker
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/worker"]

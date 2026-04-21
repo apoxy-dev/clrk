@@ -27,6 +27,8 @@ const (
 // stays alive. NOT a server — does not accept incoming requests. Health is
 // determined by process liveness. Single-instance by definition.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=da
@@ -99,6 +101,7 @@ type DaemonAgentStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // DaemonAgentList contains a list of DaemonAgent resources.
@@ -106,8 +109,4 @@ type DaemonAgentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DaemonAgent `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DaemonAgent{}, &DaemonAgentList{})
 }

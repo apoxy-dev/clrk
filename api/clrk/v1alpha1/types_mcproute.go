@@ -102,6 +102,8 @@ type MCPRouteStatus struct {
 // MCPRoute enables fine-grained routing and policy for outbound MCP
 // (Model Context Protocol) traffic.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=mcpr
@@ -113,6 +115,7 @@ type MCPRoute struct {
 	Status            MCPRouteStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // MCPRouteList contains a list of MCPRoute resources.
@@ -120,8 +123,4 @@ type MCPRouteList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []MCPRoute `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&MCPRoute{}, &MCPRouteList{})
 }

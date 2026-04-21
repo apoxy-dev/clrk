@@ -9,6 +9,8 @@ import (
 // completion, exits. Executions are multiplexed across shared worker pods
 // managed by WorkerPool.
 //
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ta
@@ -90,6 +92,7 @@ type TaskAgentStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 
 // TaskAgentList contains a list of TaskAgent resources.
@@ -97,8 +100,4 @@ type TaskAgentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []TaskAgent `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&TaskAgent{}, &TaskAgentList{})
 }
