@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/pkg/drivers/dockerutils"
 )
 
 type devOpts struct {
@@ -78,14 +79,23 @@ func runDev(ctx context.Context, o *devOpts) error {
 	}
 	slog.Info("k3s API is ready", "kubeconfig", k3s.KubeconfigPath())
 
+	if err := k3s.InstallGatewayAPI(ctx); err != nil {
+		return fmt.Errorf("installing Gateway API CRDs: %w", err)
+	}
+	slog.Info("Gateway API CRDs installed")
+
 	cm := drivers.NewControllerManagerDriver()
 	cmOpts := []drivers.Option{
 		drivers.WithImage(o.controllerImage),
 		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
+		drivers.WithEnv(map[string]string{
+			"KUBECONFIG": "/var/lib/clrk/kubeconfig",
+		}),
 		drivers.WithArgs(
 			"--db=/var/lib/clrk/data.db",
 			"--bind-addr=0.0.0.0",
 			"--bind-port=8443",
+			"--cluster-mode=true",
 		),
 	}
 	if o.watch {
@@ -122,6 +132,22 @@ func runDev(ctx context.Context, o *devOpts) error {
 	}
 	defer func() { teardown() }()
 
+	// Register the clrk apiserver as an aggregated extension in k3s so
+	// the controller-manager's ctrl.Manager (and workers below) see
+	// clrk.apoxy.dev types through the unified k3s kubeconfig. Do this
+	// before waiting for /readyz — docker assigns the container's IP
+	// at run-time before the process starts, so the IP is already
+	// stable, and this gives the controller-manager's discovery a
+	// registered APIService to hit as soon as its ctrl.Manager starts.
+	cmIP, err := dockerutils.IPOnNetwork(ctx, cmName, drivers.NetworkName)
+	if err != nil {
+		return fmt.Errorf("getting controller-manager IP: %w", err)
+	}
+	if err := bootstrapClrkAPIService(ctx, k3s, cmIP, 8443); err != nil {
+		return fmt.Errorf("registering clrk APIService: %w", err)
+	}
+	slog.Info("clrk APIService registered in k3s", "backend", cmIP)
+
 	// Poll /readyz from inside the container; Docker for Mac's port-forward
 	// silently breaks TLS handshakes, so the host-side curl never completes.
 	if err := waitReadyzInContainer(ctx, cmName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
@@ -134,12 +160,15 @@ func runDev(ctx context.Context, o *devOpts) error {
 		w := drivers.NewWorkerDriver(i)
 		wOpts := []drivers.Option{
 			drivers.WithImage(o.workerImage),
+			drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
 			drivers.WithEnv(map[string]string{
-				"CLRK_APISERVER_URL":      "https://" + drivers.ControllerManagerContainerName + ":8443",
-				"CLRK_APISERVER_INSECURE": "true",
-				"CLRK_POOL_NAME":          "default",
-				"POD_NAME":                w.Name(),
-				"POD_NAMESPACE":           "default",
+				// Route all resource access through k3s; clrk.apoxy.dev
+				// is served by the controller-manager container via an
+				// aggregated APIService and transparently proxied by k3s.
+				"KUBECONFIG":     "/var/lib/clrk/kubeconfig",
+				"CLRK_POOL_NAME": "default",
+				"POD_NAME":       w.Name(),
+				"POD_NAMESPACE":  "default",
 			}),
 		}
 		if o.watch {

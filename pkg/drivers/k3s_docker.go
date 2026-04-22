@@ -217,3 +217,34 @@ func (d *K3sDriver) WaitAPIReady(ctx context.Context, timeout time.Duration) err
 		}
 	}
 }
+
+// KubectlApply runs `kubectl apply` inside the k3s container against the
+// in-container kubeconfig. source may be a URL or "-" to read YAML from
+// stdin (passed as input). Multiple calls are idempotent.
+func (d *K3sDriver) KubectlApply(ctx context.Context, source string, stdin []byte) error {
+	args := []string{
+		"exec", "-i", K3sContainerName,
+		"kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml",
+		"apply", "-f", source,
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl apply %s: %w: %s", source, err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+// GatewayAPIInstallURL is pinned to a minor release compatible with the
+// k8s.io/api v0.34 line clrk + apoxy-cloud resolve to.
+const GatewayAPIInstallURL = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml"
+
+// InstallGatewayAPI applies the standard Gateway API install manifests
+// into k3s. This is a prerequisite for the TaskAgentIngressReconciler
+// watching *v1.Gateway / *v1.HTTPRoute.
+func (d *K3sDriver) InstallGatewayAPI(ctx context.Context) error {
+	return d.KubectlApply(ctx, GatewayAPIInstallURL, nil)
+}

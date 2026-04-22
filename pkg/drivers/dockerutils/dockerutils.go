@@ -91,3 +91,20 @@ func SignalContainer(ctx context.Context, name, signal string) error {
 	}
 	return nil
 }
+
+// IPOnNetwork returns the container's IP on the named docker network.
+// Used by the APIService bootstrap to wire k3s Endpoints at the real
+// backend IP — Endpoints.addresses must be IPs, not hostnames.
+func IPOnNetwork(ctx context.Context, name, network string) (string, error) {
+	format := fmt.Sprintf(`{{(index .NetworkSettings.Networks %q).IPAddress}}`, network)
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", format, name).Output()
+	if err != nil {
+		return "", fmt.Errorf("docker inspect %s on %s: %w", name, network, err)
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("container %s has no IP on network %s", name, network)
+	}
+	return ip, nil
+}

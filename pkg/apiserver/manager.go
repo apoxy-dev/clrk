@@ -154,13 +154,24 @@ func (o *options) loopbackHostPort() string {
 type Manager struct {
 	ReadyCh chan error
 
+	// StartCh gates the ctrl.Manager start. Start() signals ReadyCh after
+	// the apiserver and ctrl.Manager are set up, then blocks on StartCh
+	// before calling ctrl.Manager.Start. Callers (cmd/controller-manager,
+	// clrk dev) use this window to SetupWithManager the reconcilers and
+	// do APIService bootstrap that must happen before the ctrl.Manager
+	// cache starts discovery.
+	StartCh chan struct{}
+
 	opts    *options
 	ctrlMgr manager.Manager
 }
 
 // New returns an unstarted Manager.
 func New() *Manager {
-	return &Manager{ReadyCh: make(chan error, 1)}
+	return &Manager{
+		ReadyCh: make(chan error, 1),
+		StartCh: make(chan struct{}),
+	}
 }
 
 // CtrlManager returns the controller-runtime manager after Start signals
@@ -204,6 +215,16 @@ func (m *Manager) Start(ctx context.Context, opts ...Option) error {
 	m.ctrlMgr = mgr
 
 	close(m.ReadyCh)
+
+	// Block until the caller is done registering reconcilers and doing
+	// any APIService / CRD bootstrap it needs. Without this, ctrl.Manager
+	// would start its cache discovery against an apiserver that doesn't
+	// yet know about the aggregated types.
+	select {
+	case <-m.StartCh:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	slog.Info("Starting controller-runtime manager")
 	if err := mgr.Start(ctx); err != nil {

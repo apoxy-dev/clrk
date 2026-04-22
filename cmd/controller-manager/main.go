@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -23,10 +24,16 @@ func main() {
 		leaderElection = flag.Bool("leader-election", false, "Enable leader election.")
 		leaderID       = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
 		leaderNS       = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
-		metricsAddr    = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
-		healthAddr     = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
-		clusterMode    = flag.Bool("cluster-mode", false, "Run the cluster-side reconcilers (WorkerPool Deployment/Service, TaskAgent Gateway/HTTPRoute). Required when running against a real Kubernetes cluster; off for clrk dev where workers run as docker containers.")
+		metricsAddr = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
+		healthAddr  = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
+		clusterMode = flag.Bool("cluster-mode", false, "Run the cluster-side reconcilers (WorkerPool Deployment/Service, TaskAgent Gateway/HTTPRoute). Required when running against a real Kubernetes cluster; off for clrk dev where workers run as docker containers.")
 	)
+	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
+	// already registers a --kubeconfig flag via init() and we'd collide with it.
+	// When set, the controller-runtime manager talks to that apiserver and
+	// reconcilers see clrk.apoxy.dev via an aggregated APIService; empty means
+	// loopback against the embedded apiserver (single-binary mode).
+	kubeconfig := os.Getenv("KUBECONFIG")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -61,6 +68,14 @@ func main() {
 	}
 	if *leaderElection {
 		opts = append(opts, apiserver.WithLeaderElection(*leaderID, *leaderNS))
+	}
+	if kubeconfig != "" {
+		cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			log.Error(err, "Unable to load kubeconfig", "path", kubeconfig)
+			os.Exit(1)
+		}
+		opts = append(opts, apiserver.WithClientConfig(cfg))
 	}
 
 	errCh := make(chan error, 1)
@@ -116,7 +131,12 @@ func main() {
 		"port", *bindPort,
 		"db", *dbPath,
 		"cluster_mode", *clusterMode,
+		"kubeconfig", kubeconfig,
 	)
+
+	// Release the apiserver.Manager's ctrl.Manager start gate. The
+	// apiserver goroutine will now call mgr.Start(ctx) and block there.
+	close(mgr.StartCh)
 
 	if err := <-errCh; err != nil {
 		log.Error(err, "Manager exited with error")
