@@ -19,12 +19,13 @@ import (
 )
 
 type devOpts struct {
-	watch            bool
-	controllerImage  string
-	workerImage      string
-	workers          int
-	dataDir          string
-	logStream        bool
+	watch           bool
+	controllerImage string
+	workerImage     string
+	k3sImage        string
+	workers         int
+	dataDir         string
+	logStream       bool
 }
 
 func newDevCmd() *cobra.Command {
@@ -42,6 +43,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.watch, "watch", false, "Rebuild and hot-reload binaries on source changes (experimental).")
 	cmd.Flags().StringVar(&o.controllerImage, "controller-image", drivers.DefaultControllerManagerImage, "Controller-manager image ref.")
 	cmd.Flags().StringVar(&o.workerImage, "worker-image", drivers.DefaultWorkerImage, "Worker image ref.")
+	cmd.Flags().StringVar(&o.k3sImage, "k3s-image", drivers.DefaultK3sImage, "k3s image ref.")
 	cmd.Flags().IntVar(&o.workers, "workers", 1, "Number of worker replicas.")
 	cmd.Flags().StringVar(&o.dataDir, "data-dir", "", "Host path for ~/.clrk state (defaults to --clrk-dir).")
 	cmd.Flags().BoolVar(&o.logStream, "logs", true, "Stream container logs to stdout.")
@@ -60,6 +62,21 @@ func runDev(ctx context.Context, o *devOpts) error {
 	defer stop()
 
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
+
+	// Bring up k3s first so other components can target its kubeconfig.
+	// k3s writes its kubeconfig into DataDir; downstream drivers mount
+	// that path to pick it up.
+	k3s := drivers.NewK3sDriver(o.dataDir)
+	k3sName, err := k3s.Start(ctx, drivers.WithImage(o.k3sImage))
+	if err != nil {
+		return fmt.Errorf("starting k3s: %w", err)
+	}
+	slog.Info("k3s running", "container", k3sName)
+
+	if err := k3s.WaitAPIReady(ctx, 120*time.Second); err != nil {
+		return fmt.Errorf("k3s API never became ready: %w", err)
+	}
+	slog.Info("k3s API is ready", "kubeconfig", k3s.KubeconfigPath())
 
 	cm := drivers.NewControllerManagerDriver()
 	cmOpts := []drivers.Option{
@@ -100,6 +117,7 @@ func runDev(ctx context.Context, o *devOpts) error {
 				_ = w.Stop(shutCtx)
 			}
 			_ = cm.Stop(shutCtx)
+			_ = k3s.Stop(shutCtx)
 		})
 	}
 	defer func() { teardown() }()

@@ -18,20 +18,22 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
-// WorkerPoolReconciler reconciles WorkerPool objects.
-// It owns a Deployment per WorkerPool and syncs capacity status.
-type WorkerPoolReconciler struct {
+// WorkerPoolDeploymentReconciler owns the k8s-side half of WorkerPool: it
+// creates/updates the Deployment + Service that host worker pods and
+// reports their health back as ReadyReplicas + Available/Progressing
+// conditions. Only wired in cluster mode; clrk dev runs workers directly
+// via docker on the host (libcontainer inside a k3s-pod inside docker
+// doesn't work cleanly with nested namespaces), so this reconciler is
+// skipped there.
+type WorkerPoolDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
 
-func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	var wp clrkv1alpha1.WorkerPool
@@ -42,13 +44,11 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// Build desired Deployment.
+	// 1. CreateOrUpdate Deployment.
 	deploy := r.desiredDeployment(&wp)
 	if err := ctrl.SetControllerReference(&wp, deploy, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting owner reference: %w", err)
 	}
-
-	// CreateOrUpdate the Deployment.
 	var existing appsv1.Deployment
 	err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &existing)
 	if apierrors.IsNotFound(err) {
@@ -66,12 +66,11 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	// CreateOrUpdate the Service.
+	// 2. CreateOrUpdate Service.
 	svc := r.desiredService(&wp)
 	if err := ctrl.SetControllerReference(&wp, svc, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting Service owner reference: %w", err)
 	}
-
 	var existingSvc corev1.Service
 	err = r.Get(ctx, client.ObjectKeyFromObject(svc), &existingSvc)
 	if apierrors.IsNotFound(err) {
@@ -90,45 +89,14 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	// Compute capacity.
+	// 3. Status: ReadyReplicas + Available/Progressing conditions.
 	replicas := int32(1)
 	if wp.Spec.Replicas != nil {
 		replicas = *wp.Spec.Replicas
 	}
-	maxExecPerWorker := int32(10)
-	if wp.Spec.MaxExecutionsPerWorker != nil {
-		maxExecPerWorker = *wp.Spec.MaxExecutionsPerWorker
-	}
-
 	readyReplicas := existing.Status.ReadyReplicas
-	maxExecutions := readyReplicas * maxExecPerWorker
-
-	// Sum active executions across all TaskAgents referencing this pool.
-	var agents clrkv1alpha1.TaskAgentList
-	if err := r.List(ctx, &agents, client.InNamespace(wp.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("listing task agents: %w", err)
-	}
-	var activeExec int32
-	for _, a := range agents.Items {
-		if a.Spec.WorkerPoolRef == wp.Name {
-			activeExec += a.Status.ActiveExecutions
-		}
-	}
-
-	availableExecutions := maxExecutions - activeExec
-	if availableExecutions < 0 {
-		availableExecutions = 0
-	}
-
-	// Update status.
 	wp.Status.ReadyReplicas = readyReplicas
-	wp.Status.ActiveExecutions = activeExec
-	wp.Status.Capacity = clrkv1alpha1.WorkerPoolCapacity{
-		MaxExecutions:       maxExecutions,
-		AvailableExecutions: availableExecutions,
-	}
 
-	// Set conditions.
 	now := metav1.Now()
 
 	available := metav1.Condition{
@@ -161,7 +129,6 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		progressing.Reason = "DeploymentComplete"
 		progressing.Message = "deployment rollout complete"
 	}
-
 	meta.SetStatusCondition(&wp.Status.Conditions, available)
 	meta.SetStatusCondition(&wp.Status.Conditions, progressing)
 
@@ -172,23 +139,24 @@ func (r *WorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-func (r *WorkerPoolReconciler) desiredDeployment(wp *clrkv1alpha1.WorkerPool) *appsv1.Deployment {
+func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.WorkerPool) *appsv1.Deployment {
 	replicas := int32(1)
 	if wp.Spec.Replicas != nil {
 		replicas = *wp.Spec.Replicas
 	}
 
-	labels := map[string]string{
+	lbls := map[string]string{
 		"clrk.apoxy.dev/workerpool": wp.Name,
-		"clrk.apoxy.dev/component": "worker",
+		labelComponent:              "worker",
 	}
 
-	// Merge labels into the pod template.
+	// Merge the pool labels into the pod template so the Service selector
+	// matches.
 	podTemplate := wp.Spec.PodTemplate.DeepCopy()
 	if podTemplate.Labels == nil {
 		podTemplate.Labels = make(map[string]string)
 	}
-	for k, v := range labels {
+	for k, v := range lbls {
 		podTemplate.Labels[k] = v
 	}
 
@@ -196,19 +164,19 @@ func (r *WorkerPoolReconciler) desiredDeployment(wp *clrkv1alpha1.WorkerPool) *a
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      wp.Name + "-workers",
 			Namespace: wp.Namespace,
-			Labels:    labels,
+			Labels:    lbls,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+				MatchLabels: lbls,
 			},
 			Template: *podTemplate,
 		},
 	}
 }
 
-func (r *WorkerPoolReconciler) desiredService(wp *clrkv1alpha1.WorkerPool) *corev1.Service {
+func (r *WorkerPoolDeploymentReconciler) desiredService(wp *clrkv1alpha1.WorkerPool) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      wp.Name + "-workers",
@@ -217,7 +185,7 @@ func (r *WorkerPoolReconciler) desiredService(wp *clrkv1alpha1.WorkerPool) *core
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
 				"clrk.apoxy.dev/workerpool": wp.Name,
-				"clrk.apoxy.dev/component": "worker",
+				labelComponent:              "worker",
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -232,12 +200,11 @@ func (r *WorkerPoolReconciler) desiredService(wp *clrkv1alpha1.WorkerPool) *core
 	}
 }
 
-func (r *WorkerPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *WorkerPoolDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		Named("workerpool-deployment").
 		For(&clrkv1alpha1.WorkerPool{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Complete(r)
 }
-
-

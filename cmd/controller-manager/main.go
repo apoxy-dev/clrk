@@ -25,6 +25,7 @@ func main() {
 		leaderNS       = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
 		metricsAddr    = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
 		healthAddr     = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
+		clusterMode    = flag.Bool("cluster-mode", false, "Run the cluster-side reconcilers (WorkerPool Deployment/Service, TaskAgent Gateway/HTTPRoute). Required when running against a real Kubernetes cluster; off for clrk dev where workers run as docker containers.")
 	)
 	flag.Parse()
 
@@ -73,22 +74,49 @@ func main() {
 	}
 
 	cm := mgr.CtrlManager()
-	if err := (&controller.WorkerPoolReconciler{
+
+	// Portable reconcilers: run in all modes.
+	if err := (&controller.WorkerPoolStatusReconciler{
 		Client: cm.GetClient(),
 		Scheme: cm.GetScheme(),
 	}).SetupWithManager(cm); err != nil {
-		log.Error(err, "Unable to register controller", "controller", "WorkerPool")
+		log.Error(err, "Unable to register controller", "controller", "WorkerPoolStatus")
 		os.Exit(1)
 	}
-	if err := (&controller.TaskAgentReconciler{
+	if err := (&controller.TaskAgentRevisionReconciler{
 		Client: cm.GetClient(),
 		Scheme: cm.GetScheme(),
 	}).SetupWithManager(cm); err != nil {
-		log.Error(err, "Unable to register controller", "controller", "TaskAgent")
+		log.Error(err, "Unable to register controller", "controller", "TaskAgentRevision")
 		os.Exit(1)
 	}
 
-	slog.Info("Controller-manager running", "apiserver", *bindAddr, "port", *bindPort, "db", *dbPath)
+	// Cluster-side reconcilers: need a real Kubernetes API with apps/v1 +
+	// gateway.networking.k8s.io/v1 available. Skip in dev where workers
+	// are run as docker containers and no Gateway API is installed.
+	if *clusterMode {
+		if err := (&controller.WorkerPoolDeploymentReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
+			os.Exit(1)
+		}
+		if err := (&controller.TaskAgentIngressReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "TaskAgentIngress")
+			os.Exit(1)
+		}
+	}
+
+	slog.Info("Controller-manager running",
+		"apiserver", *bindAddr,
+		"port", *bindPort,
+		"db", *dbPath,
+		"cluster_mode", *clusterMode,
+	)
 
 	if err := <-errCh; err != nil {
 		log.Error(err, "Manager exited with error")
