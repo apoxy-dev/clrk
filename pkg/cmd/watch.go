@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/apoxy-dev/clrk/pkg/cmd/devtui"
 )
 
 // watcher drives rebuilds in --watch mode. It observes filesystem events on
@@ -24,6 +26,10 @@ type watcher struct {
 	reload   map[string]func(context.Context) error
 	buildMu  sync.Mutex
 	debounce time.Duration
+	// events, when non-nil, receives lifecycle pings for each rebuild so a
+	// TUI can surface progress in its sidebar. The watcher never blocks on
+	// the sink — slow renderers must drop, not stall the build.
+	events func(devtui.WatcherEvent, string, time.Duration, error)
 }
 
 // newWatcher configures a watcher rooted at repoRoot. The `reload` map keys
@@ -70,11 +76,15 @@ func (w *watcher) run(ctx context.Context) error {
 		if len(changed) == 0 {
 			return
 		}
+		w.emit(devtui.WatcherBuilding, "", 0, nil)
+		start := time.Now()
 		if err := w.rebuild(ctx); err != nil {
 			slog.Error("Rebuild failed", "err", err)
+			w.emit(devtui.WatcherFailed, "", time.Since(start), err)
 			return
 		}
-		w.triggerReloads(ctx, changed)
+		fired := w.triggerReloads(ctx, changed)
+		w.emit(devtui.WatcherReloaded, fired, time.Since(start), nil)
 	}
 
 	for {
@@ -149,8 +159,10 @@ func (w *watcher) rebuild(ctx context.Context) error {
 }
 
 // triggerReloads calls each driver's Reload whose source prefix was touched.
-func (w *watcher) triggerReloads(ctx context.Context, changed map[string]bool) {
+// Returns a comma-joined list of fired prefixes for status reporting.
+func (w *watcher) triggerReloads(ctx context.Context, changed map[string]bool) string {
 	fired := make(map[string]bool)
+	var firedNames []string
 	for rel := range changed {
 		for prefix, fn := range w.reload {
 			if fired[prefix] {
@@ -158,6 +170,7 @@ func (w *watcher) triggerReloads(ctx context.Context, changed map[string]bool) {
 			}
 			if strings.HasPrefix(rel, prefix) || prefix == "" {
 				fired[prefix] = true
+				firedNames = append(firedNames, prefix)
 				if err := fn(ctx); err != nil {
 					slog.Warn("Reload failed", "prefix", prefix, "err", err)
 				} else {
@@ -166,6 +179,16 @@ func (w *watcher) triggerReloads(ctx context.Context, changed map[string]bool) {
 			}
 		}
 	}
+	return strings.Join(firedNames, ",")
+}
+
+// emit forwards a watcher lifecycle event to the optional sink. Safe to call
+// when no sink is registered.
+func (w *watcher) emit(ev devtui.WatcherEvent, prefix string, dur time.Duration, err error) {
+	if w.events == nil {
+		return
+	}
+	w.events(ev, prefix, dur, err)
 }
 
 // addTree walks root and registers every subdirectory with the watcher.
