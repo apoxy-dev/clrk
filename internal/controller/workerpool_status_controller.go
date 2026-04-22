@@ -84,7 +84,7 @@ func (r *WorkerPoolStatusReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// deployment reconciler (when present) separately sets Available based
 	// on observed ready replicas.
 	configured := metav1.Condition{
-		Type:               "Configured",
+		Type:               condConfigured,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: wp.Generation,
 		LastTransitionTime: metav1.Now(),

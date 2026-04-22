@@ -50,9 +50,8 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	now := metav1.Now()
 
-	// 1. Validate WorkerPool ref.
 	wpReady := metav1.Condition{
-		Type:               "WorkerPoolReady",
+		Type:               condWorkerPoolReady,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
 	}
@@ -73,9 +72,8 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, wpReady)
 
-	// 2. Validate egress refs.
 	egressConfigured := metav1.Condition{
-		Type:               "EgressConfigured",
+		Type:               condEgressConfigured,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
 	}
@@ -110,7 +108,6 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, egressConfigured)
 
-	// 3. Create or get AgentSandboxRevision.
 	revisionName := fmt.Sprintf("%s-%05d", ta.Name, ta.Generation)
 	var rev clrkv1alpha1.AgentSandboxRevision
 	revKey := types.NamespacedName{Name: revisionName, Namespace: ta.Namespace}
@@ -141,9 +138,8 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	ta.Status.LatestCreatedRevisionName = revisionName
 
-	// 4. Set RevisionReady condition and update LatestReadyRevisionName.
 	revisionReady := metav1.Condition{
-		Type:               "RevisionReady",
+		Type:               condRevisionReady,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
 	}
@@ -160,9 +156,8 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
 
-	// 5. Accepted condition — spec is structurally valid if we got this far.
 	accepted := metav1.Condition{
-		Type:               "Accepted",
+		Type:               condAccepted,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: now,
@@ -171,7 +166,6 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, accepted)
 
-	// 6. Revision GC.
 	if ta.Generation > maxRevisionHistory {
 		if err := r.gcRevisions(ctx, &ta); err != nil {
 			logger.Error(err, "Revision GC failed")

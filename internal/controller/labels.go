@@ -22,3 +22,18 @@ const (
 
 	maxRevisionHistory = 10
 )
+
+// Status.Conditions Type values written across the split reconcilers.
+// Distinct values matter: meta.SetStatusCondition matches by Type, so each
+// reconciler half (revision/ingress for TaskAgent, status/deployment for
+// WorkerPool) owns its own subset and the slices merge cleanly.
+const (
+	condWorkerPoolReady  = "WorkerPoolReady"
+	condEgressConfigured = "EgressConfigured"
+	condRevisionReady    = "RevisionReady"
+	condAccepted         = "Accepted"
+	condGatewayReady     = "GatewayReady"
+	condConfigured       = "Configured"
+	condAvailable        = "Available"
+	condProgressing      = "Progressing"
+)

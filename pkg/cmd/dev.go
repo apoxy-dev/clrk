@@ -95,7 +95,11 @@ func runDev(ctx context.Context, o *devOpts) error {
 			"--db=/var/lib/clrk/data.db",
 			"--bind-addr=0.0.0.0",
 			"--bind-port=8443",
-			"--cluster-mode=true",
+			// Ingress reconciler is on (k3s has gateway-api installed);
+			// worker-deployment is off because clrk dev runs the worker
+			// directly via docker — a Deployment would create a duplicate
+			// worker pod inside k3s with broken nested-container semantics.
+			"--ingress-controller=true",
 		),
 	}
 	if o.watch {

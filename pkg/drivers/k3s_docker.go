@@ -113,7 +113,7 @@ func (d *K3sDriver) Start(ctx context.Context, opts ...Option) (string, error) {
 		"--disable=servicelb",
 		"--disable=metrics-server",
 		"--write-kubeconfig-mode=644",
-		"--tls-san=" + K3sContainerName,
+		"--tls-san="+K3sContainerName,
 		"--tls-san=localhost",
 	)
 
@@ -159,7 +159,7 @@ func (d *K3sDriver) extractKubeconfig(ctx context.Context) error {
 		return err
 	}
 
-	deadline := time.NewTimer(2 * time.Minute)
+	deadline := time.NewTimer(60 * time.Second)
 	defer deadline.Stop()
 
 	var raw []byte
@@ -175,7 +175,7 @@ func (d *K3sDriver) extractKubeconfig(ctx context.Context) error {
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("k3s kubeconfig never appeared")
-		case <-time.After(time.Second):
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 

@@ -17,16 +17,17 @@ import (
 
 func main() {
 	var (
-		dbPath         = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
-		bindAddr       = flag.String("bind-addr", "0.0.0.0", "Apiserver bind address.")
-		bindPort       = flag.Int("bind-port", 8443, "Apiserver bind port.")
-		certDir        = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
-		leaderElection = flag.Bool("leader-election", false, "Enable leader election.")
-		leaderID       = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
-		leaderNS       = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
-		metricsAddr = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
-		healthAddr  = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
-		clusterMode = flag.Bool("cluster-mode", false, "Run the cluster-side reconcilers (WorkerPool Deployment/Service, TaskAgent Gateway/HTTPRoute). Required when running against a real Kubernetes cluster; off for clrk dev where workers run as docker containers.")
+		dbPath            = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
+		bindAddr          = flag.String("bind-addr", "0.0.0.0", "Apiserver bind address.")
+		bindPort          = flag.Int("bind-port", 8443, "Apiserver bind port.")
+		certDir           = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
+		leaderElection    = flag.Bool("leader-election", false, "Enable leader election.")
+		leaderID          = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
+		leaderNS          = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
+		metricsAddr       = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
+		healthAddr        = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
+		ingressController = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
+		workerDeployment  = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -106,17 +107,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Cluster-side reconcilers: need a real Kubernetes API with apps/v1 +
-	// gateway.networking.k8s.io/v1 available. Skip in dev where workers
-	// are run as docker containers and no Gateway API is installed.
-	if *clusterMode {
-		if err := (&controller.WorkerPoolDeploymentReconciler{
-			Client: cm.GetClient(),
-			Scheme: cm.GetScheme(),
-		}).SetupWithManager(cm); err != nil {
-			log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
-			os.Exit(1)
-		}
+	if *ingressController {
 		if err := (&controller.TaskAgentIngressReconciler{
 			Client: cm.GetClient(),
 			Scheme: cm.GetScheme(),
@@ -125,12 +116,22 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if *workerDeployment {
+		if err := (&controller.WorkerPoolDeploymentReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
+			os.Exit(1)
+		}
+	}
 
 	slog.Info("Controller-manager running",
 		"apiserver", *bindAddr,
 		"port", *bindPort,
 		"db", *dbPath,
-		"cluster_mode", *clusterMode,
+		"ingress_controller", *ingressController,
+		"worker_deployment_controller", *workerDeployment,
 		"kubeconfig", kubeconfig,
 	)
 

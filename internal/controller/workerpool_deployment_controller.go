@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -34,8 +34,6 @@ type WorkerPoolDeploymentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
 
 func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	var wp clrkv1alpha1.WorkerPool
 	if err := r.Get(ctx, req.NamespacedName, &wp); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -44,63 +42,38 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	}
 
-	// 1. CreateOrUpdate Deployment.
-	deploy := r.desiredDeployment(&wp)
-	if err := ctrl.SetControllerReference(&wp, deploy, r.Scheme); err != nil {
-		return ctrl.Result{}, fmt.Errorf("setting owner reference: %w", err)
-	}
-	var existing appsv1.Deployment
-	err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &existing)
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Deployment", "name", deploy.Name)
-		if err := r.Create(ctx, deploy); err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating deployment: %w", err)
-		}
-		existing = *deploy
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting deployment: %w", err)
-	} else {
-		existing.Spec = deploy.Spec
-		if err := r.Update(ctx, &existing); err != nil {
-			return ctrl.Result{}, fmt.Errorf("updating deployment: %w", err)
-		}
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: wp.Name + "-workers", Namespace: wp.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		desired := r.desiredDeployment(&wp)
+		deploy.Labels = desired.Labels
+		deploy.Spec = desired.Spec
+		return ctrl.SetControllerReference(&wp, deploy, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling Deployment: %w", err)
 	}
 
-	// 2. CreateOrUpdate Service.
-	svc := r.desiredService(&wp)
-	if err := ctrl.SetControllerReference(&wp, svc, r.Scheme); err != nil {
-		return ctrl.Result{}, fmt.Errorf("setting Service owner reference: %w", err)
-	}
-	var existingSvc corev1.Service
-	err = r.Get(ctx, client.ObjectKeyFromObject(svc), &existingSvc)
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Service", "name", svc.Name)
-		if err := r.Create(ctx, svc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating service: %w", err)
-		}
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting service: %w", err)
-	} else {
-		existingSvc.Spec.Selector = svc.Spec.Selector
-		existingSvc.Spec.Ports = svc.Spec.Ports
-		existingSvc.Spec.Type = svc.Spec.Type
-		if err := r.Update(ctx, &existingSvc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("updating service: %w", err)
-		}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: wp.Name + "-workers", Namespace: wp.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		desired := r.desiredService(&wp)
+		svc.Spec.Selector = desired.Spec.Selector
+		svc.Spec.Ports = desired.Spec.Ports
+		svc.Spec.Type = desired.Spec.Type
+		return ctrl.SetControllerReference(&wp, svc, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling Service: %w", err)
 	}
 
-	// 3. Status: ReadyReplicas + Available/Progressing conditions.
 	replicas := int32(1)
 	if wp.Spec.Replicas != nil {
 		replicas = *wp.Spec.Replicas
 	}
-	readyReplicas := existing.Status.ReadyReplicas
+	readyReplicas := deploy.Status.ReadyReplicas
 	wp.Status.ReadyReplicas = readyReplicas
 
 	now := metav1.Now()
 
 	available := metav1.Condition{
-		Type:               "Available",
+		Type:               condAvailable,
 		ObservedGeneration: wp.Generation,
 		LastTransitionTime: now,
 	}
@@ -115,12 +88,12 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	progressing := metav1.Condition{
-		Type:               "Progressing",
+		Type:               condProgressing,
 		ObservedGeneration: wp.Generation,
 		LastTransitionTime: now,
 	}
-	if existing.Status.UpdatedReplicas < replicas ||
-		existing.Status.AvailableReplicas < replicas {
+	if deploy.Status.UpdatedReplicas < replicas ||
+		deploy.Status.AvailableReplicas < replicas {
 		progressing.Status = metav1.ConditionTrue
 		progressing.Reason = "DeploymentRollingOut"
 		progressing.Message = "deployment is rolling out"
