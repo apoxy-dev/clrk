@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -106,7 +104,9 @@ func runDev(ctx context.Context, o *devOpts) error {
 	}
 	defer func() { teardown() }()
 
-	if err := waitReadyz(ctx, "https://localhost:8443/readyz", 90*time.Second); err != nil {
+	// Poll /readyz from inside the container; Docker for Mac's port-forward
+	// silently breaks TLS handshakes, so the host-side curl never completes.
+	if err := waitReadyzInContainer(ctx, cmName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
 		return fmt.Errorf("controller-manager never became ready: %w", err)
 	}
 	slog.Info("Apiserver /readyz is OK")
@@ -185,22 +185,20 @@ func runDev(ctx context.Context, o *devOpts) error {
 	return nil
 }
 
-// waitReadyz polls the apiserver's /readyz endpoint until it returns 200 or
-// the timeout fires.
-func waitReadyz(ctx context.Context, url string, timeout time.Duration) error {
-	client := &http.Client{
-		Timeout:   500 * time.Millisecond,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-	}
+// waitReadyzInContainer polls the given URL via `docker exec <container>
+// curl ...` until it returns 200 or the timeout fires. We go through
+// docker exec because Docker for Mac's port-forward layer breaks TLS
+// handshakes — handshakes from inside the docker network succeed.
+func waitReadyzInContainer(ctx context.Context, container, url string, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for {
-		resp, err := client.Get(url)
+		execCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := exec.CommandContext(execCtx, "docker", "exec", container,
+			"curl", "-ksSf", "--max-time", "1", url).Run()
+		cancel()
 		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():

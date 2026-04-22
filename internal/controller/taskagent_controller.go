@@ -27,10 +27,11 @@ const (
 	defaultGatewayClassName = "envoy"
 	envoyGatewayGroup       = "gateway.envoyproxy.io"
 
-	labelAgent      = "clrk.apoxy.dev/agent"
-	labelAgentKind  = "clrk.apoxy.dev/agent-kind"
-	labelGeneration = "clrk.apoxy.dev/generation"
-	labelComponent  = "clrk.apoxy.dev/component"
+	labelAgent       = clrkv1alpha1.LabelAgent
+	labelAgentKind   = clrkv1alpha1.LabelAgentKind
+	labelGeneration  = clrkv1alpha1.LabelGeneration
+	labelWorkerPool  = clrkv1alpha1.LabelWorkerPool
+	labelComponent   = "clrk.apoxy.dev/component"
 
 	maxRevisionHistory = 10
 )
@@ -136,6 +137,7 @@ func (r *TaskAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					labelAgent:      ta.Name,
 					labelAgentKind:  "TaskAgent",
 					labelGeneration: strconv.FormatInt(ta.Generation, 10),
+					labelWorkerPool: ta.Spec.WorkerPoolRef,
 				},
 				Annotations: ta.Spec.Template.Annotations,
 			},

@@ -61,7 +61,17 @@ func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer 
 // Create pulls the image, sets up the network namespace and TAP device,
 // and creates a libcontainer container. The container is created but NOT
 // started, leaving it in the Ready phase for warm pool use.
-func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1alpha1.SandboxStateSpec) (*SandboxInstance, error) {
+//
+// agentRef and resources come from the parent agent (TaskAgent or
+// DaemonAgent), since AgentSandboxRevision (the watched resource) only
+// carries the immutable image+command snapshot.
+func (m *SandboxManager) Create(
+	ctx context.Context,
+	id SandboxID,
+	agentRef string,
+	sandbox clrkv1alpha1.AgentSandbox,
+	resources clrkv1alpha1.ExecutionResources,
+) (*SandboxInstance, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
@@ -74,7 +84,7 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 	log.Info("Creating sandbox")
 
 	// 1. Pull image + extract rootfs.
-	imgInfo, err := m.imageStore.EnsureImage(ctx, spec.Sandbox.Image)
+	imgInfo, err := m.imageStore.EnsureImage(ctx, sandbox.Image)
 	if err != nil {
 		return nil, fmt.Errorf("ensuring image: %w", err)
 	}
@@ -97,7 +107,7 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 	}
 
 	// 5. Build libcontainer config.
-	cfg := baseConfig(string(id), sandboxRootFS, spec)
+	cfg := baseConfig(string(id), sandboxRootFS, resources)
 
 	// 6. Create container (does NOT start it).
 	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)
@@ -111,15 +121,15 @@ func (m *SandboxManager) Create(ctx context.Context, id SandboxID, spec clrkv1al
 	// 7. Track instance.
 	sb := &SandboxInstance{
 		ID:        id,
-		AgentRef:  spec.AgentRef,
+		AgentRef:  agentRef,
 		Phase:     SandboxReady,
 		RootFS:    sandboxRootFS,
 		NetNS:     nsCfg.NSPath,
 		TAPName:   nsCfg.TAPName,
 		TAPFD:     nsCfg.TAPFD,
 		Stack:     stack,
-		Sandbox:   spec.Sandbox,
-		Resources: spec.Resources,
+		Sandbox:   sandbox,
+		Resources: resources,
 		CreatedAt: time.Now(),
 	}
 
@@ -412,7 +422,7 @@ func phaseFromStatus(status libcontainer.Status) SandboxPhase {
 
 // baseConfig creates the base container configuration, ported and adapted
 // from apoxy-cli pkg/edgefunc/runc/runc.go:40-197.
-func baseConfig(id, rootFS string, spec clrkv1alpha1.SandboxStateSpec) *configs.Config {
+func baseConfig(id, rootFS string, resources clrkv1alpha1.ExecutionResources) *configs.Config {
 	devs := make([]*devices.Rule, len(specconv.AllowedDevices))
 	for i, d := range specconv.AllowedDevices {
 		devs[i] = &d.Rule
@@ -512,14 +522,14 @@ func baseConfig(id, rootFS string, spec clrkv1alpha1.SandboxStateSpec) *configs.
 		},
 	}
 
-	// Apply resource limits from the CRD spec.
-	if !spec.Resources.Memory.IsZero() {
-		c.Cgroups.Resources.Memory = spec.Resources.Memory.Value()
+	// Apply resource limits from the parent agent's spec.
+	if !resources.Memory.IsZero() {
+		c.Cgroups.Resources.Memory = resources.Memory.Value()
 	}
-	if !spec.Resources.CPU.IsZero() {
+	if !resources.CPU.IsZero() {
 		// Convert CPU quantity (e.g. "1" = 1 core, "500m" = 0.5 core) to CFS quota.
 		// quota = millicores * period / 1000
-		millis := spec.Resources.CPU.MilliValue()
+		millis := resources.CPU.MilliValue()
 		c.Cgroups.Resources.CpuQuota = millis * 100000 / 1000
 		c.Cgroups.Resources.CpuPeriod = 100000
 	}

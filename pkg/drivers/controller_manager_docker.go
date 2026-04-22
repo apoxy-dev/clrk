@@ -13,7 +13,7 @@ const (
 	ControllerManagerContainerName = "clrk-controller-manager"
 
 	// DefaultControllerManagerImage is used when no override is supplied.
-	DefaultControllerManagerImage = "ghcr.io/apoxy-dev/clrk-controller-manager:dev"
+	DefaultControllerManagerImage = "clrk/controller-manager:latest"
 
 	// DefaultAPIServerHostPort is the host port the apiserver is published
 	// on for access from the host (e.g. `kubectl --server=…`).

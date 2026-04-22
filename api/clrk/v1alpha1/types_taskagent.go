@@ -2,7 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // TaskAgent defines a triggered agent workload — HTTP or cron, runs to
@@ -54,7 +54,8 @@ type TaskAgentSpec struct {
 
 	// ScheduleInput is the JSON body sent to the agent on cron triggers.
 	// +optional
-	ScheduleInput *apiextensionsv1.JSON `json:"scheduleInput,omitempty"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	ScheduleInput *runtime.RawExtension `json:"scheduleInput,omitempty"`
 
 	// EgressRefs references EgressGateway objects for outbound access.
 	// Token budgets are configured on AIProviderRoute, not here.

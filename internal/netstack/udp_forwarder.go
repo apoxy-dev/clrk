@@ -67,8 +67,8 @@ func copyPackets(ctx context.Context, src, dst net.Conn, once bool, extend func(
 	}
 }
 
-func udpHandler(ctx context.Context, dialer Dialer) func(req *udp.ForwarderRequest) {
-	return func(req *udp.ForwarderRequest) {
+func udpHandler(ctx context.Context, dialer Dialer) udp.ForwarderHandler {
+	return func(req *udp.ForwarderRequest) bool {
 		reqDetails := req.ID()
 
 		srcAddrPort := netip.AddrPortFrom(addrFromNetstackIP(reqDetails.RemoteAddress), reqDetails.RemotePort)
@@ -137,5 +137,8 @@ func udpHandler(ctx context.Context, dialer Dialer) func(req *udp.ForwarderReque
 			cleanup()
 			logger.Debug("UDP forwarding complete")
 		}()
+		// The session is handled asynchronously above; tell the forwarder
+		// to consider this packet handled so it isn't resent to other handlers.
+		return true
 	}
 }

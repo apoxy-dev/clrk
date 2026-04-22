@@ -256,6 +256,14 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			}
 			so.RecommendedOptions.Admission = nil
 
+			// Priority-and-fairness needs a core Kubernetes client (kube-apiserver
+			// FlowSchema/PriorityLevelConfiguration). We run standalone, so disable
+			// it; otherwise Features.ApplyTo fails validation before the apiserver
+			// can start.
+			if so.RecommendedOptions.Features != nil {
+				so.RecommendedOptions.Features.EnablePriorityAndFairness = false
+			}
+
 			secure := &apiserveropts.SecureServingOptionsWithLoopback{
 				SecureServingOptions: &apiserveropts.SecureServingOptions{
 					BindAddress: netutils.ParseIPSloppy(o.bindAddress),

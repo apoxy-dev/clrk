@@ -66,8 +66,13 @@ go run "k8s.io/code-generator/cmd/informer-gen@${CODEGEN_VERSION}" \
 
 echo "Generating OpenAPI schema..."
 
-# kube-openapi has no published tags; pin via go.mod or use master.
-go run "k8s.io/kube-openapi/cmd/openapi-gen@master" \
+# kube-openapi has no published tags; the version is pinned in our go.mod
+# to match apoxy-cloud's resolution. Use `go run` (no @version) so the
+# pinned version is used and transitive deps (golang.org/x/tools etc.)
+# resolve against the same module graph clrk compiles against — running
+# `pkg@version` creates a fresh temp module and pulls incompatible
+# transitive versions.
+go run k8s.io/kube-openapi/cmd/openapi-gen \
   --go-header-file "${BOILERPLATE_FILE}" \
   --output-dir "api/generated" \
   --output-pkg "generated" \

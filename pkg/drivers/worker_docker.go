@@ -11,7 +11,7 @@ import (
 
 const (
 	// DefaultWorkerImage is used when no override is supplied.
-	DefaultWorkerImage = "ghcr.io/apoxy-dev/clrk-worker:dev"
+	DefaultWorkerImage = "clrk/worker:latest"
 
 	// workerContainerPrefix is the name prefix for worker containers.
 	// Workers are numbered to support N>1 replicas.
