@@ -17,3 +17,11 @@ const (
 	// targeted at. Workers filter the watch by this label.
 	LabelWorkerPool = "clrk.apoxy.dev/worker-pool"
 )
+
+// AgentKind values written into LabelAgentKind. Workers branch on this to
+// pick the right sandbox lifecycle (TaskAgent: per-trigger, DaemonAgent:
+// long-lived with restart policy).
+const (
+	AgentKindTask   = "TaskAgent"
+	AgentKindDaemon = "DaemonAgent"
+)

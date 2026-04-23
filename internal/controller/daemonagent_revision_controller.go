@@ -19,26 +19,26 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
-// TaskAgentRevisionReconciler manages AgentSandboxRevision snapshots for a
-// TaskAgent. Gateway / HTTPRoute live in TaskAgentIngressReconciler so they
-// can be skipped where gateway-api isn't installed.
-type TaskAgentRevisionReconciler struct {
+// DaemonAgentRevisionReconciler manages AgentSandboxRevision snapshots for a
+// DaemonAgent. Phase / UpSince / RestartCount are written by the worker
+// daemon loop — only the worker knows when its sandbox is alive.
+type DaemonAgentRevisionReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=daemonagents,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=daemonagents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=agentsandboxrevisions,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=agentsandboxrevisions/status,verbs=get;update;patch
 
-func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DaemonAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var ta clrkv1alpha1.TaskAgent
-	if err := r.Get(ctx, req.NamespacedName, &ta); err != nil {
+	var da clrkv1alpha1.DaemonAgent
+	if err := r.Get(ctx, req.NamespacedName, &da); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -49,37 +49,37 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	wpReady := metav1.Condition{
 		Type:               condWorkerPoolReady,
-		ObservedGeneration: ta.Generation,
+		ObservedGeneration: da.Generation,
 		LastTransitionTime: now,
 	}
 	var wp clrkv1alpha1.WorkerPool
-	wpKey := types.NamespacedName{Name: ta.Spec.WorkerPoolRef, Namespace: ta.Namespace}
+	wpKey := types.NamespacedName{Name: da.Spec.WorkerPoolRef, Namespace: da.Namespace}
 	if err := r.Get(ctx, wpKey, &wp); err != nil {
 		if apierrors.IsNotFound(err) {
 			wpReady.Status = metav1.ConditionFalse
 			wpReady.Reason = "WorkerPoolNotFound"
-			wpReady.Message = fmt.Sprintf("WorkerPool %q not found", ta.Spec.WorkerPoolRef)
+			wpReady.Message = fmt.Sprintf("WorkerPool %q not found", da.Spec.WorkerPoolRef)
 		} else {
 			return ctrl.Result{}, fmt.Errorf("looking up WorkerPool: %w", err)
 		}
 	} else {
 		wpReady.Status = metav1.ConditionTrue
 		wpReady.Reason = "WorkerPoolFound"
-		wpReady.Message = fmt.Sprintf("WorkerPool %q exists", ta.Spec.WorkerPoolRef)
+		wpReady.Message = fmt.Sprintf("WorkerPool %q exists", da.Spec.WorkerPoolRef)
 	}
-	meta.SetStatusCondition(&ta.Status.Conditions, wpReady)
+	meta.SetStatusCondition(&da.Status.Conditions, wpReady)
 
 	egressConfigured := metav1.Condition{
 		Type:               condEgressConfigured,
-		ObservedGeneration: ta.Generation,
+		ObservedGeneration: da.Generation,
 		LastTransitionTime: now,
 	}
-	if len(ta.Spec.EgressRefs) == 0 {
+	if len(da.Spec.EgressRefs) == 0 {
 		egressConfigured.Status = metav1.ConditionTrue
 		egressConfigured.Reason = "NoEgressRefs"
 		egressConfigured.Message = "No egress refs configured"
 	} else {
-		missing, err := validateEgressRefs(ctx, r.Client, ta.Namespace, ta.Spec.EgressRefs)
+		missing, err := validateEgressRefs(ctx, r.Client, da.Namespace, da.Spec.EgressRefs)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -93,28 +93,28 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			egressConfigured.Message = fmt.Sprintf("Missing EgressGateway(s): %v", missing)
 		}
 	}
-	meta.SetStatusCondition(&ta.Status.Conditions, egressConfigured)
+	meta.SetStatusCondition(&da.Status.Conditions, egressConfigured)
 
-	revName := revisionName(ta.Name, ta.Generation)
+	revName := revisionName(da.Name, da.Generation)
 	var rev clrkv1alpha1.AgentSandboxRevision
-	revKey := types.NamespacedName{Name: revName, Namespace: ta.Namespace}
+	revKey := types.NamespacedName{Name: revName, Namespace: da.Namespace}
 	created := false
 	if err := r.Get(ctx, revKey, &rev); apierrors.IsNotFound(err) {
 		rev = clrkv1alpha1.AgentSandboxRevision{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      revName,
-				Namespace: ta.Namespace,
+				Namespace: da.Namespace,
 				Labels: map[string]string{
-					labelAgent:      ta.Name,
-					labelAgentKind:  clrkv1alpha1.AgentKindTask,
-					labelGeneration: strconv.FormatInt(ta.Generation, 10),
-					labelWorkerPool: ta.Spec.WorkerPoolRef,
+					labelAgent:      da.Name,
+					labelAgentKind:  clrkv1alpha1.AgentKindDaemon,
+					labelGeneration: strconv.FormatInt(da.Generation, 10),
+					labelWorkerPool: da.Spec.WorkerPoolRef,
 				},
-				Annotations: ta.Spec.Template.Annotations,
+				Annotations: da.Spec.Template.Annotations,
 			},
-			Spec: ta.Spec.Template.Spec,
+			Spec: da.Spec.Template.Spec,
 		}
-		if err := ctrl.SetControllerReference(&ta, &rev, r.Scheme); err != nil {
+		if err := ctrl.SetControllerReference(&da, &rev, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("setting AgentSandboxRevision owner reference: %w", err)
 		}
 		logger.Info("Creating AgentSandboxRevision", "name", revName)
@@ -125,15 +125,15 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting AgentSandboxRevision: %w", err)
 	}
-	ta.Status.LatestCreatedRevisionName = revName
+	da.Status.LatestCreatedRevisionName = revName
 
 	revisionReady := metav1.Condition{
 		Type:               condRevisionReady,
-		ObservedGeneration: ta.Generation,
+		ObservedGeneration: da.Generation,
 		LastTransitionTime: now,
 	}
 	if rev.Status.ReadyWorkers >= 1 {
-		ta.Status.LatestReadyRevisionName = revName
+		da.Status.LatestReadyRevisionName = revName
 		revisionReady.Status = metav1.ConditionTrue
 		revisionReady.Reason = "RevisionReady"
 		revisionReady.Message = fmt.Sprintf("Revision %q has %d ready worker(s)", revName, rev.Status.ReadyWorkers)
@@ -143,28 +143,28 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		revisionReady.Reason = "NoWorkersReady"
 		revisionReady.Message = fmt.Sprintf("Revision %q has no ready workers", revName)
 	}
-	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
+	meta.SetStatusCondition(&da.Status.Conditions, revisionReady)
 
 	accepted := metav1.Condition{
 		Type:               condAccepted,
 		Status:             metav1.ConditionTrue,
-		ObservedGeneration: ta.Generation,
+		ObservedGeneration: da.Generation,
 		LastTransitionTime: now,
 		Reason:             "SpecValid",
 		Message:            "Spec is structurally valid",
 	}
-	meta.SetStatusCondition(&ta.Status.Conditions, accepted)
+	meta.SetStatusCondition(&da.Status.Conditions, accepted)
 
 	// Only GC after a fresh revision lands — old revisions don't accumulate
 	// on subsequent reconciles for the same generation, so nothing changed.
-	if created && ta.Generation > maxRevisionHistory {
-		if err := r.gcRevisions(ctx, &ta); err != nil {
+	if created && da.Generation > maxRevisionHistory {
+		if err := r.gcRevisions(ctx, &da); err != nil {
 			logger.Error(err, "Revision GC failed")
 		}
 	}
 
-	ta.Status.ObservedGeneration = ta.Generation
-	if err := r.Status().Update(ctx, &ta); err != nil {
+	da.Status.ObservedGeneration = da.Generation
+	if err := r.Status().Update(ctx, &da); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
@@ -173,18 +173,18 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // gcRevisions deletes old AgentSandboxRevisions beyond the history limit,
 // keeping the latest created and latest ready revisions.
-func (r *TaskAgentRevisionReconciler) gcRevisions(ctx context.Context, ta *clrkv1alpha1.TaskAgent) error {
+func (r *DaemonAgentRevisionReconciler) gcRevisions(ctx context.Context, da *clrkv1alpha1.DaemonAgent) error {
 	var revList clrkv1alpha1.AgentSandboxRevisionList
 	if err := r.List(ctx, &revList, &client.ListOptions{
-		Namespace:     ta.Namespace,
-		LabelSelector: labels.SelectorFromSet(map[string]string{labelAgent: ta.Name}),
+		Namespace:     da.Namespace,
+		LabelSelector: labels.SelectorFromSet(map[string]string{labelAgent: da.Name}),
 	}); err != nil {
 		return fmt.Errorf("listing revisions: %w", err)
 	}
 
 	keep := map[string]bool{
-		ta.Status.LatestCreatedRevisionName: true,
-		ta.Status.LatestReadyRevisionName:   true,
+		da.Status.LatestCreatedRevisionName: true,
+		da.Status.LatestReadyRevisionName:   true,
 	}
 
 	// Sort oldest first by creation timestamp.
@@ -216,10 +216,10 @@ func (r *TaskAgentRevisionReconciler) gcRevisions(ctx context.Context, ta *clrkv
 	return nil
 }
 
-func (r *TaskAgentRevisionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DaemonAgentRevisionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("taskagent-revision").
-		For(&clrkv1alpha1.TaskAgent{}).
+		Named("daemonagent-revision").
+		For(&clrkv1alpha1.DaemonAgent{}).
 		Owns(&clrkv1alpha1.AgentSandboxRevision{}).
 		Complete(r)
 }

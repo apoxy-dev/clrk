@@ -106,6 +106,13 @@ func main() {
 		log.Error(err, "Unable to register controller", "controller", "TaskAgentRevision")
 		os.Exit(1)
 	}
+	if err := (&controller.DaemonAgentRevisionReconciler{
+		Client: cm.GetClient(),
+		Scheme: cm.GetScheme(),
+	}).SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "DaemonAgentRevision")
+		os.Exit(1)
+	}
 
 	if *ingressController {
 		if err := (&controller.TaskAgentIngressReconciler{
