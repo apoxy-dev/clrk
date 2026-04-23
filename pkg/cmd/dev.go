@@ -32,6 +32,8 @@ type devOpts struct {
 	dataDir         string
 	tui             bool
 	tuiSet          bool
+	applyPaths      []string
+	applyRecursive  bool
 }
 
 func newDevCmd() *cobra.Command {
@@ -54,6 +56,8 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().IntVar(&o.workers, "workers", 1, "Number of worker replicas.")
 	cmd.Flags().StringVar(&o.dataDir, "data-dir", "", "Host path for ~/.clrk state (defaults to --clrk-dir).")
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
+	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
+	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
 	return cmd
 }
 
@@ -266,6 +270,14 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		return state, err
 	}
 	slog.Info("Apiserver /readyz is OK")
+
+	// Apply user-supplied manifests before workers start so reconcilers and
+	// workers see the desired world at boot rather than racing against it.
+	if len(o.applyPaths) > 0 {
+		if err := applyManifests(ctx, state.k3s.KubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
+			return state, fmt.Errorf("applying manifests: %w", err)
+		}
+	}
 
 	state.workers = make([]*drivers.WorkerDriver, 0, o.workers)
 	for i := 0; i < o.workers; i++ {
