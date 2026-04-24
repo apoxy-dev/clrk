@@ -25,6 +25,7 @@ import (
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/netstack"
 )
@@ -231,8 +232,13 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	// Use a background context so the netstack outlives the caller's
 	// request-scoped context (e.g. reconciler).
 	if stack, ok := sb.Stack.(*netstack.SandboxStack); ok {
+		dialer := netstack.Dialer(&egress.IdentityDialer{
+			Base:     m.dialer,
+			Identity: sb.Identity,
+			Backend:  sb.EgressBackend,
+		})
 		go func() {
-			if err := stack.Start(context.Background(), m.dialer); err != nil {
+			if err := stack.Start(context.Background(), dialer); err != nil {
 				log.Error(err, "Netstack pump exited")
 			}
 		}()
@@ -249,6 +255,20 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	m.mu.Unlock()
 
 	log.Info("Sandbox started")
+	return nil
+}
+
+// SetEgressBackend configures the EG egress listener address for a
+// sandbox between Create and Start. Empty disables PROXY v2 framing and
+// direct-dials upstream.
+func (m *SandboxManager) SetEgressBackend(id SandboxID, addr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		return ErrNotFound
+	}
+	sb.EgressBackend = addr
 	return nil
 }
 

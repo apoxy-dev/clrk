@@ -2,17 +2,31 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 
+	envoytlsv3 "github.com/apoxy-dev/envoy-go/envoy/service/tls/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	egextpb "github.com/envoyproxy/gateway/proto/extension"
+	"google.golang.org/grpc"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/egextension"
+	"github.com/apoxy-dev/clrk/internal/extproc"
 	"github.com/apoxy-dev/clrk/pkg/apiserver"
+)
+
+const (
+	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-internal/cloud/envoy:91ceed8d"
+	defaultGRPCPort   = 9443
 )
 
 func main() {
@@ -28,6 +42,9 @@ func main() {
 		healthAddr        = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
 		ingressController = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
 		workerDeployment  = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
+		egController      = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
+		envoyImage        = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
+		grpcAddr          = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -132,6 +149,36 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if *egController {
+		if err := (&controller.EgressGatewayReconciler{
+			Client:     cm.GetClient(),
+			Scheme:     cm.GetScheme(),
+			EnvoyImage: *envoyImage,
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "EgressGateway")
+			os.Exit(1)
+		}
+	}
+
+	grpcLis, err := net.Listen("tcp", *grpcAddr)
+	if err != nil {
+		log.Error(err, "Unable to bind gRPC listener", "addr", *grpcAddr)
+		os.Exit(1)
+	}
+	grpcSrv := grpc.NewServer()
+	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
+	extprocv3.RegisterExternalProcessorServer(grpcSrv, extproc.New())
+	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egextension.New(
+		fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort),
+		fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort),
+	))
+	go func() {
+		slog.Info("Serving control-plane gRPC", "addr", grpcLis.Addr().String())
+		if err := grpcSrv.Serve(grpcLis); err != nil {
+			log.Error(err, "gRPC server exited")
+		}
+	}()
+	defer grpcSrv.GracefulStop()
 
 	slog.Info("Controller-manager running",
 		"apiserver", *bindAddr,

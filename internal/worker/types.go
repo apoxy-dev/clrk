@@ -51,5 +51,10 @@ type SandboxInstance struct {
 	// attribute traffic back to its parent agent.
 	Identity proxyproto.AgentIdentity
 
+	// EgressBackend, when non-empty, is the "host:port" of the Envoy
+	// Gateway egress listener that every outbound sandbox TCP conn is
+	// routed to (PROXY v2 framed). Empty means direct dial.
+	EgressBackend string
+
 	CreatedAt time.Time
 }

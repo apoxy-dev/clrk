@@ -178,9 +178,9 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			Revision:  rev.Name,
 		}
 
-		caPEM, err := m.loadAgentCA(ctx, da.Namespace, da.UID)
+		caPEM, err := m.loadEgressCA(ctx, da)
 		if err != nil {
-			log.Error(err, "Failed to load agent CA")
+			log.Error(err, "Failed to load EgressGateway CA")
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return
 			}
@@ -194,6 +194,11 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 				return
 			}
 			continue
+		}
+		if backend := egressBackend(da); backend != "" {
+			if err := m.sandboxMgr.SetEgressBackend(sandboxID, backend); err != nil {
+				log.Error(err, "Set egress backend failed")
+			}
 		}
 		startedAt := time.Now()
 		if err := m.sandboxMgr.Start(ctx, sandboxID); err != nil {
@@ -384,21 +389,47 @@ func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alph
 	}
 }
 
-// loadAgentCA fetches the per-agent MITM CA cert PEM from its Secret. The
-// agent CA reconciler provisions this Secret; an error here means the Secret
-// hasn't landed yet and the caller should back off.
-func (m *daemonLifecycleManager) loadAgentCA(ctx context.Context, namespace string, uid types.UID) ([]byte, error) {
+// egressBackend returns the DNS address workers dial for the DaemonAgent's
+// first EgressGateway ref. The EgressGateway controller creates a Gateway
+// (and thus a Service) per EG using the GatewayNamePrefix convention; we
+// resolve it by DNS. Empty return means "no MITM, direct dial".
+func egressBackend(da *clrkv1alpha1.DaemonAgent) string {
+	if len(da.Spec.EgressRefs) == 0 {
+		return ""
+	}
+	egName := da.Spec.EgressRefs[0].GatewayRef
+	// Envoy Gateway names its Service "envoy-<gateway-namespace>-
+	// <gateway-name>-<hash>"; the hash is non-deterministic so we rely on
+	// a clrk-side headless Service created by the EgressGateway
+	// controller under the same name as the Gateway. Follow-up: replace
+	// with a lookup off EgressGateway.Status.BackendAddress when the
+	// controller populates it.
+	return fmt.Sprintf("clrk-eg-%s.%s.svc.cluster.local:%d",
+		egName, da.Namespace, clrkcontroller.EgressListenerPort)
+}
+
+// loadEgressCA fetches the MITM CA cert PEM for the DaemonAgent's first
+// EgressGateway ref. An agent with no EgressRefs has nothing to MITM, so we
+// return nil (sandbox is then created without trust injection and egress
+// either fails closed or is bypassed depending on route table policy). An
+// error here means the Secret hasn't landed yet and the caller should back
+// off.
+func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]byte, error) {
+	if len(da.Spec.EgressRefs) == 0 {
+		return nil, nil
+	}
+	egName := da.Spec.EgressRefs[0].GatewayRef
 	var sec corev1.Secret
 	key := types.NamespacedName{
-		Name:      clrkcontroller.AgentCASecretName(uid),
-		Namespace: namespace,
+		Name:      clrkcontroller.EgressGatewayCASecretName(egName),
+		Namespace: da.Namespace,
 	}
 	if err := m.client.Get(ctx, key, &sec); err != nil {
-		return nil, fmt.Errorf("fetching agent CA secret %s: %w", key, err)
+		return nil, fmt.Errorf("fetching EgressGateway CA secret %s: %w", key, err)
 	}
 	caPEM := sec.Data[corev1.TLSCertKey]
 	if len(caPEM) == 0 {
-		return nil, fmt.Errorf("agent CA secret %s has empty %s", key, corev1.TLSCertKey)
+		return nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", key, corev1.TLSCertKey)
 	}
 	return caPEM, nil
 }
