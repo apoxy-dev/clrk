@@ -151,6 +151,13 @@ func (d *K3sDriver) KubeconfigPath() string {
 	return filepath.Join(d.DataDir, KubeconfigFileName)
 }
 
+// HostKubeconfigPath is the host path to the kubeconfig tests and host
+// tools can use to reach k3s via the published port. Only populated when
+// HostPort > 0.
+func (d *K3sDriver) HostKubeconfigPath() string {
+	return filepath.Join(d.DataDir, "kubeconfig.host")
+}
+
 // extractKubeconfig polls `docker exec cat /etc/rancher/k3s/k3s.yaml`
 // until it succeeds, rewrites the server URL to the in-network hostname,
 // and writes the result to <DataDir>/kubeconfig.
@@ -191,6 +198,21 @@ func (d *K3sDriver) extractKubeconfig(ctx context.Context) error {
 
 	if err := os.WriteFile(d.KubeconfigPath(), []byte(rewritten), 0o644); err != nil {
 		return fmt.Errorf("writing kubeconfig: %w", err)
+	}
+
+	// Write a host-side kubeconfig next to the docker-network one so
+	// integration tests running on the host (e.g. bazel test
+	// //tests/integration/clrk) can reach k3s. Requires HostPort>0 so
+	// the published 127.0.0.1:<port> mapping actually exists.
+	if d.HostPort > 0 {
+		hostKubeconfig := strings.ReplaceAll(
+			string(raw),
+			"https://127.0.0.1:6443",
+			fmt.Sprintf("https://127.0.0.1:%d", d.HostPort),
+		)
+		if err := os.WriteFile(d.HostKubeconfigPath(), []byte(hostKubeconfig), 0o644); err != nil {
+			return fmt.Errorf("writing host kubeconfig: %w", err)
+		}
 	}
 	return nil
 }

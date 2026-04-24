@@ -202,6 +202,11 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 
 	state.k3s = drivers.NewK3sDriver(o.dataDir)
+	// Publish the apiserver port on the host so bazel/kubectl/int-tests
+	// running outside docker can reach k3s via 127.0.0.1:6443. The
+	// controller-manager still talks to k3s over the docker-DNS name
+	// clrk-k3s via its own in-container kubeconfig.
+	state.k3s.HostPort = 6443
 	if err := withStatus(prog, drivers.K3sContainerName, func() error {
 		if _, err := state.k3s.Start(ctx, drivers.WithImage(o.k3sImage)); err != nil {
 			return fmt.Errorf("starting k3s: %w", err)
@@ -227,6 +232,12 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
 		drivers.WithEnv(map[string]string{
 			"KUBECONFIG": "/var/lib/clrk/kubeconfig",
+			// Tolerate duplicate Envoy protobuf registrations: envoy-go and
+			// envoyproxy/go-control-plane both register TLS proto files
+			// because envoyproxy/gateway's extension proto transitively
+			// imports go-control-plane's TLS types. Matches the pattern
+			// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
+			"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
 		}),
 		drivers.WithArgs(
 			"--db=/var/lib/clrk/data.db",

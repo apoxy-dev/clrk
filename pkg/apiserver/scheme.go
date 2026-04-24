@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,4 +26,9 @@ func init() {
 	utilruntime.Must(corev1.AddToScheme(Scheme))
 	utilruntime.Must(appsv1.AddToScheme(Scheme))
 	utilruntime.Must(gwapiv1.Install(Scheme))
+	// Envoy Gateway EnvoyProxy is optional at runtime (the controller
+	// tolerates NoMatchError when the CRD is missing), but we still need
+	// the type registered so the controller can construct typed objects
+	// even on the happy path.
+	utilruntime.Must(egv1alpha1.AddToScheme(Scheme))
 }
