@@ -45,6 +45,10 @@ type SandboxManager struct {
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
+	// processes retains the libcontainer.Process for each running sandbox
+	// so callers (Wait) can block on its exit. Kept off SandboxInstance to
+	// avoid leaking a linux-only type into the cross-platform types.go.
+	processes map[SandboxID]*libcontainer.Process
 }
 
 // NewSandboxManager creates a new SandboxManager.
@@ -55,6 +59,7 @@ func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer 
 		imageStore: imageStore,
 		dialer:     dialer,
 		sandboxes:  make(map[SandboxID]*SandboxInstance),
+		processes:  make(map[SandboxID]*libcontainer.Process),
 	}
 }
 
@@ -218,10 +223,34 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 
 	m.mu.Lock()
 	sb.Phase = SandboxRunning
+	m.processes[id] = p
 	m.mu.Unlock()
 
 	log.Info("Sandbox started")
 	return nil
+}
+
+// Wait blocks until the sandbox's init process exits. Returns ErrNotFound
+// if the sandbox is unknown or was never Started. The caller is responsible
+// for calling Delete after Wait returns.
+func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error) {
+	m.mu.Lock()
+	p, ok := m.processes[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	state, err := p.Wait()
+
+	m.mu.Lock()
+	if sb, ok := m.sandboxes[id]; ok {
+		sb.Phase = SandboxStopped
+	}
+	delete(m.processes, id)
+	m.mu.Unlock()
+
+	return state, err
 }
 
 // Stop sends SIGTERM to all processes in the sandbox.

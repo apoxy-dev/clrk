@@ -48,10 +48,14 @@ func (r *Runtime) Start(ctx context.Context) error {
 		log.Error(err, "Failed to cleanup orphaned containers")
 	}
 
+	// Daemon supervisor — owns one goroutine per elected DaemonAgent.
+	daemonMgr := newDaemonLifecycleManager(ctx, sandboxMgr, r.Client, r.PodName)
+
 	// Set up SandboxState watcher.
 	watcher := &sandboxWatcher{
 		Client:     r.Client,
 		sandboxMgr: sandboxMgr,
+		daemonMgr:  daemonMgr,
 		poolName:   r.PoolName,
 		podName:    r.PodName,
 		namespace:  r.Namespace,
@@ -74,8 +78,10 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Block until context is cancelled.
 	<-ctx.Done()
 
-	// Graceful shutdown.
+	// Graceful shutdown — drain daemon loops first so they don't race with
+	// SandboxManager teardown.
 	log.Info("Shutting down worker runtime")
+	daemonMgr.Shutdown()
 	shutdown(sandboxMgr)
 
 	return nil

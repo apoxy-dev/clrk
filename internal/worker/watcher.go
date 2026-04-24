@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,6 +24,7 @@ import (
 type sandboxWatcher struct {
 	client.Client
 	sandboxMgr *SandboxManager
+	daemonMgr  *daemonLifecycleManager
 	poolName   string
 	podName    string
 	namespace  string
@@ -59,7 +62,67 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, fmt.Errorf("updating worker status: %w", err)
 	}
 
+	if rev.Labels[clrkv1alpha1.LabelAgentKind] == clrkv1alpha1.AgentKindDaemon {
+		if err := w.handleDaemon(ctx, &rev); err != nil {
+			return ctrl.Result{}, fmt.Errorf("daemon lifecycle: %w", err)
+		}
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// handleDaemon drives the daemon supervisor for a DaemonAgent revision. The
+// elected worker (lowest-named pod with a fresh heartbeat) runs the loop;
+// every other worker tears down any loop it might still be holding.
+func (w *sandboxWatcher) handleDaemon(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision) error {
+	agentName := rev.Labels[clrkv1alpha1.LabelAgent]
+	if agentName == "" {
+		return nil
+	}
+	key := types.NamespacedName{Namespace: rev.Namespace, Name: agentName}
+
+	var da clrkv1alpha1.DaemonAgent
+	if err := w.Get(ctx, key, &da); err != nil {
+		if apierrors.IsNotFound(err) {
+			w.daemonMgr.Stop(key)
+			return nil
+		}
+		return fmt.Errorf("getting DaemonAgent: %w", err)
+	}
+
+	// Only run the latest revision; older revisions get drained.
+	if da.Status.LatestCreatedRevisionName != "" && da.Status.LatestCreatedRevisionName != rev.Name {
+		return nil
+	}
+
+	if !w.electedFor(rev) {
+		w.daemonMgr.Stop(key)
+		return nil
+	}
+
+	w.daemonMgr.Ensure(&da, rev)
+	return nil
+}
+
+// electedFor picks the lowest-named worker pod with a recent heartbeat from
+// rev.Status.Workers. Single-replica MVP — not a real lease.
+func (w *sandboxWatcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool {
+	staleAfter := 2 * heartbeatInterval
+	cutoff := time.Now().Add(-staleAfter)
+
+	leader := w.podName
+	for _, ws := range rev.Status.Workers {
+		if ws.PodName == w.podName {
+			continue
+		}
+		if ws.LastHeartbeat.Time.Before(cutoff) {
+			continue
+		}
+		if ws.PodName < leader {
+			leader = ws.PodName
+		}
+	}
+	return leader == w.podName
 }
 
 // updateWorkerStatus upserts this worker's entry in
