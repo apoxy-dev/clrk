@@ -7,6 +7,7 @@ import (
 	"time"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
 // SandboxID uniquely identifies a sandbox instance within a worker.
@@ -44,6 +45,11 @@ type SandboxInstance struct {
 
 	Sandbox   clrkv1alpha1.AgentSandbox
 	Resources clrkv1alpha1.ExecutionResources
+
+	// Identity is stamped into PROXY v2 TLVs on every egress connection
+	// dialed through this sandbox's netstack so the Envoy MITM gateway can
+	// attribute traffic back to its parent agent.
+	Identity proxyproto.AgentIdentity
 
 	CreatedAt time.Time
 }

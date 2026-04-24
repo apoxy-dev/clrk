@@ -25,6 +25,7 @@ import (
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/netstack"
 )
 
@@ -67,13 +68,15 @@ func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer 
 // and creates a libcontainer container. The container is created but NOT
 // started, leaving it in the Ready phase for warm pool use.
 //
-// agentRef and resources come from the parent agent (TaskAgent or
-// DaemonAgent), since AgentSandboxRevision (the watched resource) only
+// agentRef, identity, and resources come from the parent agent (TaskAgent
+// or DaemonAgent), since AgentSandboxRevision (the watched resource) only
 // carries the immutable image+command snapshot.
 func (m *SandboxManager) Create(
 	ctx context.Context,
 	id SandboxID,
 	agentRef string,
+	identity proxyproto.AgentIdentity,
+	caPEM []byte,
 	sandbox clrkv1alpha1.AgentSandbox,
 	resources clrkv1alpha1.ExecutionResources,
 ) (*SandboxInstance, error) {
@@ -114,9 +117,24 @@ func (m *SandboxManager) Create(
 	// 5. Build libcontainer config.
 	cfg := baseConfig(string(id), sandboxRootFS, resources)
 
+	// 5a. Stage the agent's MITM CA and bind-mount it over every well-known
+	// system trust path that exists in the sandbox rootfs. The rootfs is
+	// read-only, so we can only overlay files that already exist — hence
+	// the env-var fallback in Start.
+	if len(caPEM) > 0 {
+		caPath, err := m.writeAgentCA(id, caPEM)
+		if err != nil {
+			stack.Close()
+			TeardownNetNS(nsCfg)
+			return nil, fmt.Errorf("staging agent CA: %w", err)
+		}
+		cfg.Mounts = append(cfg.Mounts, buildTrustMounts(sandboxRootFS, caPath)...)
+	}
+
 	// 6. Create container (does NOT start it).
 	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)
 	if err != nil {
+		m.removeAgentCA(id)
 		stack.Close()
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("creating container: %w", err)
@@ -135,6 +153,7 @@ func (m *SandboxManager) Create(
 		Stack:     stack,
 		Sandbox:   sandbox,
 		Resources: resources,
+		Identity:  identity,
 		CreatedAt: time.Now(),
 	}
 
@@ -177,7 +196,10 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	}
 	args = append(args, sb.Sandbox.Args...)
 
-	env := envVarsToStrings(sb.Sandbox.Env)
+	// Prepend MITM trust env vars so that user-supplied env can override
+	// them if an agent explicitly wants a different trust store.
+	env := append([]string(nil), trustEnv("/etc/ssl/certs/ca-certificates.crt")...)
+	env = append(env, envVarsToStrings(sb.Sandbox.Env)...)
 	// Ensure PATH is set.
 	hasPath := false
 	for _, e := range env {
@@ -343,6 +365,8 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 	}); err != nil {
 		log.Error(err, "Failed to teardown netns")
 	}
+
+	m.removeAgentCA(id)
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)

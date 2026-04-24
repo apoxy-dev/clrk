@@ -85,6 +85,56 @@ type EgressGatewaySpec struct {
 	// Routes attach to a specific listener by name via parentRef.sectionName.
 	// +kubebuilder:validation:MinItems=1
 	Listeners []EgressListener `json:"listeners"`
+
+	// ExtProc configures the L7 HTTP body-capture plugin wired into the
+	// Envoy HCM filter chain. Disabled by default — the MITM path still
+	// works without body capture, traffic just doesn't get logged.
+	// +optional
+	ExtProc *ExtProcSpec `json:"extProc,omitempty"`
+
+	// OTLP is the OTLP/HTTP logs sink for captured request/response pairs.
+	// Required when ExtProc.Enabled is true.
+	// +optional
+	OTLP *OTLPLogsSinkSpec `json:"otlp,omitempty"`
+}
+
+// ExtProcSpec configures the ext_proc body-capture plugin.
+type ExtProcSpec struct {
+	// Enabled toggles ext_proc for this gateway.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// CaptureBody bounds how much of the request/response body is captured
+	// and emitted to the OTLP sink.
+	// +optional
+	CaptureBody *BodyCaptureSpec `json:"captureBody,omitempty"`
+}
+
+// BodyCaptureSpec governs request/response body capture bounds.
+type BodyCaptureSpec struct {
+	// MaxBytes caps the captured body size per direction. Bodies larger
+	// than this are truncated; the log record carries a truncated marker.
+	// +kubebuilder:default=65536
+	// +optional
+	MaxBytes *int32 `json:"maxBytes,omitempty"`
+
+	// IncludeContentTypes limits body capture to these Content-Type
+	// prefixes. Empty means the default set (application/json,
+	// application/x-ndjson, text/event-stream).
+	// +optional
+	IncludeContentTypes []string `json:"includeContentTypes,omitempty"`
+}
+
+// OTLPLogsSinkSpec configures the OTLP/HTTP endpoint receiving captured
+// request/response records from ext_proc.
+type OTLPLogsSinkSpec struct {
+	// Endpoint is the OTLP/HTTP base URL (e.g. "https://otel.example.com").
+	Endpoint string `json:"endpoint"`
+
+	// Headers are added to every OTLP export — typically used to carry
+	// authentication tokens.
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // EgressListenerStatus describes the status of a single listener.

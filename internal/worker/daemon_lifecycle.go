@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -19,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=daemonagents,verbs=get;list;watch
@@ -167,8 +170,25 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		sandboxID := SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, attempt))
 		log := log.WithValues("sandboxID", sandboxID, "attempt", attempt)
 
+		identity := proxyproto.AgentIdentity{
+			Kind:      proxyproto.AgentKindDaemon,
+			Namespace: da.Namespace,
+			Name:      da.Name,
+			UID:       string(da.UID),
+			Revision:  rev.Name,
+		}
+
+		caPEM, err := m.loadAgentCA(ctx, da.Namespace, da.UID)
+		if err != nil {
+			log.Error(err, "Failed to load agent CA")
+			if !m.sleepBackoff(ctx, &backoffExp) {
+				return
+			}
+			continue
+		}
+
 		log.Info("Starting daemon sandbox")
-		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, rev.Spec.AgentSandbox, da.Spec.Resources); err != nil {
+		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources); err != nil {
 			log.Error(err, "Failed to create sandbox")
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return
@@ -362,4 +382,23 @@ func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alph
 		}
 		log.Error(err, "Failed to patch DaemonAgent status")
 	}
+}
+
+// loadAgentCA fetches the per-agent MITM CA cert PEM from its Secret. The
+// agent CA reconciler provisions this Secret; an error here means the Secret
+// hasn't landed yet and the caller should back off.
+func (m *daemonLifecycleManager) loadAgentCA(ctx context.Context, namespace string, uid types.UID) ([]byte, error) {
+	var sec corev1.Secret
+	key := types.NamespacedName{
+		Name:      clrkcontroller.AgentCASecretName(uid),
+		Namespace: namespace,
+	}
+	if err := m.client.Get(ctx, key, &sec); err != nil {
+		return nil, fmt.Errorf("fetching agent CA secret %s: %w", key, err)
+	}
+	caPEM := sec.Data[corev1.TLSCertKey]
+	if len(caPEM) == 0 {
+		return nil, fmt.Errorf("agent CA secret %s has empty %s", key, corev1.TLSCertKey)
+	}
+	return caPEM, nil
 }
