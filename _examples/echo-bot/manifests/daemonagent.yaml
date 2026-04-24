@@ -1,0 +1,17 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: echo-bot
+spec:
+  workerPoolRef: echo-bot
+  restartPolicy: Always
+  egressRefs:
+    - gatewayRef: echo-bot
+  template:
+    spec:
+      image: ghcr.io/apoxy-dev/clrk/echo-bot:latest
+      env:
+        - name: ECHO_TARGET
+          value: https://httpbin.org/anything
+        - name: ECHO_INTERVAL
+          value: 5s

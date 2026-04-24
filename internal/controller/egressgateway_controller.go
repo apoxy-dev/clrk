@@ -7,6 +7,7 @@ import (
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -72,14 +73,26 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if err := r.ensureEnvoyProxy(ctx, &eg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensuring EnvoyProxy: %w", err)
+		if meta.IsNoMatchError(err) {
+			logger.V(1).Info("EnvoyProxy CRD not installed, skipping EnvoyProxy reconciliation")
+		} else {
+			return ctrl.Result{}, fmt.Errorf("ensuring EnvoyProxy: %w", err)
+		}
 	}
 
 	if err := r.ensureGatewayClass(ctx); err != nil {
+		if meta.IsNoMatchError(err) {
+			logger.V(1).Info("Gateway API CRDs not installed, skipping Gateway reconciliation")
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("ensuring GatewayClass: %w", err)
 	}
 
 	if err := r.ensureGateway(ctx, &eg); err != nil {
+		if meta.IsNoMatchError(err) {
+			logger.V(1).Info("Gateway API CRDs not installed, skipping Gateway reconciliation")
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("ensuring Gateway: %w", err)
 	}
 
@@ -88,14 +101,18 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 func (r *EgressGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Do not Own EnvoyProxy / Gateway here — their CRDs may not be
+	// present in the cluster (e.g. clrk dev without Envoy Gateway
+	// installed) and Owns() would fail manager setup. We still re-
+	// reconcile on CA Secret changes so expiry or operator actions
+	// on the Secret trigger mint logic.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.EgressGateway{}).
 		Owns(&corev1.Secret{}).
-		Owns(&egv1alpha1.EnvoyProxy{}).
-		Owns(&gwapiv1.Gateway{}).
 		Named("egressgateway").
 		Complete(r)
 }
+
 
 // ensureCASecret mints the per-EgressGateway MITM CA if one doesn't exist.
 // The Secret is owned by the EgressGateway so deletion cascades cleanly.

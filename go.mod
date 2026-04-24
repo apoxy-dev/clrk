@@ -21,14 +21,14 @@ require (
 	golang.org/x/sys v0.40.0
 	google.golang.org/grpc v1.78.0
 	gvisor.dev/gvisor v0.0.0-20260421223920-580553b31b48
-	k8s.io/api v0.35.0
-	k8s.io/apimachinery v0.35.0
-	k8s.io/apiserver v0.35.0
-	k8s.io/client-go v0.35.0
+	k8s.io/api v0.34.3
+	k8s.io/apimachinery v0.34.3
+	k8s.io/apiserver v0.34.3
+	k8s.io/client-go v0.34.3
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	oras.land/oras-go/v2 v2.6.0
-	sigs.k8s.io/controller-runtime v0.23.1
-	sigs.k8s.io/gateway-api v1.4.1
+	sigs.k8s.io/controller-runtime v0.22.5
+	sigs.k8s.io/gateway-api v1.3.0
 )
 
 require (
@@ -130,8 +130,8 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/apiextensions-apiserver v0.35.0 // indirect
-	k8s.io/component-base v0.35.0 // indirect
+	k8s.io/apiextensions-apiserver v0.34.3 // indirect
+	k8s.io/component-base v0.34.3 // indirect
 	k8s.io/kms v0.35.4 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect

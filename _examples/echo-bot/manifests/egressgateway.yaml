@@ -1,0 +1,17 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: echo-bot
+spec:
+  defaultPolicy: allow-all
+  listeners:
+    - name: egress
+      protocol: TLS
+      tls:
+        mode: Terminate
+  extProc:
+    enabled: true
+    captureBody:
+      maxBytes: 65536
+  otlp:
+    endpoint: http://otel-collector.observability.svc:4318

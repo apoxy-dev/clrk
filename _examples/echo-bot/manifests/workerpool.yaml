@@ -1,0 +1,9 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: echo-bot
+spec:
+  replicas: 1
+  template:
+    spec:
+      image: ghcr.io/apoxy-dev/clrk/worker:latest

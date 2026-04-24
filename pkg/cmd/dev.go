@@ -237,6 +237,10 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			// directly via docker — a Deployment would create a duplicate
 			// worker pod inside k3s with broken nested-container semantics.
 			"--ingress-controller=true",
+			// EgressGateway reconciler is on: the controller is tolerant
+			// of missing EnvoyProxy CRD (dev doesn't install Envoy Gateway
+			// operator) and still mints per-EG MITM CA + Gateway objects.
+			"--egressgateway-controller=true",
 		),
 	}
 	if o.watch {
