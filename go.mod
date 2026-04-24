@@ -1,6 +1,6 @@
 module github.com/apoxy-dev/clrk
 
-go 1.25.9
+go 1.25.5
 
 require (
 	github.com/apoxy-dev/apoxy v0.19.3-0.20260423043546-435f287ab5ae
