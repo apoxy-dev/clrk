@@ -45,6 +45,7 @@ func main() {
 		egController      = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
 		envoyImage        = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
 		grpcAddr          = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
+		grpcAdvertiseURI  = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -168,10 +169,7 @@ func main() {
 	grpcSrv := grpc.NewServer()
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extproc.New())
-	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egextension.New(
-		fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort),
-		fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort),
-	))
+	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI))
 	go func() {
 		slog.Info("Serving control-plane gRPC", "addr", grpcLis.Addr().String())
 		if err := grpcSrv.Serve(grpcLis); err != nil {

@@ -203,10 +203,11 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 
 	state.k3s = drivers.NewK3sDriver(o.dataDir)
 	// Publish the apiserver port on the host so bazel/kubectl/int-tests
-	// running outside docker can reach k3s via 127.0.0.1:6443. The
+	// running outside docker can reach k3s via 127.0.0.1:<HostPort>. The
 	// controller-manager still talks to k3s over the docker-DNS name
-	// clrk-k3s via its own in-container kubeconfig.
-	state.k3s.HostPort = 6443
+	// clrk-k3s via its own in-container kubeconfig. Non-standard port
+	// avoids collision with other local clusters (kind, k3d, minikube).
+	state.k3s.HostPort = 16443
 	if err := withStatus(prog, drivers.K3sContainerName, func() error {
 		if _, err := state.k3s.Start(ctx, drivers.WithImage(o.k3sImage)); err != nil {
 			return fmt.Errorf("starting k3s: %w", err)
@@ -225,6 +226,11 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		return state, fmt.Errorf("installing Gateway API CRDs: %w", err)
 	}
 	slog.Info("Gateway API CRDs installed")
+
+	if err := state.k3s.InstallEnvoyGateway(ctx); err != nil {
+		return state, fmt.Errorf("installing Envoy Gateway operator: %w", err)
+	}
+	slog.Info("Envoy Gateway operator installed")
 
 	state.cm = drivers.NewControllerManagerDriver()
 	cmOpts := []drivers.Option{
@@ -248,10 +254,12 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			// directly via docker — a Deployment would create a duplicate
 			// worker pod inside k3s with broken nested-container semantics.
 			"--ingress-controller=true",
-			// EgressGateway reconciler is on: the controller is tolerant
-			// of missing EnvoyProxy CRD (dev doesn't install Envoy Gateway
-			// operator) and still mints per-EG MITM CA + Gateway objects.
+			// EgressGateway reconciler is on.
 			"--egressgateway-controller=true",
+			// Advertise the bridge Service DNS so EG data plane Envoy pods
+			// dial the controller-manager via in-cluster coredns →
+			// manually-managed Endpoints → docker-network IP.
+			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
 		),
 	}
 	if o.watch {
@@ -276,6 +284,19 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			return fmt.Errorf("registering clrk APIService: %w", err)
 		}
 		slog.Info("clrk APIService registered in k3s", "backend", cmIP)
+
+		// Bridge Envoy-Gateway-provisioned Envoy pods (inside k3s) to the
+		// controller-manager's gRPC on the docker network. ConfigMap patch
+		// restarts the EG operator so it picks up the new extensionManager.
+		if err := state.k3s.ApplyControllerManagerBridge(ctx, cmIP, 9443); err != nil {
+			return fmt.Errorf("bridging controller-manager gRPC: %w", err)
+		}
+		if err := state.k3s.ConfigureEnvoyGatewayExtension(ctx,
+			"clrk-controller-manager.clrk-system.svc.cluster.local", 9443); err != nil {
+			return fmt.Errorf("configuring Envoy Gateway extension: %w", err)
+		}
+		slog.Info("Envoy Gateway extensionManager wired to controller-manager",
+			"bridge", fmt.Sprintf("clrk-controller-manager.clrk-system.svc.cluster.local:%d → %s:%d", 9443, cmIP, 9443))
 
 		if err := waitReadyzInContainer(ctx, drivers.ControllerManagerContainerName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
 			return fmt.Errorf("controller-manager never became ready: %w", err)

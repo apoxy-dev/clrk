@@ -19,8 +19,9 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	// Enable cgroup manager to manage devices.
-	_ "github.com/opencontainers/runc/libcontainer/cgroups/devices"
+	// Enable cgroup manager to manage devices. runc v1.3 split this out of
+	// the runc module into opencontainers/cgroups.
+	_ "github.com/opencontainers/cgroups/devices"
 	// nsenter is required for libcontainer container init.
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
@@ -216,7 +217,8 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	p := &libcontainer.Process{
 		Args:            args,
 		Env:             env,
-		User:            "0:0",
+		UID:             0,
+		GID:             0,
 		Cwd:             "/",
 		NoNewPrivileges: ptr.To(true),
 		Stdin:           nil,

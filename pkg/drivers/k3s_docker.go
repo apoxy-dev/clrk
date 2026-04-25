@@ -270,3 +270,109 @@ const GatewayAPIInstallURL = "https://github.com/kubernetes-sigs/gateway-api/rel
 func (d *K3sDriver) InstallGatewayAPI(ctx context.Context) error {
 	return d.KubectlApply(ctx, GatewayAPIInstallURL, nil)
 }
+
+// EnvoyGatewayInstallURL is pinned close to the pseudo-version of the
+// envoyproxy/gateway module clrk imports (main branch, 2024-06-18). The
+// extension-server proto contract is stable across 1.x releases, so v1.1.3
+// is a safe in-range target for dev.
+const EnvoyGatewayInstallURL = "https://github.com/envoyproxy/gateway/releases/download/v1.1.3/install.yaml"
+
+// InstallEnvoyGateway installs the Envoy Gateway operator + CRDs into k3s.
+// Server-side apply is required: the EnvoyProxy CRD's openAPIV3 schema
+// is large enough that kubectl's last-applied-configuration annotation
+// would exceed the 256KB metadata.annotations limit on client-side apply.
+// The operator starts with its default config; ConfigureEnvoyGatewayExtension
+// must be called afterward to point its extensionManager at the clrk
+// controller-manager gRPC service and trigger an operator rollout.
+func (d *K3sDriver) InstallEnvoyGateway(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "docker", "exec", K3sContainerName,
+		"kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml",
+		"apply", "--server-side", "--force-conflicts", "-f", EnvoyGatewayInstallURL,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl apply %s: %w: %s", EnvoyGatewayInstallURL, err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+// ApplyControllerManagerBridge creates the clrk-system namespace plus a
+// selector-less Service (clrk-controller-manager) with a manually-managed
+// Endpoints object pointing at cmIP. This is how in-cluster Envoy pods
+// reach the controller-manager gRPC that runs as a docker container on
+// the shared docker network: k3s pods route docker-network IPs via their
+// node's default gateway, and coredns resolves the Service DNS name.
+func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, cmIP string, port int32) error {
+	yaml := fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: clrk-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clrk-controller-manager
+  namespace: clrk-system
+spec:
+  ports:
+    - name: grpc
+      port: %d
+      protocol: TCP
+      targetPort: %d
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: clrk-controller-manager
+  namespace: clrk-system
+subsets:
+  - addresses:
+      - ip: %s
+    ports:
+      - name: grpc
+        port: %d
+        protocol: TCP
+`, port, port, cmIP, port)
+	return d.KubectlApply(ctx, "-", []byte(yaml))
+}
+
+// ConfigureEnvoyGatewayExtension replaces the envoy-gateway-config
+// ConfigMap shipped by install.yaml with one whose extensionManager
+// dials the clrk controller-manager. PostHTTPListenerModify is the hook
+// our internal/egextension implements — we only enable it. Restarts the
+// operator Deployment so the new config takes effect.
+func (d *K3sDriver) ConfigureEnvoyGatewayExtension(ctx context.Context, host string, port int32) error {
+	yaml := fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-gateway-config
+  namespace: envoy-gateway-system
+data:
+  envoy-gateway.yaml: |
+    apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyGateway
+    gateway:
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    extensionManager:
+      hooks:
+        xdsTranslator:
+          post:
+          - HTTPListener
+          - Translation
+      service:
+        host: %s
+        port: %d
+    provider:
+      type: Kubernetes
+`, host, port)
+	if err := d.KubectlApply(ctx, "-", []byte(yaml)); err != nil {
+		return fmt.Errorf("writing envoy-gateway-config: %w", err)
+	}
+	out, err := exec.CommandContext(ctx, "docker", "exec", K3sContainerName,
+		"kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml",
+		"-n", "envoy-gateway-system", "rollout", "restart", "deployment/envoy-gateway",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("restarting envoy-gateway operator: %w: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}
