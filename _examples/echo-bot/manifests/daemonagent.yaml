@@ -3,7 +3,7 @@ kind: DaemonAgent
 metadata:
   name: echo-bot
 spec:
-  workerPoolRef: echo-bot
+  workerPoolRef: default
   restartPolicy: Always
   egressRefs:
     - gatewayRef: echo-bot

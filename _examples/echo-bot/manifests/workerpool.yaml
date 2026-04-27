@@ -1,9 +1,14 @@
 apiVersion: clrk.apoxy.dev/v1alpha1
 kind: WorkerPool
 metadata:
-  name: echo-bot
+  # Must be "default" in clrk dev: each worker container is hardcoded to
+  # join CLRK_POOL_NAME=default, and DaemonAgent revisions only land on a
+  # worker whose pool name matches.
+  name: default
 spec:
   replicas: 1
-  template:
+  podTemplate:
     spec:
-      image: ghcr.io/apoxy-dev/clrk/worker:latest
+      containers:
+        - name: worker
+          image: clrk/worker:latest

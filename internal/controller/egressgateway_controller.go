@@ -191,18 +191,14 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 }
 
 // ensureGatewayClass creates the shared GatewayClass the first time it's
-// needed. No owner reference because the class is cluster-scoped and
-// shared across all EgressGateways.
+// needed. No parametersRef — each Gateway carries its own
+// infrastructure.parametersRef pointing at the per-EG EnvoyProxy CR so
+// the private-Envoy image override applies per-EgressGateway.
 func (r *EgressGatewayReconciler) ensureGatewayClass(ctx context.Context) error {
 	gc := &gwapiv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: EgressGatewayClassName}}
 	_, err := ctrl.CreateOrUpdate(ctx, r.Client, gc, func() error {
 		gc.Spec.ControllerName = gwapiv1.GatewayController("gateway.envoyproxy.io/gatewayclass-controller")
-		gc.Spec.ParametersRef = &gwapiv1.ParametersReference{
-			Group:     gwapiv1.Group(egv1alpha1.GroupVersion.Group),
-			Kind:      gwapiv1.Kind(egv1alpha1.KindEnvoyProxy),
-			Name:      "clrk-egress",
-			Namespace: ptrNamespace("default"),
-		}
+		gc.Spec.ParametersRef = nil
 		return nil
 	})
 	return err
@@ -210,7 +206,9 @@ func (r *EgressGatewayReconciler) ensureGatewayClass(ctx context.Context) error 
 
 // ensureGateway creates or updates the Gateway referencing our class with a
 // single TCP listener. The extension server picks listeners owned by clrk
-// via the "clrk-eg-*" name prefix.
+// via the "clrk-eg-*" name prefix. The Gateway carries an infrastructure
+// parametersRef so EG provisions Envoy with the per-EG EnvoyProxy spec
+// (which pins our private image).
 func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
 	gw := &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -227,14 +225,16 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 				Protocol: gwapiv1.TCPProtocolType,
 			},
 		}
+		gw.Spec.Infrastructure = &gwapiv1.GatewayInfrastructure{
+			ParametersRef: &gwapiv1.LocalParametersReference{
+				Group: gwapiv1.Group(egv1alpha1.GroupVersion.Group),
+				Kind:  gwapiv1.Kind(egv1alpha1.KindEnvoyProxy),
+				Name:  envoyProxyName(eg.Name),
+			},
+		}
 		return ctrl.SetControllerReference(eg, gw, r.Scheme)
 	})
 	return err
 }
 
 func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egName }
-
-func ptrNamespace(ns string) *gwapiv1.Namespace {
-	n := gwapiv1.Namespace(ns)
-	return &n
-}

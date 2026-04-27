@@ -222,15 +222,19 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 	slog.Info("k3s API is ready", "kubeconfig", state.k3s.KubeconfigPath())
 
-	if err := state.k3s.InstallGatewayAPI(ctx); err != nil {
-		return state, fmt.Errorf("installing Gateway API CRDs: %w", err)
-	}
-	slog.Info("Gateway API CRDs installed")
-
+	// Order matters: EG install.yaml ships its own (older) gateway-api
+	// CRDs and would clobber a freshly-installed v1.2.1 set, dropping the
+	// Gateway.spec.infrastructure field our EgressGateway controller
+	// programs. Install EG first, then upgrade the CRDs to v1.2.1.
 	if err := state.k3s.InstallEnvoyGateway(ctx); err != nil {
 		return state, fmt.Errorf("installing Envoy Gateway operator: %w", err)
 	}
 	slog.Info("Envoy Gateway operator installed")
+
+	if err := state.k3s.InstallGatewayAPI(ctx); err != nil {
+		return state, fmt.Errorf("installing Gateway API CRDs: %w", err)
+	}
+	slog.Info("Gateway API CRDs installed")
 
 	state.cm = drivers.NewControllerManagerDriver()
 	cmOpts := []drivers.Option{
