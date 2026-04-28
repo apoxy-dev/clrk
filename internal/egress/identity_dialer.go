@@ -19,13 +19,22 @@ import (
 // sandbox's agent. With no backend it delegates directly to the wrapped
 // dialer.
 type IdentityDialer struct {
-	Base    netstack.Dialer
+	Base     netstack.Dialer
 	Identity proxyproto.AgentIdentity
 
 	// Backend, when non-empty, is the "host:port" address of the Envoy
 	// Gateway egress listener. Dials are re-pointed there + PROXY v2
 	// framed.
 	Backend string
+
+	// DNSResolvers, when non-empty, redirects every :53 dial to the
+	// first entry. Required because the sandbox's resolv.conf points at
+	// its TAP gateway IP — an address that exists nowhere — so DNS
+	// packets actually route via the netstack instead of getting stuck
+	// on the sandbox's loopback. The dial happens from the worker
+	// netns, so loopback nameservers like Docker's embedded resolver at
+	// 127.0.0.11 are reachable here.
+	DNSResolvers []netip.AddrPort
 }
 
 var _ netstack.Dialer = (*IdentityDialer)(nil)
@@ -35,7 +44,11 @@ var _ netstack.Dialer = (*IdentityDialer)(nil)
 // in direct-dial mode (no MITM backend wired up) the worker still emits
 // an attributable record per outbound connection.
 func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	d.logDial(network, addr)
+	origAddr := addr
+	if rewritten, ok := d.rewriteDNS(addr); ok {
+		addr = rewritten
+	}
+	d.logDial(network, origAddr, addr)
 
 	if d.Backend == "" {
 		return d.Base.DialContext(ctx, network, addr)
@@ -69,7 +82,10 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 // identity. This is the L4 attribution surface — useful even before the
 // L7 ext_proc + OTLP path is operational. Logged at INFO so it shows up
 // in `clrk dev logs` and production worker stdout without extra config.
-func (d *IdentityDialer) logDial(network, addr string) {
+//
+// origDst is what the sandbox addressed; effDst is what we actually
+// dial out (differs only when DNS rewrite kicks in).
+func (d *IdentityDialer) logDial(network, origDst, effDst string) {
 	mode := "direct"
 	if d.Backend != "" {
 		mode = "egress-gateway"
@@ -82,10 +98,26 @@ func (d *IdentityDialer) logDial(network, addr string) {
 		"agent.revision", d.Identity.Revision,
 		"invocation.id", d.Identity.InvocationID,
 		"network", network,
-		"dst", addr,
+		"dst", origDst,
+		"effective_dst", effDst,
 		"mode", mode,
 		"backend", d.Backend,
 	)
+}
+
+// rewriteDNS swaps a :53 destination for the first configured worker
+// resolver. Returns (rewritten, true) if it triggered, ("", false)
+// otherwise. Failures (unparseable addr, no resolvers configured) leave
+// the dial untouched.
+func (d *IdentityDialer) rewriteDNS(addr string) (string, bool) {
+	if len(d.DNSResolvers) == 0 {
+		return "", false
+	}
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil || ap.Port() != 53 {
+		return "", false
+	}
+	return d.DNSResolvers[0].String(), true
 }
 
 // sanitizedSrc returns the conn's local address as a netip.AddrPort,

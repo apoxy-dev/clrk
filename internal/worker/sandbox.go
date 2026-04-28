@@ -5,6 +5,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -46,6 +47,9 @@ type SandboxManager struct {
 	rootDir    string // Per-sandbox rootfs overlay dir (e.g. /run/clrk/rootfs).
 	imageStore *ImageStore
 	dialer     netstack.Dialer // Egress dialer for sandbox netstacks.
+	// workerResolvers is the worker container's own DNS server list.
+	// Used to rewrite sandbox :53 dials in IdentityDialer — see dns.go.
+	workerResolvers []netip.AddrPort
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
@@ -64,13 +68,14 @@ type SandboxManager struct {
 // NewSandboxManager creates a new SandboxManager.
 func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
 	return &SandboxManager{
-		stateDir:   stateDir,
-		rootDir:    rootDir,
-		imageStore: imageStore,
-		dialer:     dialer,
-		sandboxes:  make(map[SandboxID]*SandboxInstance),
-		containers: make(map[SandboxID]*libcontainer.Container),
-		processes:  make(map[SandboxID]*libcontainer.Process),
+		stateDir:        stateDir,
+		rootDir:         rootDir,
+		imageStore:      imageStore,
+		dialer:          dialer,
+		workerResolvers: readWorkerResolvers(),
+		sandboxes:       make(map[SandboxID]*SandboxInstance),
+		containers:      make(map[SandboxID]*libcontainer.Container),
+		processes:       make(map[SandboxID]*libcontainer.Process),
 	}
 }
 
@@ -141,9 +146,23 @@ func (m *SandboxManager) Create(
 		cfg.Mounts = append(cfg.Mounts, buildTrustMounts(sandboxRootFS, caPath)...)
 	}
 
+	// 5b. Stage a per-sandbox /etc/resolv.conf pointing at the netns
+	// gateway IP, so DNS queries route via the TAP device into the
+	// gVisor netstack. The IdentityDialer rewrites :53 dials back to
+	// the worker's actual resolver — see dns.go for the rationale.
+	resolvPath, err := m.writeSandboxResolvConf(id, nsCfg.GW)
+	if err != nil {
+		m.removeAgentCA(id)
+		stack.Close()
+		TeardownNetNS(nsCfg)
+		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
+	}
+	cfg.Mounts = append(cfg.Mounts, buildResolvMount(resolvPath))
+
 	// 6. Create container (does NOT start it).
 	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)
 	if err != nil {
+		m.removeSandboxNetConfig(id)
 		m.removeAgentCA(id)
 		stack.Close()
 		TeardownNetNS(nsCfg)
@@ -241,9 +260,10 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	// request-scoped context (e.g. reconciler).
 	if stack, ok := sb.Stack.(*netstack.SandboxStack); ok {
 		dialer := netstack.Dialer(&egress.IdentityDialer{
-			Base:     m.dialer,
-			Identity: sb.Identity,
-			Backend:  sb.EgressBackend,
+			Base:         m.dialer,
+			Identity:     sb.Identity,
+			Backend:      sb.EgressBackend,
+			DNSResolvers: m.workerResolvers,
 		})
 		go func() {
 			if err := stack.Start(context.Background(), dialer); err != nil {
@@ -395,6 +415,7 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 	}
 
 	m.removeAgentCA(id)
+	m.removeSandboxNetConfig(id)
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)

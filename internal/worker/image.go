@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/docker/docker/libnetwork/resolvconf"
 	ocispecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/singleflight"
 	"oras.land/oras-go/v2"
@@ -190,22 +189,27 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 
 // ensureBaseSystemFiles fills in /etc files that minimal images
 // (curlimages/curl, alpine bare bones, distroless variants) leave out
-// but networked code paths inside the sandbox depend on. Without
-// /etc/resolv.conf, glibc/musl getaddrinfo fails before any traffic
-// ever reaches the netstack.
+// but networked code paths inside the sandbox depend on.
 //
-// Resolver config mirrors the worker's own /etc/resolv.conf via
-// libnetwork/resolvconf (the same machinery dockerd uses to materialize
-// container resolv.confs). The sandbox's UDP forwarder dials the
-// nameservers from the worker's network namespace, so a 127.0.0.11
-// docker-embedded resolver entry works as-is.
+// /etc/resolv.conf only needs to exist as a placeholder: the per-sandbox
+// resolver config is bind-mounted in at container-start time (see
+// dns.go). nsswitch.conf is image-wide and not netns-dependent, so we
+// write it here once and reuse across sandboxes.
 func ensureBaseSystemFiles(rootfs string) error {
 	etc := filepath.Join(rootfs, "etc")
 	if err := os.MkdirAll(etc, 0o755); err != nil {
 		return err
 	}
-	if err := ensureSandboxResolvConf(filepath.Join(etc, "resolv.conf")); err != nil {
-		return err
+	// Many images (alpine, curlimages/curl) ship a 0-byte mode-0700
+	// placeholder for /etc/resolv.conf. The bind-mount source is what
+	// the sandbox actually reads, so the mount-point's content/mode
+	// don't matter — we only need the file to exist so libcontainer
+	// can attach a bind mount over it.
+	resolv := filepath.Join(etc, "resolv.conf")
+	if _, err := os.Stat(resolv); errors.Is(err, fs.ErrNotExist) {
+		if err := os.WriteFile(resolv, nil, 0o644); err != nil {
+			return fmt.Errorf("creating placeholder /etc/resolv.conf: %w", err)
+		}
 	}
 	// glibc NSS picks up nsswitch.conf to know which name sources to
 	// use; without it, some images get stuck on a "files dns" default
@@ -216,42 +220,6 @@ func ensureBaseSystemFiles(rootfs string) error {
 			return fmt.Errorf("writing /etc/nsswitch.conf: %w", err)
 		}
 	}
-	return nil
-}
-
-// ensureSandboxResolvConf overwrites whatever /etc/resolv.conf the OCI
-// tar shipped with the worker's resolver config. Many minimal images
-// (alpine, curlimages/curl) include a 0-byte mode-0700 placeholder; if
-// we leave it in place getaddrinfo returns NXDOMAIN before the netstack
-// ever sees a packet, and the 0700 mode also locks out non-root sandbox
-// users. dockerd handles the same case by always rewriting the file
-// inside the container — we mirror that here, removing first so the
-// mode in libnetwork's WriteFile (0o644) actually takes effect.
-func ensureSandboxResolvConf(path string) error {
-	host, err := resolvconf.GetSpecific("/etc/resolv.conf")
-	if err != nil {
-		return fmt.Errorf("reading worker resolv.conf: %w", err)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("removing existing sandbox resolv.conf: %w", err)
-	}
-	log := ctrl.Log.WithName("worker.resolvconf").WithValues("path", path)
-	nameservers := resolvconf.GetNameservers(host.Content, resolvconf.IP)
-	if len(nameservers) == 0 {
-		// Defensive: libnetwork parses the file but didn't surface any
-		// usable nameservers. Copy bytes verbatim so DNS still works.
-		log.Info("No nameservers parsed from worker resolv.conf, copying bytes verbatim", "bytes", len(host.Content))
-		if err := os.WriteFile(path, host.Content, 0o644); err != nil {
-			return fmt.Errorf("writing sandbox resolv.conf: %w", err)
-		}
-		return nil
-	}
-	search := resolvconf.GetSearchDomains(host.Content)
-	options := resolvconf.GetOptions(host.Content)
-	if _, err := resolvconf.Build(path, nameservers, search, options); err != nil {
-		return fmt.Errorf("writing sandbox resolv.conf: %w", err)
-	}
-	log.Info("Wrote sandbox resolv.conf", "nameservers", nameservers, "search", search, "options", options)
 	return nil
 }
 
