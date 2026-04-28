@@ -59,6 +59,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
 	cmd.AddCommand(newDevReloadCmd())
+	cmd.AddCommand(newDevStatusCmd())
 	return cmd
 }
 
