@@ -224,10 +224,10 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 			Namespace: eg.Namespace,
 		},
 	}
-	caSecret := gwapiv1.ObjectName(EgressGatewayCASecretName(eg.Name))
-	tlsMode := gwapiv1.TLSModeTerminate
-	allRoutes := gwapiv1.NamespacesFromAll
 	_, err := ctrl.CreateOrUpdate(ctx, r.Client, gw, func() error {
+		caSecret := gwapiv1.ObjectName(EgressGatewayCASecretName(eg.Name))
+		tlsMode := gwapiv1.TLSModeTerminate
+		allRoutes := gwapiv1.NamespacesFromAll
 		gw.Spec.GatewayClassName = gwapiv1.ObjectName(EgressGatewayClassName)
 		gw.Spec.Listeners = []gwapiv1.Listener{
 			{

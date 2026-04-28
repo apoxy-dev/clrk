@@ -169,7 +169,12 @@ func main() {
 	grpcSrv := grpc.NewServer()
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extproc.New())
-	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI))
+	egExt, err := egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI)
+	if err != nil {
+		log.Error(err, "Unable to construct EG extension server")
+		os.Exit(1)
+	}
+	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egExt)
 	go func() {
 		slog.Info("Serving control-plane gRPC", "addr", grpcLis.Addr().String())
 		if err := grpcSrv.Serve(grpcLis); err != nil {

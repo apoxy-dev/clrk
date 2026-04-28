@@ -43,6 +43,7 @@ import (
 
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/extproc"
 )
 
 // Well-known extension names.
@@ -51,6 +52,7 @@ const (
 	extProcFilterName              = "envoy.filters.http.ext_proc"
 	routerFilterName               = "envoy.filters.http.router"
 	tlsTransportSocketName         = "envoy.transport_sockets.tls"
+	hcmFilterName                  = "envoy.filters.network.http_connection_manager"
 
 	proxyProtocolListenerFilterName = "envoy.filters.listener.proxy_protocol"
 	tlsInspectorListenerFilterName  = "envoy.filters.listener.tls_inspector"
@@ -69,22 +71,30 @@ const (
 // entry the proxy_protocol listener filter publishes. ext_proc reads them
 // back from MetadataContext under the same namespace.
 var agentTLVRules = []*proxyprotov3.ProxyProtocol_Rule{
-	tlvRule(proxyproto.TLVAgentKind, "agent_kind"),
-	tlvRule(proxyproto.TLVAgentNamespace, "agent_namespace"),
-	tlvRule(proxyproto.TLVAgentName, "agent_name"),
-	tlvRule(proxyproto.TLVAgentUID, "agent_uid"),
-	tlvRule(proxyproto.TLVAgentRevision, "agent_revision"),
-	tlvRule(proxyproto.TLVInvocationID, "invocation_id"),
+	tlvRule(proxyproto.TLVAgentKind, extproc.MetaAgentKind),
+	tlvRule(proxyproto.TLVAgentNamespace, extproc.MetaAgentNamespace),
+	tlvRule(proxyproto.TLVAgentName, extproc.MetaAgentName),
+	tlvRule(proxyproto.TLVAgentUID, extproc.MetaAgentUID),
+	tlvRule(proxyproto.TLVAgentRevision, extproc.MetaAgentRevision),
+	tlvRule(proxyproto.TLVInvocationID, extproc.MetaInvocationID),
 }
 
 func tlvRule(t byte, key string) *proxyprotov3.ProxyProtocol_Rule {
 	return &proxyprotov3.ProxyProtocol_Rule{
 		TlvType: uint32(t),
 		OnTlvPresent: &proxyprotov3.ProxyProtocol_KeyValuePair{
-			MetadataNamespace: "clrk.apoxy.dev",
+			MetadataNamespace: extproc.MetadataNamespace,
 			Key:               key,
 		},
 	}
+}
+
+// dnsCacheConfig is shared by the dynamic_forward_proxy HTTP filter and the
+// matching cluster — both must reference the same Name to share an Envoy
+// DNS cache instance, so the proto is a pre-built singleton.
+var dnsCacheConfig = &dfpcommonv3.DnsCacheConfig{
+	Name:            dnsCacheName,
+	DnsLookupFamily: clusterv3.Cluster_AUTO,
 }
 
 // GatewayNamePrefix is the prefix the EgressGateway controller uses when
@@ -112,16 +122,32 @@ type Server struct {
 
 	// ExtProcTargetURI is the gRPC target for body-capture.
 	ExtProcTargetURI string
+
+	// Pre-built HTTP filters reused on every PostHTTPListenerModify call.
+	// Their proto contents never vary across listeners, so building them
+	// once at construction time avoids a marshal per translation.
+	dfpHTTPFilter *hcmv3.HttpFilter
+	extProcFilter *hcmv3.HttpFilter
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
 // Envoy uses to reach the cert provider and ext_proc server (both hosted
 // by the clrk controller-manager).
-func New(certProviderURI, extProcURI string) *Server {
+func New(certProviderURI, extProcURI string) (*Server, error) {
+	dfp, err := buildDFPHTTPFilter()
+	if err != nil {
+		return nil, err
+	}
+	ep, err := buildExtProcFilter(extProcURI)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
-	}
+		dfpHTTPFilter:         dfp,
+		extProcFilter:         ep,
+	}, nil
 }
 
 // PostHTTPListenerModify rewrites every clrk-owned egress listener so that:
@@ -287,7 +313,7 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 // (auto_host_rewrite so the upstream Host comes from :authority).
 func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 	for _, f := range fc.GetFilters() {
-		if f.GetName() != "envoy.filters.network.http_connection_manager" {
+		if f.GetName() != hcmFilterName {
 			continue
 		}
 		typedCfg := f.GetTypedConfig()
@@ -299,15 +325,6 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 			return fmt.Errorf("unmarshal HCM: %w", err)
 		}
 
-		dfpFilter, err := buildDFPHTTPFilter()
-		if err != nil {
-			return err
-		}
-		extProcFilter, err := s.buildExtProcFilter()
-		if err != nil {
-			return err
-		}
-
 		// Filter order: DFP (rewrites cluster), ext_proc (captures
 		// req+resp), router (terminal). Anything EG put before router
 		// is preserved upstream of these — drop nothing the operator
@@ -317,13 +334,13 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 		inserted := false
 		for _, existing := range hcm.HttpFilters {
 			if existing.GetName() == routerFilterName && !inserted {
-				newFilters = append(newFilters, dfpFilter, extProcFilter)
+				newFilters = append(newFilters, s.dfpHTTPFilter, s.extProcFilter)
 				inserted = true
 			}
 			newFilters = append(newFilters, existing)
 		}
 		if !inserted {
-			newFilters = append(newFilters, dfpFilter, extProcFilter)
+			newFilters = append(newFilters, s.dfpHTTPFilter, s.extProcFilter)
 		}
 		hcm.HttpFilters = newFilters
 
@@ -413,12 +430,11 @@ func ensureListenerFilters(l *listenerv3.Listener) error {
 // buildDFPHTTPFilter returns the dynamic_forward_proxy HTTP filter that
 // resolves the request's :authority through the shared DNS cache.
 func buildDFPHTTPFilter() (*hcmv3.HttpFilter, error) {
-	cfg := &dfpfilterv3.FilterConfig{
+	any, err := anypb.New(&dfpfilterv3.FilterConfig{
 		ImplementationSpecifier: &dfpfilterv3.FilterConfig_DnsCacheConfig{
-			DnsCacheConfig: dnsCacheConfig(),
+			DnsCacheConfig: dnsCacheConfig,
 		},
-	}
-	any, err := anypb.New(cfg)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal dfp http filter: %w", err)
 	}
@@ -428,12 +444,12 @@ func buildDFPHTTPFilter() (*hcmv3.HttpFilter, error) {
 	}, nil
 }
 
-func (s *Server) buildExtProcFilter() (*hcmv3.HttpFilter, error) {
-	cfg := &extprocv3.ExternalProcessor{
+func buildExtProcFilter(targetURI string) (*hcmv3.HttpFilter, error) {
+	any, err := anypb.New(&extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
-					TargetUri:  s.ExtProcTargetURI,
+					TargetUri:  targetURI,
 					StatPrefix: "clrk_ext_proc",
 				},
 			},
@@ -449,11 +465,10 @@ func (s *Server) buildExtProcFilter() (*hcmv3.HttpFilter, error) {
 		},
 		MetadataOptions: &extprocv3.MetadataOptions{
 			ForwardingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
-				Untyped: []string{"clrk.apoxy.dev"},
+				Untyped: []string{extproc.MetadataNamespace},
 			},
 		},
-	}
-	any, err := anypb.New(cfg)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal ext_proc filter: %w", err)
 	}
@@ -467,12 +482,11 @@ func (s *Server) buildExtProcFilter() (*hcmv3.HttpFilter, error) {
 // targets. Uses the same DNS cache as the HTTP filter so resolution is
 // shared.
 func buildDFPCluster() (*clusterv3.Cluster, error) {
-	clusterCfg := &dfpclusterv3.ClusterConfig{
+	any, err := anypb.New(&dfpclusterv3.ClusterConfig{
 		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
-			DnsCacheConfig: dnsCacheConfig(),
+			DnsCacheConfig: dnsCacheConfig,
 		},
-	}
-	any, err := anypb.New(clusterCfg)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal dfp cluster: %w", err)
 	}
@@ -487,11 +501,4 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 			},
 		},
 	}, nil
-}
-
-func dnsCacheConfig() *dfpcommonv3.DnsCacheConfig {
-	return &dfpcommonv3.DnsCacheConfig{
-		Name:            dnsCacheName,
-		DnsLookupFamily: clusterv3.Cluster_AUTO,
-	}
 }
