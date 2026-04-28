@@ -219,20 +219,39 @@ func ensureBaseSystemFiles(rootfs string) error {
 	return nil
 }
 
+// ensureSandboxResolvConf overwrites whatever /etc/resolv.conf the OCI
+// tar shipped with the worker's resolver config. Many minimal images
+// (alpine, curlimages/curl) include a 0-byte mode-0700 placeholder; if
+// we leave it in place getaddrinfo returns NXDOMAIN before the netstack
+// ever sees a packet, and the 0700 mode also locks out non-root sandbox
+// users. dockerd handles the same case by always rewriting the file
+// inside the container — we mirror that here, removing first so the
+// mode in libnetwork's WriteFile (0o644) actually takes effect.
 func ensureSandboxResolvConf(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
 	host, err := resolvconf.GetSpecific("/etc/resolv.conf")
 	if err != nil {
 		return fmt.Errorf("reading worker resolv.conf: %w", err)
 	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing existing sandbox resolv.conf: %w", err)
+	}
+	log := ctrl.Log.WithName("worker.resolvconf").WithValues("path", path)
 	nameservers := resolvconf.GetNameservers(host.Content, resolvconf.IP)
+	if len(nameservers) == 0 {
+		// Defensive: libnetwork parses the file but didn't surface any
+		// usable nameservers. Copy bytes verbatim so DNS still works.
+		log.Info("No nameservers parsed from worker resolv.conf, copying bytes verbatim", "bytes", len(host.Content))
+		if err := os.WriteFile(path, host.Content, 0o644); err != nil {
+			return fmt.Errorf("writing sandbox resolv.conf: %w", err)
+		}
+		return nil
+	}
 	search := resolvconf.GetSearchDomains(host.Content)
 	options := resolvconf.GetOptions(host.Content)
 	if _, err := resolvconf.Build(path, nameservers, search, options); err != nil {
 		return fmt.Errorf("writing sandbox resolv.conf: %w", err)
 	}
+	log.Info("Wrote sandbox resolv.conf", "nameservers", nameservers, "search", search, "options", options)
 	return nil
 }
 
