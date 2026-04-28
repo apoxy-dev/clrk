@@ -49,6 +49,12 @@ type SandboxManager struct {
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
+	// containers retains the *libcontainer.Container returned by Create so
+	// Start can call ctr.Start() directly. libcontainer only writes
+	// state.json once Start runs, so a Create→Load handoff fails with
+	// "container does not exist" — the in-memory handle is the source of
+	// truth between those two calls.
+	containers map[SandboxID]*libcontainer.Container
 	// processes retains the libcontainer.Process for each running sandbox
 	// so callers (Wait) can block on its exit. Kept off SandboxInstance to
 	// avoid leaking a linux-only type into the cross-platform types.go.
@@ -63,6 +69,7 @@ func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer 
 		imageStore: imageStore,
 		dialer:     dialer,
 		sandboxes:  make(map[SandboxID]*SandboxInstance),
+		containers: make(map[SandboxID]*libcontainer.Container),
 		processes:  make(map[SandboxID]*libcontainer.Process),
 	}
 }
@@ -142,7 +149,6 @@ func (m *SandboxManager) Create(
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("creating container: %w", err)
 	}
-	_ = ctr // Container is persisted in stateDir; we Load() it later for Start.
 
 	// 7. Track instance.
 	sb := &SandboxInstance{
@@ -162,6 +168,7 @@ func (m *SandboxManager) Create(
 
 	m.mu.Lock()
 	m.sandboxes[id] = sb
+	m.containers[id] = ctr
 	m.mu.Unlock()
 
 	log.Info("Sandbox created")
@@ -174,15 +181,13 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
+	ctr := m.containers[id]
+	m.mu.Unlock()
 	if !ok {
-		m.mu.Unlock()
 		return ErrNotFound
 	}
-	m.mu.Unlock()
-
-	ctr, err := libcontainer.Load(m.stateDir, string(id))
-	if err != nil {
-		return fmt.Errorf("loading container: %w", err)
+	if ctr == nil {
+		return fmt.Errorf("no container handle for %s (Create not called on this manager)", id)
 	}
 
 	// Build process args from spec, falling back to image entrypoint.
@@ -393,6 +398,7 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)
+	delete(m.containers, id)
 	m.mu.Unlock()
 
 	log.Info("Sandbox deleted")
@@ -479,6 +485,10 @@ func (m *SandboxManager) Cleanup(ctx context.Context) error {
 // try a fresh Create anyway.
 func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
+
+	m.mu.Lock()
+	delete(m.containers, id)
+	m.mu.Unlock()
 
 	stateEntry := filepath.Join(m.stateDir, string(id))
 	if _, err := os.Stat(stateEntry); err != nil {
