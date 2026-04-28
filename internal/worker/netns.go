@@ -139,13 +139,13 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 		netlink.LinkSetUp(lo)
 	}
 
-	// Add default route via the TUN device. Point-to-point — no gateway
-	// needed, the kernel sends any non-local packet straight out the
-	// TUN with no ARP.
+	// Add default route via the gateway IP. Because the address was
+	// configured with `peer gw/32`, the kernel already knows the
+	// gateway is reachable on this TUN — it sends straight out without
+	// needing ARP.
 	route := &netlink.Route{
-		Dst:       nil, // default route
-		LinkIndex: tap.Attrs().Index,
-		Scope:     netlink.SCOPE_LINK,
+		Dst: nil, // default route
+		Gw:  gw.AsSlice(),
 	}
 	if err := netlink.RouteAdd(route); err != nil {
 		tapFD.Close()
