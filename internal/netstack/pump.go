@@ -17,26 +17,22 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// virtioNetHdrLen is the size of the virtio_net_hdr struct prepended to TAP
-// frames when the device is created with IFF_VNET_HDR.
-const virtioNetHdrLen = 10
-
 // ethernetHdrLen is the standard Ethernet header size (dst + src + ethertype).
 const ethernetHdrLen = 14
 
 // pktPool reduces per-packet allocations for the read/write pump.
 var pktPool = sync.Pool{
 	New: func() any {
-		// 10 (virtio) + 14 (eth) + 1500 (MTU) — enough for any standard frame.
-		b := make([]byte, virtioNetHdrLen+ethernetHdrLen+1500)
+		// 14 (eth) + 1500 (MTU) — enough for any standard frame.
+		b := make([]byte, ethernetHdrLen+1500)
 		return &b
 	},
 }
 
 // PacketPump splices packets between a TAP file descriptor and a gVisor
 // channel.Endpoint. The TAP device is assumed to be created with
-// IFF_TAP | IFF_NO_PI | IFF_VNET_HDR, meaning each read/write carries a
-// virtio_net_hdr followed by an Ethernet frame.
+// IFF_TAP | IFF_NO_PI (no IFF_VNET_HDR), meaning each read/write
+// carries a plain Ethernet frame with no virtio metadata.
 type PacketPump struct {
 	tapFD *os.File
 	ep    *channel.Endpoint
@@ -94,8 +90,8 @@ func (p *PacketPump) Close() {
 	close(p.wakeOutbound)
 }
 
-// inbound reads Ethernet frames from the TAP fd, strips the virtio header
-// and Ethernet header, and injects the IP payload into the netstack.
+// inbound reads Ethernet frames from the TAP fd, strips the Ethernet
+// header, and injects the IP payload into the netstack.
 func (p *PacketPump) inbound() error {
 	for {
 		bufp := pktPool.Get().(*[]byte)
@@ -107,14 +103,13 @@ func (p *PacketPump) inbound() error {
 			return fmt.Errorf("reading from TAP: %w", err)
 		}
 
-		// Need at least virtio header + ethernet header.
-		if n < virtioNetHdrLen+ethernetHdrLen {
+		// Need at least an Ethernet header.
+		if n < ethernetHdrLen {
 			pktPool.Put(bufp)
 			continue
 		}
 
-		// Skip the virtio_net_hdr.
-		ethFrame := buf[virtioNetHdrLen:n]
+		ethFrame := buf[:n]
 
 		// Parse ethertype from the Ethernet header to determine IP version.
 		ethertype := binary.BigEndian.Uint16(ethFrame[12:14])
@@ -142,17 +137,27 @@ func (p *PacketPump) inbound() error {
 	}
 }
 
-// outbound drains the channel endpoint and writes Ethernet frames with a
-// virtio header to the TAP fd.
+// outbound drains the channel endpoint and writes Ethernet frames to
+// the TAP fd.
 func (p *PacketPump) outbound() error {
-	// Scratch buffer for the virtio + ethernet header prefix.
-	prefix := make([]byte, virtioNetHdrLen+ethernetHdrLen)
-	// Virtio header is all zeros (no offload).
-	// Ethernet header: dst=broadcast, src=00:00:00:00:00:00, ethertype filled per-packet.
+	// Scratch buffer for the Ethernet header prefix. Per-packet fields:
+	//   - dst MAC: kernel's TAP MAC (we ARP'd it, but really any
+	//     non-broadcast MAC works since the kernel always accepts
+	//     frames with broadcast dst — we use the static-neighbor MAC
+	//     to mirror what the sandbox's outbound frames carry).
+	//   - src MAC: a stable locally-administered MAC for the gateway.
+	//   - ethertype: filled per-packet from the IP version.
+	prefix := make([]byte, ethernetHdrLen)
+	// dst MAC = ff:ff:ff:ff:ff:ff (broadcast — the sandbox kernel
+	// always accepts broadcast frames at L2 regardless of promisc).
 	for i := 0; i < 6; i++ {
-		prefix[virtioNetHdrLen+i] = 0xff // dst MAC: broadcast
+		prefix[i] = 0xff
 	}
-	// src MAC left as zeros.
+	// src MAC = 02:00:00:00:00:01 (locally-administered, matches the
+	// static neighbor entry installed in the sandbox netns for the
+	// gateway IP).
+	prefix[6] = 0x02
+	prefix[11] = 0x01
 
 	for {
 		_, ok := <-p.wakeOutbound
@@ -189,8 +194,8 @@ func (p *PacketPump) outbound() error {
 				continue
 			}
 
-			// Build the frame: virtio_net_hdr + ethernet_hdr + IP payload.
-			binary.BigEndian.PutUint16(prefix[virtioNetHdrLen+12:], ethertype)
+			// Fill ethertype and assemble the frame.
+			binary.BigEndian.PutUint16(prefix[12:], ethertype)
 
 			frame := make([]byte, 0, len(prefix)+len(ipBytes))
 			frame = append(frame, prefix...)

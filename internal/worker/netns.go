@@ -195,8 +195,13 @@ func TeardownNetNS(cfg *NetNSConfig) error {
 	return nil
 }
 
-// createTAP creates a TAP device with IFF_TAP | IFF_NO_PI | IFF_VNET_HDR
-// and returns the host-side file descriptor.
+// createTAP creates a TAP device with IFF_TAP | IFF_NO_PI and returns
+// the host-side file descriptor. We deliberately do NOT use
+// IFF_VNET_HDR: the virtio_net_hdr would force us to either set
+// NEEDS_CSUM (and compute/offload checksums correctly) or trust the
+// inbound checksum field — both of which interact poorly with gVisor's
+// userspace netstack and cause the kernel to silently drop TCP packets
+// (InSegs stays 0 even though tcpdump sees the frames).
 func createTAP(name string) (*os.File, error) {
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -208,7 +213,7 @@ func createTAP(name string) (*os.File, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("creating ifreq: %w", err)
 	}
-	ifr.SetUint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	ifr.SetUint16(unix.IFF_TAP | unix.IFF_NO_PI)
 
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		unix.Close(fd)
