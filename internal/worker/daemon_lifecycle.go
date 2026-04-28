@@ -188,6 +188,12 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		}
 
 		log.Info("Starting daemon sandbox")
+		// Wipe any libcontainer + netns state left behind by an earlier
+		// half-failed Create attempt at the same id. Without this, a
+		// transient failure on the netstack/libcontainer setup path
+		// strands the state directory and every subsequent retry
+		// rejects with "container with given ID already exists".
+		m.sandboxMgr.Purge(ctx, sandboxID)
 		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources); err != nil {
 			log.Error(err, "Failed to create sandbox")
 			if !m.sleepBackoff(ctx, &backoffExp) {

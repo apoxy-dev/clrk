@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -461,24 +462,46 @@ func (m *SandboxManager) Cleanup(ctx context.Context) error {
 		if !entry.IsDir() {
 			continue
 		}
-		id := entry.Name()
-		log.Info("Found orphaned container, destroying", "id", id)
+		log.Info("Found orphaned container, destroying", "id", entry.Name())
+		m.Purge(ctx, SandboxID(entry.Name()))
+	}
+	return nil
+}
 
-		ctr, err := libcontainer.Load(m.stateDir, id)
-		if err != nil {
-			log.Error(err, "Failed to load orphaned container", "id", id)
-			continue
-		}
-		if err := ctr.Destroy(); err != nil {
-			log.Error(err, "Failed to destroy orphaned container", "id", id)
-		}
+// Purge tears down any libcontainer + netns state left behind for id, even
+// if the in-process SandboxManager has no record of it. Safe to call before
+// Create as a guard against the "container with given ID already exists"
+// error that surfaces when a previous Create attempt left partial state
+// (libcontainer.Create writes the state directory before validating cgroup
+// / namespace setup, so a failure midway through can leave a directory
+// behind that Load won't touch but the next Create rejects). Fully best-
+// effort: any errors here are logged, not returned, since we're about to
+// try a fresh Create anyway.
+func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
+	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
-		// Best-effort netns cleanup.
-		nsName := fmt.Sprintf("run-%s", id)
-		TeardownNetNS(&NetNSConfig{NSName: nsName})
+	stateEntry := filepath.Join(m.stateDir, string(id))
+	if _, err := os.Stat(stateEntry); err != nil {
+		// Nothing to clean up — common path on the first attempt.
+		return
 	}
 
-	return nil
+	if ctr, err := libcontainer.Load(m.stateDir, string(id)); err == nil {
+		if derr := ctr.Destroy(); derr != nil {
+			log.Error(derr, "Destroy of orphaned container failed; falling back to RemoveAll")
+		}
+	} else if err != libcontainer.ErrNotExist {
+		log.Error(err, "Load of orphaned container failed; falling back to RemoveAll")
+	}
+
+	// Even on a successful Destroy, libcontainer occasionally leaves the
+	// dir behind on some kernels — RemoveAll unconditionally so the next
+	// Create gets a clean slate.
+	if err := os.RemoveAll(stateEntry); err != nil {
+		log.Error(err, "RemoveAll of state dir failed")
+	}
+
+	TeardownNetNS(&NetNSConfig{NSName: fmt.Sprintf("run-%s", id)})
 }
 
 // phaseFromStatus maps libcontainer.Status to SandboxPhase.
