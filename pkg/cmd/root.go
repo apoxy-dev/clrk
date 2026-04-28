@@ -30,6 +30,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&clrkDir, "clrk-dir", defaultClrkDir(), "State directory for clrk.")
 
 	RootCmd.AddCommand(newDevCmd())
+	RootCmd.AddCommand(newApplyCmd())
 }
 
 func defaultClrkDir() string {
