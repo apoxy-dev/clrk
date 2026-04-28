@@ -3,7 +3,6 @@
 package netstack
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,27 +11,24 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// ethernetHdrLen is the standard Ethernet header size (dst + src + ethertype).
-const ethernetHdrLen = 14
-
 // pktPool reduces per-packet allocations for the read/write pump.
 var pktPool = sync.Pool{
 	New: func() any {
-		// 14 (eth) + 1500 (MTU) — enough for any standard frame.
-		b := make([]byte, ethernetHdrLen+1500)
+		// MTU only — TUN frames carry bare IP, no Ethernet header.
+		b := make([]byte, 1500)
 		return &b
 	},
 }
 
-// PacketPump splices packets between a TAP file descriptor and a gVisor
-// channel.Endpoint. The TAP device is assumed to be created with
-// IFF_TAP | IFF_NO_PI (no IFF_VNET_HDR), meaning each read/write
-// carries a plain Ethernet frame with no virtio metadata.
+// PacketPump splices packets between a TUN file descriptor and a gVisor
+// channel.Endpoint. The TUN device is assumed to be created with
+// IFF_TUN | IFF_NO_PI, meaning each read/write carries a bare IP packet.
 type PacketPump struct {
 	tapFD *os.File
 	ep    *channel.Endpoint
@@ -45,7 +41,7 @@ type PacketPump struct {
 	wakeOutbound chan struct{}
 }
 
-// NewPacketPump creates a pump for the given TAP fd and channel endpoint.
+// NewPacketPump creates a pump for the given TUN fd and channel endpoint.
 func NewPacketPump(tapFD *os.File, ep *channel.Endpoint, mtu uint32) *PacketPump {
 	p := &PacketPump{
 		tapFD:        tapFD,
@@ -71,14 +67,14 @@ func (p *PacketPump) WriteNotify() {
 }
 
 // Run starts the inbound and outbound pump goroutines and blocks until both
-// return. Closing the TAP fd or the channel endpoint will cause both to exit.
+// return. Closing the TUN fd or the channel endpoint will cause both to exit.
 func (p *PacketPump) Run() error {
 	var g errgroup.Group
 
-	// Inbound: TAP fd → channel.Endpoint (netstack).
+	// Inbound: TUN fd → channel.Endpoint (netstack).
 	g.Go(p.inbound)
 
-	// Outbound: channel.Endpoint → TAP fd.
+	// Outbound: channel.Endpoint → TUN fd.
 	g.Go(p.outbound)
 
 	return g.Wait()
@@ -90,8 +86,8 @@ func (p *PacketPump) Close() {
 	close(p.wakeOutbound)
 }
 
-// inbound reads Ethernet frames from the TAP fd, strips the Ethernet
-// header, and injects the IP payload into the netstack.
+// inbound reads bare IP packets from the TUN fd and injects them into
+// the netstack. The IP version is taken from the first byte's high nibble.
 func (p *PacketPump) inbound() error {
 	for {
 		bufp := pktPool.Get().(*[]byte)
@@ -100,65 +96,39 @@ func (p *PacketPump) inbound() error {
 		n, err := p.tapFD.Read(buf)
 		if err != nil {
 			pktPool.Put(bufp)
-			return fmt.Errorf("reading from TAP: %w", err)
+			return fmt.Errorf("reading from TUN: %w", err)
 		}
 
-		// Need at least an Ethernet header.
-		if n < ethernetHdrLen {
+		if n == 0 {
 			pktPool.Put(bufp)
 			continue
 		}
 
-		ethFrame := buf[:n]
-
-		// Parse ethertype from the Ethernet header to determine IP version.
-		ethertype := binary.BigEndian.Uint16(ethFrame[12:14])
-		ipPayload := ethFrame[ethernetHdrLen:]
-
-		switch ethertype {
-		case uint16(header.IPv4ProtocolNumber):
-			pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(ipPayload),
-			})
-			p.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
-			pkb.DecRef()
-		case uint16(header.IPv6ProtocolNumber):
-			pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(ipPayload),
-			})
-			p.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
-			pkb.DecRef()
+		ipPayload := buf[:n]
+		var proto tcpip.NetworkProtocolNumber
+		switch ipPayload[0] >> 4 {
+		case 4:
+			proto = header.IPv4ProtocolNumber
+		case 6:
+			proto = header.IPv6ProtocolNumber
 		default:
-			// ARP, etc. — drop silently. The sandbox uses the TAP as a
-			// point-to-point link; ARP is not needed.
+			pktPool.Put(bufp)
+			continue
 		}
+
+		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(ipPayload),
+		})
+		p.ep.InjectInbound(proto, pkb)
+		pkb.DecRef()
 
 		pktPool.Put(bufp)
 	}
 }
 
-// outbound drains the channel endpoint and writes Ethernet frames to
-// the TAP fd.
+// outbound drains the channel endpoint and writes bare IP packets to
+// the TUN fd.
 func (p *PacketPump) outbound() error {
-	// Scratch buffer for the Ethernet header prefix. Per-packet fields:
-	//   - dst MAC: kernel's TAP MAC (we ARP'd it, but really any
-	//     non-broadcast MAC works since the kernel always accepts
-	//     frames with broadcast dst — we use the static-neighbor MAC
-	//     to mirror what the sandbox's outbound frames carry).
-	//   - src MAC: a stable locally-administered MAC for the gateway.
-	//   - ethertype: filled per-packet from the IP version.
-	prefix := make([]byte, ethernetHdrLen)
-	// dst MAC = ff:ff:ff:ff:ff:ff (broadcast — the sandbox kernel
-	// always accepts broadcast frames at L2 regardless of promisc).
-	for i := 0; i < 6; i++ {
-		prefix[i] = 0xff
-	}
-	// src MAC = 02:00:00:00:00:01 (locally-administered, matches the
-	// static neighbor entry installed in the sandbox netns for the
-	// gateway IP).
-	prefix[6] = 0x02
-	prefix[11] = 0x01
-
 	for {
 		_, ok := <-p.wakeOutbound
 		if !ok {
@@ -181,31 +151,17 @@ func (p *PacketPump) outbound() error {
 				continue
 			}
 
-			// Determine ethertype from the IP version nibble.
-			var ethertype uint16
-			switch ipBytes[0] >> 4 {
-			case 4:
-				ethertype = uint16(header.IPv4ProtocolNumber)
-			case 6:
-				ethertype = uint16(header.IPv6ProtocolNumber)
-			default:
-				slog.Debug("Outbound packet with unknown IP version", slog.Int("version", int(ipBytes[0]>>4)))
+			if v := ipBytes[0] >> 4; v != 4 && v != 6 {
+				slog.Debug("Outbound packet with unknown IP version", slog.Int("version", int(v)))
 				view.Release()
 				continue
 			}
 
-			// Fill ethertype and assemble the frame.
-			binary.BigEndian.PutUint16(prefix[12:], ethertype)
-
-			frame := make([]byte, 0, len(prefix)+len(ipBytes))
-			frame = append(frame, prefix...)
-			frame = append(frame, ipBytes...)
+			if _, err := p.tapFD.Write(ipBytes); err != nil {
+				slog.Warn("Error writing to TUN", slog.Any("error", err))
+			}
 
 			view.Release()
-
-			if _, err := p.tapFD.Write(frame); err != nil {
-				slog.Warn("Error writing to TAP", slog.Any("error", err))
-			}
 		}
 	}
 }

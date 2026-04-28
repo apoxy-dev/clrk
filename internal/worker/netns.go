@@ -88,41 +88,49 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 	}
 	defer newNS.Close()
 
-	// We're now in the new netns. Create TAP device.
-	tapFD, err := createTAP(tapName)
+	// We're now in the new netns. Create TUN device.
+	tapFD, err := createTUN(tapName)
 	if err != nil {
 		netns.Set(origNS)
 		netns.DeleteNamed(nsName)
-		return nil, fmt.Errorf("creating TAP device: %w", err)
+		return nil, fmt.Errorf("creating TUN device: %w", err)
 	}
 
-	// Configure the TAP device with IP.
+	// Configure the TUN device with IP.
 	tap, err := netlink.LinkByName(tapName)
 	if err != nil {
 		tapFD.Close()
 		netns.Set(origNS)
 		netns.DeleteNamed(nsName)
-		return nil, fmt.Errorf("finding TAP device: %w", err)
+		return nil, fmt.Errorf("finding TUN device: %w", err)
 	}
 
+	// Use a /32 with explicit peer so the kernel treats this as a
+	// point-to-point link to the gateway IP. Without `peer`, the kernel
+	// would ARP the gateway on a TAP — but TUN is L2-less, and the /30
+	// subnet model would also force broadcast/MAC behavior we don't want.
 	addr := &netlink.Addr{
 		IPNet: &net.IPNet{
 			IP:   ctrIP.AsSlice(),
-			Mask: net.CIDRMask(30, 32),
+			Mask: net.CIDRMask(32, 32),
+		},
+		Peer: &net.IPNet{
+			IP:   gw.AsSlice(),
+			Mask: net.CIDRMask(32, 32),
 		},
 	}
 	if err := netlink.AddrAdd(tap, addr); err != nil {
 		tapFD.Close()
 		netns.Set(origNS)
 		netns.DeleteNamed(nsName)
-		return nil, fmt.Errorf("adding IP to TAP: %w", err)
+		return nil, fmt.Errorf("adding IP to TUN: %w", err)
 	}
 
 	if err := netlink.LinkSetUp(tap); err != nil {
 		tapFD.Close()
 		netns.Set(origNS)
 		netns.DeleteNamed(nsName)
-		return nil, fmt.Errorf("setting TAP up: %w", err)
+		return nil, fmt.Errorf("setting TUN up: %w", err)
 	}
 
 	// Set up loopback.
@@ -131,30 +139,13 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 		netlink.LinkSetUp(lo)
 	}
 
-	// Pin a static ARP entry for the gateway. The other end of the TAP
-	// is the gVisor netstack, which speaks IP-only (the pump strips
-	// Ethernet on inbound and broadcasts on outbound) — so it can't
-	// answer ARP, and without this the kernel never resolves the
-	// gateway's MAC and silently buffers every outbound packet. Any MAC
-	// works because the netstack's outbound frames hardcode broadcast
-	// dst anyway.
-	if err := netlink.NeighSet(&netlink.Neigh{
-		LinkIndex:    tap.Attrs().Index,
-		Family:       unix.AF_INET,
-		State:        netlink.NUD_PERMANENT,
-		IP:           gw.AsSlice(),
-		HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-	}); err != nil {
-		tapFD.Close()
-		netns.Set(origNS)
-		netns.DeleteNamed(nsName)
-		return nil, fmt.Errorf("adding static neighbor for gateway %s: %w", gw, err)
-	}
-
-	// Add default route via gateway.
+	// Add default route via the TUN device. Point-to-point — no gateway
+	// needed, the kernel sends any non-local packet straight out the
+	// TUN with no ARP.
 	route := &netlink.Route{
-		Dst: nil, // default route
-		Gw:  gw.AsSlice(),
+		Dst:       nil, // default route
+		LinkIndex: tap.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
 	}
 	if err := netlink.RouteAdd(route); err != nil {
 		tapFD.Close()
@@ -195,14 +186,16 @@ func TeardownNetNS(cfg *NetNSConfig) error {
 	return nil
 }
 
-// createTAP creates a TAP device with IFF_TAP | IFF_NO_PI and returns
-// the host-side file descriptor. We deliberately do NOT use
-// IFF_VNET_HDR: the virtio_net_hdr would force us to either set
-// NEEDS_CSUM (and compute/offload checksums correctly) or trust the
-// inbound checksum field — both of which interact poorly with gVisor's
-// userspace netstack and cause the kernel to silently drop TCP packets
-// (InSegs stays 0 even though tcpdump sees the frames).
-func createTAP(name string) (*os.File, error) {
+// createTUN creates an L3 TUN device with IFF_TUN | IFF_NO_PI and
+// returns the host-side file descriptor.
+//
+// We use TUN (not TAP) because TAP exposed a stack of MAC/ARP/virtio
+// gotchas that silently dropped TCP packets (the sandbox kernel never
+// counted them as InSegs even though tcpdump on tap0 showed them
+// arriving). With TUN the device is point-to-point at L3: the kernel
+// hands us bare IP packets and accepts bare IP packets back, with no
+// Ethernet, no ARP, and no virtio metadata to reason about.
+func createTUN(name string) (*os.File, error) {
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("opening /dev/net/tun: %w", err)
@@ -213,7 +206,7 @@ func createTAP(name string) (*os.File, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("creating ifreq: %w", err)
 	}
-	ifr.SetUint16(unix.IFF_TAP | unix.IFF_NO_PI)
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
 
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		unix.Close(fd)
