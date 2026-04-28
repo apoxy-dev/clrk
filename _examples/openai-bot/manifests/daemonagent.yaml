@@ -1,0 +1,29 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: openai-bot
+spec:
+  workerPoolRef: default
+  restartPolicy: Always
+  # No egressRefs: this example exercises the L4 audit path (per-dial
+  # agent attribution log emitted by the worker's IdentityDialer)
+  # without requiring an EgressGateway-managed Envoy MITM, which has
+  # heavier infra prerequisites. When EG is provisioned, add an
+  # egressRefs entry pointing at an EgressGateway and the same traffic
+  # gets PROXY-v2 framed + L7-captured by ext_proc.
+  template:
+    spec:
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Bogus token; we expect 401 from OpenAI. The point is that
+          # the request leaves the sandbox at all, traverses the
+          # netstack + IdentityDialer, and shows up in worker logs
+          # attributed to this DaemonAgent.
+          while true; do
+            curl -sS -o /dev/null -w 'http %{http_code} %{url_effective}\n' \
+              -H 'Authorization: Bearer sk-clrk-dev-bogus' \
+              https://api.openai.com/v1/models
+            sleep 5
+          done

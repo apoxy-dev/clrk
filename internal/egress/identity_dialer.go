@@ -5,6 +5,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 
@@ -29,8 +30,13 @@ type IdentityDialer struct {
 
 var _ netstack.Dialer = (*IdentityDialer)(nil)
 
-// DialContext satisfies netstack.Dialer.
+// DialContext satisfies netstack.Dialer. Every dial is logged with the
+// owning agent's identity and the original sandbox destination, so even
+// in direct-dial mode (no MITM backend wired up) the worker still emits
+// an attributable record per outbound connection.
 func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.logDial(network, addr)
+
 	if d.Backend == "" {
 		return d.Base.DialContext(ctx, network, addr)
 	}
@@ -57,6 +63,29 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 		return nil, fmt.Errorf("writing PROXY v2 header: %w", err)
 	}
 	return conn, nil
+}
+
+// logDial emits one structured slog line per outbound dial with agent
+// identity. This is the L4 attribution surface — useful even before the
+// L7 ext_proc + OTLP path is operational. Logged at INFO so it shows up
+// in `clrk dev logs` and production worker stdout without extra config.
+func (d *IdentityDialer) logDial(network, addr string) {
+	mode := "direct"
+	if d.Backend != "" {
+		mode = "egress-gateway"
+	}
+	slog.Info("egress dial",
+		"agent.kind", d.Identity.Kind,
+		"agent.namespace", d.Identity.Namespace,
+		"agent.name", d.Identity.Name,
+		"agent.uid", d.Identity.UID,
+		"agent.revision", d.Identity.Revision,
+		"invocation.id", d.Identity.InvocationID,
+		"network", network,
+		"dst", addr,
+		"mode", mode,
+		"backend", d.Backend,
+	)
 }
 
 // sanitizedSrc returns the conn's local address as a netip.AddrPort,

@@ -8,14 +8,17 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/docker/docker/libnetwork/resolvconf"
 	ocispecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/singleflight"
 	"oras.land/oras-go/v2"
@@ -167,6 +170,10 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 		}
 	}
 
+	if err := ensureBaseSystemFiles(rootFS); err != nil {
+		return nil, fmt.Errorf("ensuring base system files: %w", err)
+	}
+
 	info := &ImageInfo{
 		RootFS:     rootFS,
 		Entrypoint: imgConfig.Config.Entrypoint,
@@ -179,6 +186,54 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 
 	log.Info("Image extracted", "rootfs", rootFS)
 	return info, nil
+}
+
+// ensureBaseSystemFiles fills in /etc files that minimal images
+// (curlimages/curl, alpine bare bones, distroless variants) leave out
+// but networked code paths inside the sandbox depend on. Without
+// /etc/resolv.conf, glibc/musl getaddrinfo fails before any traffic
+// ever reaches the netstack.
+//
+// Resolver config mirrors the worker's own /etc/resolv.conf via
+// libnetwork/resolvconf (the same machinery dockerd uses to materialize
+// container resolv.confs). The sandbox's UDP forwarder dials the
+// nameservers from the worker's network namespace, so a 127.0.0.11
+// docker-embedded resolver entry works as-is.
+func ensureBaseSystemFiles(rootfs string) error {
+	etc := filepath.Join(rootfs, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return err
+	}
+	if err := ensureSandboxResolvConf(filepath.Join(etc, "resolv.conf")); err != nil {
+		return err
+	}
+	// glibc NSS picks up nsswitch.conf to know which name sources to
+	// use; without it, some images get stuck on a "files dns" default
+	// that the loader doesn't initialize.
+	nss := filepath.Join(etc, "nsswitch.conf")
+	if _, err := os.Stat(nss); errors.Is(err, fs.ErrNotExist) {
+		if err := os.WriteFile(nss, []byte("hosts: files dns\n"), 0o644); err != nil {
+			return fmt.Errorf("writing /etc/nsswitch.conf: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureSandboxResolvConf(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	host, err := resolvconf.GetSpecific("/etc/resolv.conf")
+	if err != nil {
+		return fmt.Errorf("reading worker resolv.conf: %w", err)
+	}
+	nameservers := resolvconf.GetNameservers(host.Content, resolvconf.IP)
+	search := resolvconf.GetSearchDomains(host.Content)
+	options := resolvconf.GetOptions(host.Content)
+	if _, err := resolvconf.Build(path, nameservers, search, options); err != nil {
+		return fmt.Errorf("writing sandbox resolv.conf: %w", err)
+	}
+	return nil
 }
 
 // extractLayer extracts a tar (optionally gzipped) layer into the rootfs directory,
