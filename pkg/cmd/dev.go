@@ -58,6 +58,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
 	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
+	cmd.AddCommand(newDevReloadCmd())
 	return cmd
 }
 
@@ -237,45 +238,9 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	slog.Info("Gateway API CRDs installed")
 
 	state.cm = drivers.NewControllerManagerDriver()
-	cmOpts := []drivers.Option{
-		drivers.WithImage(o.controllerImage),
-		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
-		drivers.WithEnv(map[string]string{
-			"KUBECONFIG": "/var/lib/clrk/kubeconfig",
-			// Tolerate duplicate Envoy protobuf registrations: envoy-go and
-			// envoyproxy/go-control-plane both register TLS proto files
-			// because envoyproxy/gateway's extension proto transitively
-			// imports go-control-plane's TLS types. Matches the pattern
-			// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
-			"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
-		}),
-		drivers.WithArgs(
-			"--db=/var/lib/clrk/data.db",
-			"--bind-addr=0.0.0.0",
-			"--bind-port=8443",
-			// Ingress reconciler is on (k3s has gateway-api installed);
-			// worker-deployment is off because clrk dev runs the worker
-			// directly via docker — a Deployment would create a duplicate
-			// worker pod inside k3s with broken nested-container semantics.
-			"--ingress-controller=true",
-			// EgressGateway reconciler is on.
-			"--egressgateway-controller=true",
-			// Advertise the bridge Service DNS so EG data plane Envoy pods
-			// dial the controller-manager via in-cluster coredns →
-			// manually-managed Endpoints → docker-network IP.
-			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
-			// Dev wrapper image. EG hardcodes command:["envoy"] but the
-			// private build's entrypoint is /envoy-static; the wrapper
-			// only adds /usr/local/bin/envoy. Built + loaded manually.
-			"--envoy-image=docker.io/clrk/envoy:dev",
-		),
-	}
-	if o.watch {
-		hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "controller-manager"))
-		if err != nil {
-			return state, err
-		}
-		cmOpts = append(cmOpts, drivers.WithWatchBinary(hostBin))
+	cmOpts, err := controllerManagerOpts(o)
+	if err != nil {
+		return state, err
 	}
 
 	if err := withStatus(prog, drivers.ControllerManagerContainerName, func() error {
@@ -326,25 +291,9 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	state.workers = make([]*drivers.WorkerDriver, 0, o.workers)
 	for i := 0; i < o.workers; i++ {
 		w := drivers.NewWorkerDriver(i)
-		wOpts := []drivers.Option{
-			drivers.WithImage(o.workerImage),
-			drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
-			drivers.WithEnv(map[string]string{
-				// Route all resource access through k3s; clrk.apoxy.dev
-				// is served by the controller-manager container via an
-				// aggregated APIService and transparently proxied by k3s.
-				"KUBECONFIG":     "/var/lib/clrk/kubeconfig",
-				"CLRK_POOL_NAME": "default",
-				"POD_NAME":       w.Name(),
-				"POD_NAMESPACE":  "default",
-			}),
-		}
-		if o.watch {
-			hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "worker"))
-			if err != nil {
-				return state, err
-			}
-			wOpts = append(wOpts, drivers.WithWatchBinary(hostBin))
+		wOpts, err := workerOpts(o, w)
+		if err != nil {
+			return state, err
 		}
 		if err := withStatus(prog, w.Name(), func() error {
 			_, err := w.Start(ctx, wOpts...)
@@ -357,6 +306,81 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 
 	return state, nil
+}
+
+// controllerManagerOpts returns the docker run options used by both bringUp
+// and `clrk dev reload controller-manager` so the two paths cannot drift.
+// Cluster-side bootstrapping (APIService, EG bridge, extensionManager wiring)
+// is intentionally NOT here — it's idempotent on bringUp and a reload skips
+// it entirely since k3s already has those records.
+func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
+	opts := []drivers.Option{
+		drivers.WithImage(o.controllerImage),
+		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
+		drivers.WithEnv(map[string]string{
+			"KUBECONFIG": "/var/lib/clrk/kubeconfig",
+			// Tolerate duplicate Envoy protobuf registrations: envoy-go and
+			// envoyproxy/go-control-plane both register TLS proto files
+			// because envoyproxy/gateway's extension proto transitively
+			// imports go-control-plane's TLS types. Matches the pattern
+			// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
+			"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
+		}),
+		drivers.WithArgs(
+			"--db=/var/lib/clrk/data.db",
+			"--bind-addr=0.0.0.0",
+			"--bind-port=8443",
+			// Ingress reconciler is on (k3s has gateway-api installed);
+			// worker-deployment is off because clrk dev runs the worker
+			// directly via docker — a Deployment would create a duplicate
+			// worker pod inside k3s with broken nested-container semantics.
+			"--ingress-controller=true",
+			// EgressGateway reconciler is on.
+			"--egressgateway-controller=true",
+			// Advertise the bridge Service DNS so EG data plane Envoy pods
+			// dial the controller-manager via in-cluster coredns →
+			// manually-managed Endpoints → docker-network IP.
+			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
+			// Dev wrapper image. EG hardcodes command:["envoy"] but the
+			// private build's entrypoint is /envoy-static; the wrapper
+			// only adds /usr/local/bin/envoy. Built + loaded manually.
+			"--envoy-image=docker.io/clrk/envoy:dev",
+		),
+	}
+	if o.watch {
+		hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "controller-manager"))
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, drivers.WithWatchBinary(hostBin))
+	}
+	return opts, nil
+}
+
+// workerOpts returns the docker run options used by both bringUp and
+// `clrk dev reload worker` so the two paths cannot drift.
+func workerOpts(o *devOpts, w *drivers.WorkerDriver) ([]drivers.Option, error) {
+	opts := []drivers.Option{
+		drivers.WithImage(o.workerImage),
+		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
+		drivers.WithEnv(map[string]string{
+			// Route all resource access through k3s; clrk.apoxy.dev is
+			// served by the controller-manager container via an
+			// aggregated APIService and transparently proxied by k3s.
+			"KUBECONFIG":     "/var/lib/clrk/kubeconfig",
+			"CLRK_POOL_NAME": "default",
+			"POD_NAME":       w.Name(),
+			"POD_NAMESPACE":  "default",
+		}),
+	}
+	if o.watch {
+		hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "worker"))
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, drivers.WithWatchBinary(hostBin))
+	}
+	return opts, nil
 }
 
 // withStatus wraps a starting → ready/error transition around a step's
