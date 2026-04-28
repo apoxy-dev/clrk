@@ -131,6 +131,26 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 		netlink.LinkSetUp(lo)
 	}
 
+	// Pin a static ARP entry for the gateway. The other end of the TAP
+	// is the gVisor netstack, which speaks IP-only (the pump strips
+	// Ethernet on inbound and broadcasts on outbound) — so it can't
+	// answer ARP, and without this the kernel never resolves the
+	// gateway's MAC and silently buffers every outbound packet. Any MAC
+	// works because the netstack's outbound frames hardcode broadcast
+	// dst anyway.
+	if err := netlink.NeighSet(&netlink.Neigh{
+		LinkIndex:    tap.Attrs().Index,
+		Family:       unix.AF_INET,
+		State:        netlink.NUD_PERMANENT,
+		IP:           gw.AsSlice(),
+		HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+	}); err != nil {
+		tapFD.Close()
+		netns.Set(origNS)
+		netns.DeleteNamed(nsName)
+		return nil, fmt.Errorf("adding static neighbor for gateway %s: %w", gw, err)
+	}
+
 	// Add default route via gateway.
 	route := &netlink.Route{
 		Dst: nil, // default route
