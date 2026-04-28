@@ -60,6 +60,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
 	cmd.AddCommand(newDevReloadCmd())
 	cmd.AddCommand(newDevStatusCmd())
+	cmd.AddCommand(newDevLogsCmd())
 	return cmd
 }
 
@@ -70,6 +71,26 @@ func runDev(ctx context.Context, o *devOpts) error {
 	if err := os.MkdirAll(o.dataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
+
+	// Refuse to start a second `clrk dev` against the same dataDir.
+	// Without this guard the second invocation `docker rm -f`s the first
+	// instance's containers in RemoveIfExists during bringUp, silently
+	// destroying the first session's state.
+	lock, err := acquireDevLock(o.dataDir)
+	if err != nil {
+		var busy *devLockBusy
+		if errors.As(err, &busy) {
+			fmt.Fprintf(os.Stderr,
+				"clrk dev is already running (pid %d) under %s.\n"+
+					"  • inspect: clrk dev status\n"+
+					"  • follow logs: clrk dev logs -f\n"+
+					"  • stop and replace: kill %d && clrk dev …\n",
+				busy.OwnerPID, o.dataDir, busy.OwnerPID)
+			return err
+		}
+		return err
+	}
+	defer lock.Release()
 
 	// Auto-disable TUI on non-TTY stdout (CI, piped output) unless the user
 	// explicitly set --tui=true.
