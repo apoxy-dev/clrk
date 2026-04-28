@@ -9,9 +9,14 @@ spec:
     - gatewayRef: echo-bot
   template:
     spec:
-      image: ghcr.io/apoxy-dev/clrk/echo-bot:latest
-      env:
-        - name: ECHO_TARGET
-          value: https://httpbin.org/anything
-        - name: ECHO_INTERVAL
-          value: 5s
+      # Use a public image so dev doesn't need a private pull secret.
+      # The worker pulls via ORAS straight to sandbox rootfs.
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          while true; do
+            curl -sS -o /dev/null -w 'http %{http_code} %{url_effective}\n' \
+              https://httpbin.org/anything
+            sleep 5
+          done

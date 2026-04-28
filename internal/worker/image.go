@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -94,7 +95,10 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 	}
 	defer os.RemoveAll(stageDir)
 
-	fs, err := file.New(stageDir)
+	// file.New caps unnamed-content pushes at 4 MiB by default; that's
+	// where the manifest + image config end up, and many real-world
+	// configs exceed it. 1 GiB is well above any practical config.
+	fs, err := file.NewWithFallbackLimit(stageDir, 1<<30)
 	if err != nil {
 		return nil, fmt.Errorf("creating file store: %w", err)
 	}
@@ -110,10 +114,15 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 		Credential: auth.StaticCredential(repo.Reference.Registry, auth.EmptyCredential),
 	}
 
-	// Pull manifest + all layers.
-	opts := oras.CopyOptions{}
+	// Pull manifest + all layers. The platform pin matches what the worker
+	// host can actually exec; bump MaxMetadataBytes well above the 4 MiB
+	// default since oras-go uses the same limit for blob caching during
+	// copy, and most real images have layers larger than that.
+	opts := oras.CopyOptions{
+		CopyGraphOptions: oras.CopyGraphOptions{MaxMetadataBytes: 1 << 30},
+	}
 	opts.WithTargetPlatform(&ocispecv1.Platform{
-		Architecture: "amd64",
+		Architecture: runtime.GOARCH,
 		OS:           "linux",
 	})
 	desc, err := oras.Copy(ctx, repo, repo.Reference.Reference, fs, "", opts)

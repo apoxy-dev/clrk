@@ -205,10 +205,18 @@ func (r *EgressGatewayReconciler) ensureGatewayClass(ctx context.Context) error 
 }
 
 // ensureGateway creates or updates the Gateway referencing our class with a
-// single TCP listener. The extension server picks listeners owned by clrk
-// via the "clrk-eg-*" name prefix. The Gateway carries an infrastructure
-// parametersRef so EG provisions Envoy with the per-EG EnvoyProxy spec
-// (which pins our private image).
+// single HTTPS listener. We use HTTPS (not raw TCP) so EG generates an
+// HCM-shaped listener that PostHTTPListenerModify can mutate — TCP
+// listeners get no filter chains and no extension hook fires for them.
+//
+// The TLS certificateRef points at the per-EG CA Secret as a placeholder;
+// the extension swaps DownstreamTlsContext.CommonTlsContext.CustomHandshaker
+// in for the gRPC certificate provider so leaves are minted on the fly per
+// SNI and the placeholder cert is never actually presented.
+//
+// The Gateway carries an infrastructure parametersRef so EG provisions
+// Envoy with the per-EG EnvoyProxy spec (which pins our private image
+// containing the grpc_certificate_provider handshaker extension).
 func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
 	gw := &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -216,13 +224,25 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 			Namespace: eg.Namespace,
 		},
 	}
+	caSecret := gwapiv1.ObjectName(EgressGatewayCASecretName(eg.Name))
+	tlsMode := gwapiv1.TLSModeTerminate
+	allRoutes := gwapiv1.NamespacesFromAll
 	_, err := ctrl.CreateOrUpdate(ctx, r.Client, gw, func() error {
 		gw.Spec.GatewayClassName = gwapiv1.ObjectName(EgressGatewayClassName)
 		gw.Spec.Listeners = []gwapiv1.Listener{
 			{
 				Name:     "egress",
 				Port:     gwapiv1.PortNumber(EgressListenerPort),
-				Protocol: gwapiv1.TCPProtocolType,
+				Protocol: gwapiv1.HTTPSProtocolType,
+				TLS: &gwapiv1.GatewayTLSConfig{
+					Mode: &tlsMode,
+					CertificateRefs: []gwapiv1.SecretObjectReference{
+						{Name: caSecret},
+					},
+				},
+				AllowedRoutes: &gwapiv1.AllowedRoutes{
+					Namespaces: &gwapiv1.RouteNamespaces{From: &allRoutes},
+				},
 			},
 		}
 		gw.Spec.Infrastructure = &gwapiv1.GatewayInfrastructure{
@@ -233,6 +253,41 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 			},
 		}
 		return ctrl.SetControllerReference(eg, gw, r.Scheme)
+	})
+	if err != nil {
+		return err
+	}
+	return r.ensureCatchAllRoute(ctx, eg)
+}
+
+// ensureCatchAllRoute creates a placeholder HTTPRoute on the Gateway so EG
+// has at least one accepted route and produces an HCM filter chain for our
+// extension to rewrite. The route's backendRef points at a synthetic
+// service that our PostTranslateModify replaces with a
+// dynamic_forward_proxy cluster — the backend is never actually dialed.
+func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
+	rt := &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GatewayNamePrefix + eg.Name + "-catchall",
+			Namespace: eg.Namespace,
+		},
+	}
+	port := gwapiv1.PortNumber(80)
+	_, err := ctrl.CreateOrUpdate(ctx, r.Client, rt, func() error {
+		rt.Spec.ParentRefs = []gwapiv1.ParentReference{{
+			Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name),
+		}}
+		rt.Spec.Rules = []gwapiv1.HTTPRouteRule{{
+			BackendRefs: []gwapiv1.HTTPBackendRef{{
+				BackendRef: gwapiv1.BackendRef{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name + "-dfp-placeholder"),
+						Port: &port,
+					},
+				},
+			}},
+		}}
+		return ctrl.SetControllerReference(eg, rt, r.Scheme)
 	})
 	return err
 }

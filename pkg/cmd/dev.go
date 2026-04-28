@@ -264,6 +264,13 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			// dial the controller-manager via in-cluster coredns →
 			// manually-managed Endpoints → docker-network IP.
 			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
+			// Use the dev-only Envoy wrapper image (manual prep step:
+			// build with the host's GCP creds + load into clrk-k3s
+			// containerd via `docker save | docker exec ... ctr images
+			// import -`). The upstream private image's entrypoint is
+			// /envoy-static; this wrapper exposes /usr/local/bin/envoy
+			// so EG's hardcoded command:["envoy"] works.
+			"--envoy-image=docker.io/clrk/envoy:dev",
 		),
 	}
 	if o.watch {

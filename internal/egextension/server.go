@@ -22,18 +22,27 @@ import (
 	"strings"
 	"time"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	dfpclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
+	dfpcommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
+	dfpfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+	proxyprotov3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/proxy_protocol/v3"
+	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	pb "github.com/envoyproxy/gateway/proto/extension"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	tlsv3 "github.com/apoxy-dev/envoy-go/envoy/extensions/transport_sockets/tls/v3"
 
 	"github.com/apoxy-dev/clrk/internal/certprovider"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
 // Well-known extension names.
@@ -42,7 +51,41 @@ const (
 	extProcFilterName              = "envoy.filters.http.ext_proc"
 	routerFilterName               = "envoy.filters.http.router"
 	tlsTransportSocketName         = "envoy.transport_sockets.tls"
+
+	proxyProtocolListenerFilterName = "envoy.filters.listener.proxy_protocol"
+	tlsInspectorListenerFilterName  = "envoy.filters.listener.tls_inspector"
+	dfpHTTPFilterName               = "envoy.filters.http.dynamic_forward_proxy"
+
+	// DFPClusterName is the synthetic dynamic_forward_proxy cluster name
+	// PostHTTPListenerModify routes to and PostTranslateModify creates.
+	DFPClusterName = "clrk-egress-dfp"
+
+	// dnsCacheName ties the dynamic_forward_proxy HTTP filter and cluster
+	// to the same DNS cache instance.
+	dnsCacheName = "clrk-egress-dns-cache"
 )
+
+// agentTLVRules maps each clrk PROXY v2 TLV type into a dynamic-metadata
+// entry the proxy_protocol listener filter publishes. ext_proc reads them
+// back from MetadataContext under the same namespace.
+var agentTLVRules = []*proxyprotov3.ProxyProtocol_Rule{
+	tlvRule(proxyproto.TLVAgentKind, "agent_kind"),
+	tlvRule(proxyproto.TLVAgentNamespace, "agent_namespace"),
+	tlvRule(proxyproto.TLVAgentName, "agent_name"),
+	tlvRule(proxyproto.TLVAgentUID, "agent_uid"),
+	tlvRule(proxyproto.TLVAgentRevision, "agent_revision"),
+	tlvRule(proxyproto.TLVInvocationID, "invocation_id"),
+}
+
+func tlvRule(t byte, key string) *proxyprotov3.ProxyProtocol_Rule {
+	return &proxyprotov3.ProxyProtocol_Rule{
+		TlvType: uint32(t),
+		OnTlvPresent: &proxyprotov3.ProxyProtocol_KeyValuePair{
+			MetadataNamespace: "clrk.apoxy.dev",
+			Key:               key,
+		},
+	}
+}
 
 // GatewayNamePrefix is the prefix the EgressGateway controller uses when
 // creating Gateway resources. We parse it off listener names so every
@@ -81,8 +124,17 @@ func New(certProviderURI, extProcURI string) *Server {
 	}
 }
 
-// PostHTTPListenerModify wires the MITM handshaker and ext_proc HTTP filter
-// into every clrk-owned HTTP listener.
+// PostHTTPListenerModify rewrites every clrk-owned egress listener so that:
+//
+//   - PROXY v2 framing is decoded off the wire and TLV agent identity is
+//     surfaced as dynamic metadata under the clrk.apoxy.dev namespace.
+//   - The TLS ClientHello is parsed so the handshaker can mint an SNI-keyed
+//     leaf cert against the per-EG CA.
+//   - Each filter chain's DownstreamTlsContext uses our gRPC certificate
+//     provider handshaker, so leaves come from controller-manager.
+//   - Each HCM gains the dynamic_forward_proxy + ext_proc HTTP filters and
+//     a single virtual_host * route to the synthetic DFP cluster created
+//     by PostTranslateModify.
 func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPListenerModifyRequest) (*pb.PostHTTPListenerModifyResponse, error) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	listener := req.GetListener()
@@ -98,6 +150,10 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 	logger.Info("Rewriting egress listener",
 		"listener", listener.GetName(), "eg.namespace", egKey.namespace, "eg.name", egKey.name)
 
+	if err := ensureListenerFilters(listener); err != nil {
+		logger.Error(err, "Adding listener filters failed", "listener", listener.GetName())
+	}
+
 	allChains := listener.GetFilterChains()
 	if defaultFC := listener.GetDefaultFilterChain(); defaultFC != nil {
 		allChains = append(allChains, defaultFC)
@@ -107,20 +163,32 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		if err := s.injectHandshaker(fc, egKey); err != nil {
 			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
 		}
-		if err := s.injectExtProc(fc); err != nil {
-			logger.Error(err, "Inject ext_proc failed", "filterChain", fc.GetName())
+		if err := s.rewriteHCM(fc); err != nil {
+			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
 		}
 	}
 
 	return &pb.PostHTTPListenerModifyResponse{Listener: listener}, nil
 }
 
-// PostTranslateModify is a no-op for now; cluster and secret manipulation
-// lives in the EgressGateway controller (via direct xDS patches to the
-// EnvoyProxy bootstrap).
+// PostTranslateModify appends a synthetic dynamic_forward_proxy cluster
+// (DFPClusterName) so the HCM route action injected by
+// PostHTTPListenerModify has a concrete cluster to route to. The HTTP
+// filter and the cluster share a single DNS cache configuration so SNI
+// → upstream resolution is consistent.
 func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
+	clusters := req.GetClusters()
+	for _, c := range clusters {
+		if c.GetName() == DFPClusterName {
+			return &pb.PostTranslateModifyResponse{Clusters: clusters, Secrets: req.GetSecrets()}, nil
+		}
+	}
+	dfp, err := buildDFPCluster()
+	if err != nil {
+		return nil, err
+	}
 	return &pb.PostTranslateModifyResponse{
-		Clusters: req.GetClusters(),
+		Clusters: append(clusters, dfp),
 		Secrets:  req.GetSecrets(),
 	}, nil
 }
@@ -212,10 +280,12 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 	return nil
 }
 
-// injectExtProc prepends an ext_proc HTTP filter to every HCM in the
-// filter chain, positioned right before the router filter so body capture
-// runs after all routing/auth filters have executed.
-func (s *Server) injectExtProc(fc *listenerv3.FilterChain) error {
+// rewriteHCM replaces every HCM in the filter chain with an MITM-shaped
+// configuration: prepends the dynamic_forward_proxy and ext_proc HTTP
+// filters before the router, and replaces any baked-in route_config with
+// a single virtual_host * route to the synthetic DFPClusterName cluster
+// (auto_host_rewrite so the upstream Host comes from :authority).
+func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 	for _, f := range fc.GetFilters() {
 		if f.GetName() != "envoy.filters.network.http_connection_manager" {
 			continue
@@ -229,53 +299,63 @@ func (s *Server) injectExtProc(fc *listenerv3.FilterChain) error {
 			return fmt.Errorf("unmarshal HCM: %w", err)
 		}
 
-		extProcCfg := &extprocv3.ExternalProcessor{
-			GrpcService: &corev3.GrpcService{
-				TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
-					GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
-						TargetUri:  s.ExtProcTargetURI,
-						StatPrefix: "clrk_ext_proc",
-					},
-				},
-				Timeout: durationpb.New(defaultExtProcTimeout),
-			},
-			ProcessingMode: &extprocv3.ProcessingMode{
-				RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
-				ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
-				RequestBodyMode:     extprocv3.ProcessingMode_BUFFERED_PARTIAL,
-				ResponseBodyMode:    extprocv3.ProcessingMode_BUFFERED_PARTIAL,
-				RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
-				ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
-			},
-			MetadataOptions: &extprocv3.MetadataOptions{
-				ForwardingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
-					Untyped: []string{"clrk.apoxy.dev"},
-				},
-			},
-		}
-		extProcAny, err := anypb.New(extProcCfg)
+		dfpFilter, err := buildDFPHTTPFilter()
 		if err != nil {
-			return fmt.Errorf("marshal ext_proc config: %w", err)
+			return err
+		}
+		extProcFilter, err := s.buildExtProcFilter()
+		if err != nil {
+			return err
 		}
 
-		// Insert the ext_proc filter immediately before the router filter.
-		filter := &hcmv3.HttpFilter{
-			Name:       extProcFilterName,
-			ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: extProcAny},
-		}
+		// Filter order: DFP (rewrites cluster), ext_proc (captures
+		// req+resp), router (terminal). Anything EG put before router
+		// is preserved upstream of these — drop nothing the operator
+		// configured (auth, ratelimit, etc.) but make sure ours land
+		// just before router so they always run.
+		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+2)
 		inserted := false
-		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+1)
 		for _, existing := range hcm.HttpFilters {
 			if existing.GetName() == routerFilterName && !inserted {
-				newFilters = append(newFilters, filter)
+				newFilters = append(newFilters, dfpFilter, extProcFilter)
 				inserted = true
 			}
 			newFilters = append(newFilters, existing)
 		}
 		if !inserted {
-			newFilters = append(newFilters, filter)
+			newFilters = append(newFilters, dfpFilter, extProcFilter)
 		}
 		hcm.HttpFilters = newFilters
+
+		// Replace whatever EG generated with a single catch-all
+		// virtual_host that hands the request to the DFP cluster. Any
+		// upstream rewrite happens via auto_host_rewrite; the SNI used
+		// during MITM is also propagated as :authority so the upstream
+		// connection re-resolves the original hostname.
+		hcm.RouteSpecifier = &hcmv3.HttpConnectionManager_RouteConfig{
+			RouteConfig: &routev3.RouteConfiguration{
+				Name: "clrk-egress-dfp",
+				VirtualHosts: []*routev3.VirtualHost{{
+					Name:    "clrk-egress-dfp",
+					Domains: []string{"*"},
+					Routes: []*routev3.Route{{
+						Match: &routev3.RouteMatch{
+							PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
+						},
+						Action: &routev3.Route_Route{
+							Route: &routev3.RouteAction{
+								ClusterSpecifier: &routev3.RouteAction_Cluster{
+									Cluster: DFPClusterName,
+								},
+								HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
+									AutoHostRewrite: wrapperspb.Bool(true),
+								},
+							},
+						},
+					}},
+				}},
+			},
+		}
 
 		newTypedCfg, err := anypb.New(hcm)
 		if err != nil {
@@ -284,4 +364,134 @@ func (s *Server) injectExtProc(fc *listenerv3.FilterChain) error {
 		f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: newTypedCfg}
 	}
 	return nil
+}
+
+// ensureListenerFilters prepends the proxy_protocol and tls_inspector
+// listener filters in that order. proxy_protocol must run first since the
+// PROXY v2 frame precedes the TLS ClientHello on the wire. Idempotent —
+// skips filters already present (matched by name).
+func ensureListenerFilters(l *listenerv3.Listener) error {
+	have := make(map[string]bool, len(l.GetListenerFilters()))
+	for _, lf := range l.GetListenerFilters() {
+		have[lf.GetName()] = true
+	}
+
+	var prepend []*listenerv3.ListenerFilter
+
+	if !have[proxyProtocolListenerFilterName] {
+		ppCfg := &proxyprotov3.ProxyProtocol{Rules: agentTLVRules}
+		ppAny, err := anypb.New(ppCfg)
+		if err != nil {
+			return fmt.Errorf("marshal proxy_protocol: %w", err)
+		}
+		prepend = append(prepend, &listenerv3.ListenerFilter{
+			Name: proxyProtocolListenerFilterName,
+			ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+				TypedConfig: ppAny,
+			},
+		})
+	}
+	if !have[tlsInspectorListenerFilterName] {
+		insp, err := anypb.New(&tlsinspectorv3.TlsInspector{})
+		if err != nil {
+			return fmt.Errorf("marshal tls_inspector: %w", err)
+		}
+		prepend = append(prepend, &listenerv3.ListenerFilter{
+			Name: tlsInspectorListenerFilterName,
+			ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+				TypedConfig: insp,
+			},
+		})
+	}
+
+	if len(prepend) > 0 {
+		l.ListenerFilters = append(prepend, l.GetListenerFilters()...)
+	}
+	return nil
+}
+
+// buildDFPHTTPFilter returns the dynamic_forward_proxy HTTP filter that
+// resolves the request's :authority through the shared DNS cache.
+func buildDFPHTTPFilter() (*hcmv3.HttpFilter, error) {
+	cfg := &dfpfilterv3.FilterConfig{
+		ImplementationSpecifier: &dfpfilterv3.FilterConfig_DnsCacheConfig{
+			DnsCacheConfig: dnsCacheConfig(),
+		},
+	}
+	any, err := anypb.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal dfp http filter: %w", err)
+	}
+	return &hcmv3.HttpFilter{
+		Name:       dfpHTTPFilterName,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: any},
+	}, nil
+}
+
+func (s *Server) buildExtProcFilter() (*hcmv3.HttpFilter, error) {
+	cfg := &extprocv3.ExternalProcessor{
+		GrpcService: &corev3.GrpcService{
+			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
+				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
+					TargetUri:  s.ExtProcTargetURI,
+					StatPrefix: "clrk_ext_proc",
+				},
+			},
+			Timeout: durationpb.New(defaultExtProcTimeout),
+		},
+		ProcessingMode: &extprocv3.ProcessingMode{
+			RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
+			ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
+			RequestBodyMode:     extprocv3.ProcessingMode_BUFFERED_PARTIAL,
+			ResponseBodyMode:    extprocv3.ProcessingMode_BUFFERED_PARTIAL,
+			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
+			ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
+		},
+		MetadataOptions: &extprocv3.MetadataOptions{
+			ForwardingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
+				Untyped: []string{"clrk.apoxy.dev"},
+			},
+		},
+	}
+	any, err := anypb.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ext_proc filter: %w", err)
+	}
+	return &hcmv3.HttpFilter{
+		Name:       extProcFilterName,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: any},
+	}, nil
+}
+
+// buildDFPCluster constructs the synthetic DFP cluster the HCM route_config
+// targets. Uses the same DNS cache as the HTTP filter so resolution is
+// shared.
+func buildDFPCluster() (*clusterv3.Cluster, error) {
+	clusterCfg := &dfpclusterv3.ClusterConfig{
+		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
+			DnsCacheConfig: dnsCacheConfig(),
+		},
+	}
+	any, err := anypb.New(clusterCfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal dfp cluster: %w", err)
+	}
+	return &clusterv3.Cluster{
+		Name:           DFPClusterName,
+		ConnectTimeout: durationpb.New(5 * time.Second),
+		LbPolicy:       clusterv3.Cluster_CLUSTER_PROVIDED,
+		ClusterDiscoveryType: &clusterv3.Cluster_ClusterType{
+			ClusterType: &clusterv3.Cluster_CustomClusterType{
+				Name:        "envoy.clusters.dynamic_forward_proxy",
+				TypedConfig: any,
+			},
+		},
+	}, nil
+}
+
+func dnsCacheConfig() *dfpcommonv3.DnsCacheConfig {
+	return &dfpcommonv3.DnsCacheConfig{
+		Name:            dnsCacheName,
+		DnsLookupFamily: clusterv3.Cluster_AUTO,
+	}
 }

@@ -180,7 +180,8 @@ func setTCPOptions(ipstack *stack.Stack) error {
 		opt  tcpip.SettableTransportProtocolOption
 	}
 	sack := tcpip.TCPSACKEnabled(true)
-	cc := tcpip.CongestionControlOption("bbr")
+	// gVisor netstack only ships reno + cubic; bbr returns ENOENT.
+	cc := tcpip.CongestionControlOption("cubic")
 	delay := tcpip.TCPDelayEnabled(false)
 	rcvBuf := tcpip.TCPReceiveBufferSizeRangeOption{Min: 64 << 10, Default: 2 << 20, Max: 16 << 20}
 	sndBuf := tcpip.TCPSendBufferSizeRangeOption{Min: 64 << 10, Default: 2 << 20, Max: 16 << 20}
