@@ -7,65 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/spf13/cobra"
+	"time"
 
 	"github.com/apoxy-dev/clrk/pkg/drivers"
 )
 
-// newDevReloadCmd is `clrk dev reload <component>`. It tears down a single
-// component container managed by `clrk dev` and recreates it with the
-// current image — useful when iterating on worker or controller-manager
-// code without re-bootstrapping k3s, EG, and the apiserver state.
-//
-// `clrk dev` doesn't auto-respawn dead containers, so without this users
-// have to kill the whole `clrk dev` process and lose all in-cluster
-// state. This subcommand is a no-state drop-in: it does not need to talk
-// to the running `clrk dev` process — it just re-derives the same
-// `docker run` args from defaults and applies them.
-func newDevReloadCmd() *cobra.Command {
-	o := &devOpts{}
-	var (
-		tarball     string
-		workerIndex int
-	)
-
-	cmd := &cobra.Command{
-		Use:       "reload [worker|controller-manager]",
-		Short:     "Restart a clrk dev component container with the current image",
-		Long:      "Stops and re-creates one of the container images managed by `clrk dev` (worker or controller-manager) so a freshly-built `clrk/<name>:latest` image is picked up. Optionally docker-loads a bazel-built OCI tarball first.",
-		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"worker", "controller-manager"},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if o.dataDir == "" {
-				o.dataDir = clrkDir
-			}
-			ctx := cmd.Context()
-			if tarball != "" {
-				if err := dockerLoad(ctx, tarball); err != nil {
-					return err
-				}
-			}
-			switch args[0] {
-			case "worker":
-				return reloadWorker(ctx, o, workerIndex)
-			case "controller-manager":
-				return reloadControllerManager(ctx, o)
-			default:
-				return fmt.Errorf("unknown component %q (want worker|controller-manager)", args[0])
-			}
-		},
-	}
-
-	cmd.Flags().StringVar(&o.controllerImage, "controller-image", drivers.DefaultControllerManagerImage, "Controller-manager image ref.")
-	cmd.Flags().StringVar(&o.workerImage, "worker-image", drivers.DefaultWorkerImage, "Worker image ref.")
-	cmd.Flags().StringVar(&o.dataDir, "data-dir", "", "Host path for ~/.clrk state (defaults to --clrk-dir).")
-	cmd.Flags().BoolVar(&o.watch, "watch", false, "Re-attach the host binary as a bind mount (matches `clrk dev --watch`).")
-	cmd.Flags().StringVar(&tarball, "tarball", "", "Path to a bazel-built OCI tarball (e.g. //clrk:worker_oci_tarball). Loaded into host docker before the restart so the new image is what gets picked up.")
-	cmd.Flags().IntVar(&workerIndex, "index", 0, "Worker replica index (matches `clrk dev --workers`).")
-	return cmd
-}
-
+// reloadWorker stops and recreates clrk-worker-<idx> with the current
+// `clrk/worker:latest` image. Used by --reload-tar's mtime watcher
+// inside the running `clrk dev` process.
 func reloadWorker(ctx context.Context, o *devOpts, idx int) error {
 	w := drivers.NewWorkerDriver(idx)
 	slog.Info("Stopping worker", "container", w.Name())
@@ -83,6 +32,11 @@ func reloadWorker(ctx context.Context, o *devOpts, idx int) error {
 	return nil
 }
 
+// reloadControllerManager stops and recreates clrk-controller-manager.
+// Cluster-side bootstrapping (clrk APIService, EG bridge,
+// extensionManager wiring) is intentionally NOT re-run — those records
+// are idempotent on bringUp and remain valid for as long as the k3s
+// container lives.
 func reloadControllerManager(ctx context.Context, o *devOpts) error {
 	cm := drivers.NewControllerManagerDriver()
 	slog.Info("Stopping controller-manager", "container", drivers.ControllerManagerContainerName)
@@ -100,6 +54,10 @@ func reloadControllerManager(ctx context.Context, o *devOpts) error {
 	return nil
 }
 
+// dockerLoad imports an OCI tarball into the host docker daemon, the
+// same way `docker load -i …` does. Reused both at startup (when
+// --reload-tar is supplied to seed the image) and on every detected
+// mtime change.
 func dockerLoad(ctx context.Context, path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("tarball not found: %w", err)
@@ -111,4 +69,107 @@ func dockerLoad(ctx context.Context, path string) error {
 	}
 	slog.Info("Loaded image", "output", strings.TrimSpace(string(out)))
 	return nil
+}
+
+// reloadTarSpec is one parsed `--reload-tar=COMPONENT=PATH` flag. The
+// loop owning the spec polls the tarball's mtime and triggers a reload
+// when it advances.
+type reloadTarSpec struct {
+	Component string // worker | controller-manager
+	Path      string
+	Index     int // worker replica index, ignored for controller-manager
+}
+
+// parseReloadTar parses a list of `--reload-tar=COMPONENT=PATH` flags
+// where COMPONENT is "worker" (optionally "worker-N") or
+// "controller-manager".
+func parseReloadTar(raw []string) ([]reloadTarSpec, error) {
+	out := make([]reloadTarSpec, 0, len(raw))
+	for _, s := range raw {
+		eq := strings.IndexByte(s, '=')
+		if eq <= 0 || eq == len(s)-1 {
+			return nil, fmt.Errorf("--reload-tar=%s: expected COMPONENT=PATH", s)
+		}
+		comp, path := s[:eq], s[eq+1:]
+		idx := 0
+		switch {
+		case comp == "controller-manager":
+		case comp == "worker":
+		case strings.HasPrefix(comp, "worker-"):
+			suffix := comp[len("worker-"):]
+			n, err := atoiStrict(suffix)
+			if err != nil {
+				return nil, fmt.Errorf("--reload-tar=%s: %w", s, err)
+			}
+			comp = "worker"
+			idx = n
+		default:
+			return nil, fmt.Errorf("--reload-tar=%s: COMPONENT must be worker[-N] or controller-manager", s)
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("--reload-tar=%s: %w", s, err)
+		}
+		out = append(out, reloadTarSpec{Component: comp, Path: path, Index: idx})
+	}
+	return out, nil
+}
+
+func atoiStrict(s string) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty number")
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, nil
+}
+
+// runReloadWatcher polls path's mtime every interval and fires the
+// component's reload sequence whenever it advances. Returns when ctx is
+// done. Errors during reload are logged and the watcher keeps running —
+// a transient docker hiccup shouldn't kill the dev session.
+func runReloadWatcher(ctx context.Context, o *devOpts, spec reloadTarSpec) {
+	const interval = 500 * time.Millisecond
+	last := mtime(spec.Path)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		now := mtime(spec.Path)
+		if now.IsZero() || !now.After(last) {
+			continue
+		}
+		last = now
+		slog.Info("Reload-tar mtime changed; reloading", "component", spec.Component, "index", spec.Index, "path", spec.Path)
+		if err := dockerLoad(ctx, spec.Path); err != nil {
+			slog.Error("dockerLoad failed; will retry on next change", "err", err)
+			continue
+		}
+		var err error
+		switch spec.Component {
+		case "worker":
+			err = reloadWorker(ctx, o, spec.Index)
+		case "controller-manager":
+			err = reloadControllerManager(ctx, o)
+		}
+		if err != nil {
+			slog.Error("Reload failed; will retry on next change", "component", spec.Component, "err", err)
+		}
+	}
+}
+
+func mtime(path string) time.Time {
+	st, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return st.ModTime()
 }

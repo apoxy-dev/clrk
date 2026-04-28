@@ -34,6 +34,7 @@ type devOpts struct {
 	tuiSet          bool
 	applyPaths      []string
 	applyRecursive  bool
+	reloadTar       []string
 }
 
 func newDevCmd() *cobra.Command {
@@ -58,7 +59,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
 	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
-	cmd.AddCommand(newDevReloadCmd())
+	cmd.Flags().StringArrayVar(&o.reloadTar, "reload-tar", nil, "Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is `worker[-N]` or `controller-manager`. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar")
 	cmd.AddCommand(newDevStatusCmd())
 	cmd.AddCommand(newDevLogsCmd())
 	return cmd
@@ -127,8 +128,27 @@ func runDevPlain(ctx context.Context, o *devOpts) error {
 		state.startWatcher(ctx, o, nil)
 	}
 
+	if err := startReloadWatchers(ctx, o); err != nil {
+		return err
+	}
+
 	<-ctx.Done()
 	slog.Info("Shutting down")
+	return nil
+}
+
+// startReloadWatchers parses --reload-tar flags and spawns one watcher
+// goroutine per spec. Returns the parse error early so a typo halts
+// startup instead of being lost in the log stream.
+func startReloadWatchers(ctx context.Context, o *devOpts) error {
+	specs, err := parseReloadTar(o.reloadTar)
+	if err != nil {
+		return err
+	}
+	for _, s := range specs {
+		slog.Info("Watching tarball for reload", "component", s.Component, "index", s.Index, "path", s.Path)
+		go runReloadWatcher(ctx, o, s)
+	}
 	return nil
 }
 
@@ -169,6 +189,10 @@ func runDevTUI(ctx context.Context, o *devOpts) error {
 		}
 		if o.watch {
 			state.startWatcher(orchestrateCtx, o, prog)
+		}
+		if err := startReloadWatchers(orchestrateCtx, o); err != nil {
+			orchErrCh <- err
+			return
 		}
 		// Block until shutdown signaled; orchErrCh stays nil for clean exit.
 		<-orchestrateCtx.Done()
