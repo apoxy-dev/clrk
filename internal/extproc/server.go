@@ -11,9 +11,9 @@
 package extproc
 
 import (
+	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -21,6 +21,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/protobuf/types/known/structpb"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // MetadataNamespace is the dynamic-metadata key carrying clrk PROXY v2 TLV
@@ -39,7 +41,7 @@ const (
 )
 
 // captureMaxBytesDefault bounds buffered request+response body bytes per
-// stream. Callers can override via ServerOption.
+// stream when the resolved EgressGateway didn't pin a specific cap.
 const captureMaxBytesDefault = 64 * 1024
 
 // Sink receives one captured record per HTTP transaction. Implementations
@@ -61,8 +63,8 @@ type Record struct {
 	AgentRevision  string
 	InvocationID   string
 
-	RequestHeaders  map[string]string
-	RequestBody     []byte
+	RequestHeaders   map[string]string
+	RequestBody      []byte
 	RequestTruncated bool
 
 	ResponseHeaders   map[string]string
@@ -73,30 +75,31 @@ type Record struct {
 // ServerOption configures the ext_proc Server.
 type ServerOption func(*Server)
 
-// WithMaxCaptureBytes overrides the per-direction body capture cap.
-func WithMaxCaptureBytes(n int) ServerOption {
-	return func(s *Server) { s.maxCaptureBytes = n }
-}
-
-// WithSink sets the destination for captured records. Defaults to a
-// slog-backed sink.
-func WithSink(sink Sink) ServerOption {
-	return func(s *Server) { s.sink = sink }
+// WithSinkOverride forces every stream to use the given sink, bypassing
+// per-EgressGateway lookup. Intended for tests; production wires the
+// controller-runtime client and resolves sinks per-EG.
+func WithSinkOverride(sink Sink) ServerOption {
+	return func(s *Server) { s.sinkOverride = sink }
 }
 
 // Server implements ExternalProcessorServer.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 
-	maxCaptureBytes int
-	sink            Sink
+	client       client.Client
+	sinkOverride Sink
+
+	registry *sinkRegistry
 }
 
-// New constructs an ext_proc server.
-func New(opts ...ServerOption) *Server {
+// New constructs an ext_proc server. The client is used to look up
+// EgressGateway state per-stream (OTLP endpoint + body capture bounds);
+// pass cm.GetClient() in the controller-manager. Tests may pass nil and
+// use WithSinkOverride.
+func New(c client.Client, opts ...ServerOption) *Server {
 	s := &Server{
-		maxCaptureBytes: captureMaxBytesDefault,
-		sink:            slogSink{},
+		client:   c,
+		registry: newSinkRegistry(c),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -104,23 +107,61 @@ func New(opts ...ServerOption) *Server {
 	return s
 }
 
+// Stop releases any resources held by per-EgressGateway sinks (in
+// particular, OTLP exporter background workers and pending batches).
+// Safe to call multiple times.
+func (s *Server) Stop(ctx context.Context) {
+	if s.registry != nil {
+		s.registry.shutdownAll(ctx)
+	}
+}
+
 // Process handles one ext_proc stream. One stream corresponds to one HTTP
 // transaction (request + response pair, assuming upstream keep-alives).
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
+	ctx := stream.Context()
+	logger := ctrllog.FromContext(ctx).WithName("extproc")
+
 	rec := Record{Timestamp: time.Now()}
-	reqBytesLeft := s.maxCaptureBytes
-	respBytesLeft := s.maxCaptureBytes
+
+	// Resolve per-stream sink + capture bounds once. We don't redo this
+	// per message — config changes between request and response of a
+	// single transaction would split the record, which is worse than
+	// using the start-of-stream config.
+	var (
+		sink            Sink
+		maxCaptureBytes int
+		includedTypes   []string
+	)
+	if s.sinkOverride != nil {
+		sink = s.sinkOverride
+		maxCaptureBytes = captureMaxBytesDefault
+	} else {
+		es, err := s.registry.get(ctx)
+		if err != nil {
+			logger.V(1).Info("Falling back to slog sink", "reason", err.Error())
+			sink = slogSink{}
+			maxCaptureBytes = captureMaxBytesDefault
+		} else {
+			sink = es.sink
+			maxCaptureBytes = es.maxCaptureBytes
+			includedTypes = es.includedTypes
+		}
+	}
+
+	reqBytesLeft := maxCaptureBytes
+	respBytesLeft := maxCaptureBytes
 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				s.sink.Emit(rec)
+				sink.Emit(rec)
 				return nil
 			}
 			// Client cancelled or transport error. Still emit whatever we
 			// captured before the break.
-			s.sink.Emit(rec)
+			sink.Emit(rec)
 			return err
 		}
 
@@ -146,9 +187,18 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if mut := authorityPortMutation(rec.RequestHeaders[":authority"]); mut != nil {
 				resp.GetRequestHeaders().GetResponse().HeaderMutation = mut
 			}
+			// Apply content-type body gate per-direction. If the request
+			// content-type isn't in the included set, drop request body
+			// capture (set bytesLeft to 0). Headers stay either way.
+			if !contentTypeIncluded(rec.RequestHeaders["content-type"], includedTypes) {
+				reqBytesLeft = 0
+			}
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
 			rec.ResponseHeaders = headersToMap(m.ResponseHeaders)
 			resp = headersContinue(false)
+			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
+				respBytesLeft = 0
+			}
 		case *extprocv3.ProcessingRequest_RequestBody:
 			body, trunc := appendBounded(rec.RequestBody, m.RequestBody.GetBody(), &reqBytesLeft)
 			rec.RequestBody = body
@@ -172,7 +222,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			continue
 		}
 		if err := stream.Send(resp); err != nil {
-			s.sink.Emit(rec)
+			sink.Emit(rec)
 			return err
 		}
 	}
@@ -280,28 +330,4 @@ func trailersContinue(isRequest bool) *extprocv3.ProcessingResponse {
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestTrailers{RequestTrailers: r}}
 	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseTrailers{ResponseTrailers: r}}
-}
-
-// slogSink is the default sink used when no OTLP destination is wired in.
-// Emits one structured log line per record. OTLP emission is layered on
-// via WithSink once the EgressGateway controller plumbs the endpoint.
-type slogSink struct{}
-
-func (slogSink) Emit(r Record) {
-	slog.Info("clrk egress HTTP transaction",
-		"agent.kind", r.AgentKind,
-		"agent.namespace", r.AgentNamespace,
-		"agent.name", r.AgentName,
-		"agent.uid", r.AgentUID,
-		"agent.revision", r.AgentRevision,
-		"invocation.id", r.InvocationID,
-		"req.method", r.RequestHeaders[":method"],
-		"req.authority", r.RequestHeaders[":authority"],
-		"req.path", r.RequestHeaders[":path"],
-		"req.body_bytes", len(r.RequestBody),
-		"req.truncated", r.RequestTruncated,
-		"resp.status", r.ResponseHeaders[":status"],
-		"resp.body_bytes", len(r.ResponseBody),
-		"resp.truncated", r.ResponseTruncated,
-	)
 }

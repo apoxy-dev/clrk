@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	envoytlsv3 "github.com/apoxy-dev/envoy-go/envoy/service/tls/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -175,7 +177,8 @@ func main() {
 	}
 	grpcSrv := grpc.NewServer()
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
-	extprocv3.RegisterExternalProcessorServer(grpcSrv, extproc.New())
+	extprocSrv := extproc.New(cm.GetClient())
+	extprocv3.RegisterExternalProcessorServer(grpcSrv, extprocSrv)
 	egExt, err := egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI)
 	if err != nil {
 		log.Error(err, "Unable to construct EG extension server")
@@ -188,7 +191,12 @@ func main() {
 			log.Error(err, "gRPC server exited")
 		}
 	}()
-	defer grpcSrv.GracefulStop()
+	defer func() {
+		grpcSrv.GracefulStop()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		extprocSrv.Stop(shutCtx)
+	}()
 
 	slog.Info("Controller-manager running",
 		"apiserver", *bindAddr,

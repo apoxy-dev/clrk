@@ -20,8 +20,7 @@ spec:
       # if you exercise streaming completions.
       maxBytes: 65536
   otlp:
-    # Placeholder collector — clrk dev doesn't ship one. The ext_proc
-    # server falls back to its slog sink, so captures still land in
-    # `clrk dev logs` even without the collector. Replace with your
-    # real OTLP/HTTP endpoint to get structured records elsewhere.
-    endpoint: http://otel-collector.observability.svc:4318
+    # Optional: point at any OTLP/HTTP logs endpoint. When unset (or
+    # unreachable) ext_proc falls back to the controller-manager's
+    # slog handler so captures still land in `clrk dev logs`.
+    endpoint: http://otel-collector.default.svc:4318

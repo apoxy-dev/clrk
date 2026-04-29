@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -33,25 +32,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/egpeer"
 )
-
-// Labels EG sets on the proxy Pods/Services it provisions for each
-// Gateway. We read these off the calling pod (resolved via peer IP) to
-// scope the CA lookup to the right EgressGateway.
-const (
-	labelOwningGatewayName      = "gateway.envoyproxy.io/owning-gateway-name"
-	labelOwningGatewayNamespace = "gateway.envoyproxy.io/owning-gateway-namespace"
-)
-
-// envoyGatewayPodNamespace is where Envoy Gateway provisions data-plane
-// pods. Standard install path; matches the constant used by the
-// EgressGateway controller.
-const envoyGatewayPodNamespace = "envoy-gateway-system"
 
 const (
 	// leafValidity is how long a minted leaf is advertised as valid. We
@@ -195,62 +180,8 @@ func (s *Server) loadCA(ctx context.Context, key types.NamespacedName, now time.
 	return entry, nil
 }
 
-// egFromPeer maps the gRPC peer's source IP back to the calling Envoy pod
-// and pulls the EgressGateway it belongs to off the Envoy-Gateway-managed
-// owning-gateway labels. The Gateway name is `clrk-eg-<eg-name>` per the
-// EgressGateway controller's GatewayNamePrefix convention; we strip the
-// prefix to recover the EgressGateway name.
-//
-// In `clrk dev` the peer IP is the Service NAT IP (workers/k3s and the
-// controller-manager are on a docker network in front of k3s) so the
-// pod-IP lookup misses. As a development-only fallback we then accept the
-// single EgressGateway in the cluster; multi-EG dev would need real peer
-// identity (e.g. encoding the EG into the gRPC target_uri authority).
 func (s *Server) egFromPeer(ctx context.Context) (types.NamespacedName, error) {
-	p, ok := peer.FromContext(ctx)
-	if !ok || p.Addr == nil {
-		return types.NamespacedName{}, fmt.Errorf("no gRPC peer info on context")
-	}
-	host, _, err := net.SplitHostPort(p.Addr.String())
-	if err != nil {
-		return types.NamespacedName{}, fmt.Errorf("parse peer addr %q: %w", p.Addr.String(), err)
-	}
-
-	var pods corev1.PodList
-	if err := s.client.List(ctx, &pods, client.InNamespace(envoyGatewayPodNamespace)); err != nil {
-		return types.NamespacedName{}, fmt.Errorf("list pods in %s: %w", envoyGatewayPodNamespace, err)
-	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if pod.Status.PodIP != host {
-			continue
-		}
-		gwName := pod.Labels[labelOwningGatewayName]
-		gwNs := pod.Labels[labelOwningGatewayNamespace]
-		if gwName == "" || gwNs == "" {
-			return types.NamespacedName{}, fmt.Errorf("pod %s/%s missing owning-gateway labels",
-				pod.Namespace, pod.Name)
-		}
-		egName := strings.TrimPrefix(gwName, clrkcontroller.GatewayNamePrefix)
-		if egName == gwName {
-			return types.NamespacedName{}, fmt.Errorf(
-				"gateway name %q does not start with clrk EG prefix %q",
-				gwName, clrkcontroller.GatewayNamePrefix)
-		}
-		return types.NamespacedName{Namespace: gwNs, Name: egName}, nil
-	}
-
-	// dev fallback: single-EG cluster.
-	var egs clrkv1alpha1.EgressGatewayList
-	if err := s.client.List(ctx, &egs); err != nil {
-		return types.NamespacedName{}, fmt.Errorf("list EgressGateways: %w", err)
-	}
-	if len(egs.Items) == 1 {
-		eg := egs.Items[0]
-		return types.NamespacedName{Namespace: eg.Namespace, Name: eg.Name}, nil
-	}
-	return types.NamespacedName{}, fmt.Errorf("no pod in %s matches peer IP %s and %d EgressGateways exist (need 1 for dev fallback)",
-		envoyGatewayPodNamespace, host, len(egs.Items))
+	return egpeer.EGFromContext(ctx, s.client)
 }
 
 // mintLeaf signs a new leaf certificate for sni, valid for leafValidity.
