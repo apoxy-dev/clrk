@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/egpeer"
+	"github.com/apoxy-dev/clrk/internal/egidentity"
 )
 
 // sinkShutdownTimeout bounds how long we wait for a replaced sink's
@@ -59,15 +59,16 @@ func newSinkRegistry(c client.Client) *sinkRegistry {
 	}
 }
 
-// get resolves the EgressGateway for the gRPC peer on ctx and returns
-// the (possibly newly-built) cached egSink. Returns an error when EG
-// resolution fails or the controller-runtime client isn't wired —
-// callers fall back to slogSink in that case.
+// get resolves the EgressGateway from ctx (stamped by the egidentity
+// gRPC interceptor off the incoming HTTP/2 :authority header) and
+// returns the (possibly newly-built) cached egSink. Returns an error
+// when no EG identity was attached or the controller-runtime client
+// isn't wired — callers fall back to slogSink in that case.
 func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if r.client == nil {
 		return nil, fmt.Errorf("no kube client configured")
 	}
-	key, err := egpeer.EGFromContext(ctx, r.client)
+	key, err := egidentity.MustFromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve EgressGateway: %w", err)
 	}

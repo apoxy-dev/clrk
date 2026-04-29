@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/apoxy-dev/apoxy v0.19.3-0.20260423043546-435f287ab5ae
-	github.com/apoxy-dev/envoy-go v0.0.0-20251219214022-568089f12826
+	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0

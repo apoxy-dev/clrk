@@ -41,8 +41,10 @@ import (
 
 	tlsv3 "github.com/apoxy-dev/envoy-go/envoy/extensions/transport_sockets/tls/v3"
 
+	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Well-known extension names.
@@ -122,11 +124,11 @@ type Server struct {
 	// ExtProcTargetURI is the gRPC target for body-capture.
 	ExtProcTargetURI string
 
-	// Pre-built HTTP filters reused on every PostHTTPListenerModify call.
-	// Their proto contents never vary across listeners, so building them
-	// once at construction time avoids a marshal per translation.
+	// dfpHTTPFilter and dfpCluster are pre-built — their proto contents
+	// don't vary across listeners. The ext_proc filter is rebuilt per
+	// listener because it carries a per-EG :authority value that
+	// identifies the calling EG to the controller-manager.
 	dfpHTTPFilter *hcmv3.HttpFilter
-	extProcFilter *hcmv3.HttpFilter
 	dfpCluster    *clusterv3.Cluster
 }
 
@@ -138,10 +140,6 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	ep, err := buildExtProcFilter(extProcURI)
-	if err != nil {
-		return nil, err
-	}
 	cluster, err := buildDFPCluster()
 	if err != nil {
 		return nil, err
@@ -150,7 +148,6 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
 		dfpHTTPFilter:         dfp,
-		extProcFilter:         ep,
 		dfpCluster:            cluster,
 	}, nil
 }
@@ -194,7 +191,7 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		if err := s.injectHandshaker(fc, egKey); err != nil {
 			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
 		}
-		if err := s.rewriteHCM(fc); err != nil {
+		if err := s.rewriteHCM(fc, egKey); err != nil {
 			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
 		}
 	}
@@ -274,10 +271,16 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 	}
 
 	// The stock grpc_certificate_provider handshaker forwards only the
-	// SNI to FetchCertificate; GrpcService.InitialMetadata is dropped, so
-	// we can't pass the EG identity that way. The certprovider server
-	// instead resolves it from the gRPC peer's source IP (each EG has its
-	// own Envoy pod set with owning-gateway labels).
+	// SNI to FetchCertificate; GrpcService.InitialMetadata is dropped.
+	// We use the apoxy fork's `authority` field instead, which the
+	// patched handshaker wires through grpc::ClientContext::set_authority
+	// per call. The controller-manager's gRPC interceptor parses
+	// :authority off incoming metadata and resolves the calling EG from
+	// it — no peer-IP introspection, works under NAT and with N EGs.
+	authority := egidentity.AuthorityFor(types.NamespacedName{
+		Namespace: key.namespace,
+		Name:      key.name,
+	})
 	handshakerCfg := &tlsv3.GrpcCertificateProviderConfig{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
@@ -291,6 +294,7 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 		CacheTtl:        durationpb.New(defaultHandshakerCacheTTL),
 		CacheMaxEntries: defaultHandshakerCacheMax,
 		FailOnError:     true,
+		Authority:       authority,
 	}
 	handshakerAny, err := anypb.New(handshakerCfg)
 	if err != nil {
@@ -314,7 +318,18 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 // filters before the router, and replaces any baked-in route_config with
 // a single virtual_host * route to the synthetic DFPClusterName cluster
 // (auto_host_rewrite so the upstream Host comes from :authority).
-func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
+//
+// The ext_proc filter is rebuilt per call because it carries a per-EG
+// :authority value that identifies the calling EG to the
+// controller-manager.
+func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
+	extProcFilter, err := buildExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
+		Namespace: key.namespace,
+		Name:      key.name,
+	}))
+	if err != nil {
+		return fmt.Errorf("build ext_proc filter: %w", err)
+	}
 	for _, f := range fc.GetFilters() {
 		if f.GetName() != hcmFilterName {
 			continue
@@ -338,7 +353,7 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 		// of these — drop nothing the operator configured (auth,
 		// ratelimit, etc.) but make sure ours land just before router
 		// so they always run.
-		ours := []*hcmv3.HttpFilter{s.extProcFilter, s.dfpHTTPFilter}
+		ours := []*hcmv3.HttpFilter{extProcFilter, s.dfpHTTPFilter}
 		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+len(ours))
 		inserted := false
 		for _, existing := range hcm.HttpFilters {
@@ -453,13 +468,33 @@ func buildDFPHTTPFilter() (*hcmv3.HttpFilter, error) {
 	}, nil
 }
 
-func buildExtProcFilter(targetURI string) (*hcmv3.HttpFilter, error) {
+// buildExtProcFilter constructs the per-listener ext_proc HTTP filter.
+// The synthetic authority is plumbed through grpc.default_authority so
+// every FetchCertificate / ext_proc gRPC call advertises the EG identity
+// on the HTTP/2 :authority pseudo-header. The controller-manager's
+// gRPC interceptor parses :authority and looks up the calling EG.
+//
+// Stock GoogleGrpc has no first-class authority field, but Envoy's
+// async client factory honors channel_args (see
+// source/common/grpc/google_async_client_impl.cc) — the
+// `grpc.default_authority` arg overrides the channel-default authority
+// derived from target_uri.
+func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) {
 	any, err := anypb.New(&extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
 					TargetUri:  targetURI,
 					StatPrefix: "clrk_ext_proc",
+					ChannelArgs: &corev3.GrpcService_GoogleGrpc_ChannelArgs{
+						Args: map[string]*corev3.GrpcService_GoogleGrpc_ChannelArgs_Value{
+							"grpc.default_authority": {
+								ValueSpecifier: &corev3.GrpcService_GoogleGrpc_ChannelArgs_Value_StringValue{
+									StringValue: authority,
+								},
+							},
+						},
+					},
 				},
 			},
 			Timeout: durationpb.New(defaultExtProcTimeout),

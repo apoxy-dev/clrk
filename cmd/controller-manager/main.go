@@ -22,12 +22,13 @@ import (
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egextension"
+	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	"github.com/apoxy-dev/clrk/pkg/apiserver"
 )
 
 const (
-	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:5f9235e0"
+	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:665aebbf"
 	defaultGRPCPort   = 9443
 )
 
@@ -175,7 +176,10 @@ func main() {
 		log.Error(err, "Unable to bind gRPC listener", "addr", *grpcAddr)
 		os.Exit(1)
 	}
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(
+		grpc.UnaryInterceptor(egidentity.UnaryServerInterceptor()),
+		grpc.StreamInterceptor(egidentity.StreamServerInterceptor()),
+	)
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
 	extprocSrv := extproc.New(cm.GetClient())
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extprocSrv)

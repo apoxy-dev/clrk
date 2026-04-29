@@ -4,12 +4,11 @@
 // fly for the SNI observed in the ClientHello, signed by a per-EgressGateway
 // CA Secret.
 //
-// Envoy's stock grpc_certificate_provider handshaker only forwards the SNI
-// to FetchCertificate — it does NOT propagate GrpcService.InitialMetadata,
-// so we can't pass the EgressGateway identity in metadata. Instead we use
-// the gRPC peer's source IP to look up the calling Envoy pod and read its
-// `gateway.envoyproxy.io/owning-gateway-*` labels — each EG has its own
-// Envoy pod set, so peer IP uniquely identifies the EG.
+// EgressGateway identity is carried over the HTTP/2 :authority pseudo-header
+// (the apoxy-private fork of grpc_certificate_provider plumbs the configured
+// `authority` field through grpc::ClientContext::set_authority per call).
+// The egidentity gRPC interceptor parses :authority off incoming metadata
+// and stashes the EG identity on ctx; we read it back here.
 package certprovider
 
 import (
@@ -35,7 +34,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
-	"github.com/apoxy-dev/clrk/internal/egpeer"
+	"github.com/apoxy-dev/clrk/internal/egidentity"
 )
 
 const (
@@ -98,9 +97,9 @@ func (s *Server) FetchCertificate(ctx context.Context, req *tlsv3.CertificateReq
 		return errorResponse("missing SNI"), nil
 	}
 
-	egKey, err := s.egFromPeer(ctx)
+	egKey, err := egidentity.MustFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "Resolving EgressGateway from gRPC peer")
+		logger.Error(err, "Resolving EgressGateway from gRPC :authority")
 		return errorResponse(err.Error()), nil
 	}
 
@@ -178,10 +177,6 @@ func (s *Server) loadCA(ctx context.Context, key types.NamespacedName, now time.
 	s.caCache[key] = entry
 	s.mu.Unlock()
 	return entry, nil
-}
-
-func (s *Server) egFromPeer(ctx context.Context) (types.NamespacedName, error) {
-	return egpeer.EGFromContext(ctx, s.client)
 }
 
 // mintLeaf signs a new leaf certificate for sni, valid for leafValidity.
