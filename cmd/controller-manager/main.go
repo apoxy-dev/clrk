@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-internal/cloud/envoy:91ceed8d"
+	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:5f9235e0"
 	defaultGRPCPort   = 9443
 )
 

@@ -405,10 +405,6 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			// instead of the in-cluster Service DNS name. The k3s
 			// container is reachable from workers by docker DNS.
 			"--dev-egress-backend-host=" + drivers.K3sContainerName,
-			// Dev wrapper image. EG hardcodes command:["envoy"] but the
-			// private build's entrypoint is /envoy-static; the wrapper
-			// only adds /usr/local/bin/envoy. Built + loaded manually.
-			"--envoy-image=docker.io/clrk/envoy:dev",
 		),
 	}
 	if o.watch {
