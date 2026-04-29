@@ -149,6 +149,15 @@ type EgressGatewayStatus struct {
 	Conditions    []metav1.Condition     `json:"conditions,omitempty"`
 	Listeners     []EgressListenerStatus `json:"listeners,omitempty"`
 	ListenerCount int32                  `json:"listenerCount,omitempty"`
+
+	// EgressBackendAddress is the host:port workers dial to reach this
+	// EgressGateway's Envoy data-plane. Populated by the EgressGateway
+	// controller after the Envoy-Gateway-managed Service is provisioned.
+	// In-cluster this is the EG Service's cluster DNS name; in `clrk dev`
+	// it's a NodePort on the k3s container hostname (workers and k3s share
+	// a docker network but ClusterIPs aren't routable across them).
+	// +optional
+	EgressBackendAddress string `json:"egressBackendAddress,omitempty"`
 }
 
 // EgressGateway defines a transparent egress proxy that intercepts outbound

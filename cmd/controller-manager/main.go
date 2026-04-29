@@ -46,6 +46,7 @@ func main() {
 		envoyImage        = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
 		grpcAddr          = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
 		grpcAdvertiseURI  = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
+		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.EgressBackendAddress is published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -152,9 +153,10 @@ func main() {
 	}
 	if *egController {
 		if err := (&controller.EgressGatewayReconciler{
-			Client:     cm.GetClient(),
-			Scheme:     cm.GetScheme(),
-			EnvoyImage: *envoyImage,
+			Client:         cm.GetClient(),
+			Scheme:         cm.GetScheme(),
+			EnvoyImage:     *envoyImage,
+			DevBackendHost: *devEgressBackendHost,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGateway")
 			os.Exit(1)

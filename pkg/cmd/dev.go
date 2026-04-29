@@ -387,6 +387,12 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			// dial the controller-manager via in-cluster coredns →
 			// manually-managed Endpoints → docker-network IP.
 			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
+			// Workers in clrk dev run on the docker network and can't
+			// route to k3s ClusterIPs, so the EgressGateway controller
+			// publishes EgressBackendAddress as <k3s-container>:<NodePort>
+			// instead of the in-cluster Service DNS name. The k3s
+			// container is reachable from workers by docker DNS.
+			"--dev-egress-backend-host=" + drivers.K3sContainerName,
 			// Dev wrapper image. EG hardcodes command:["envoy"] but the
 			// private build's entrypoint is /envoy-static; the wrapper
 			// only adds /usr/local/bin/envoy. Built + loaded manually.

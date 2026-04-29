@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -48,6 +49,13 @@ type EgressGatewayReconciler struct {
 	// fleet. Must contain the grpc_certificate_provider handshaker
 	// extension. Set from --envoy-image on controller-manager.
 	EnvoyImage string
+
+	// DevBackendHost, when non-empty, overrides Status.EgressBackendAddress
+	// to use this host with the EG Service NodePort instead of the
+	// in-cluster DNS name. Set by `clrk dev` to the docker hostname of the
+	// k3s container ("clrk-k3s") because workers run on the docker network
+	// and can't route to k3s ClusterIPs.
+	DevBackendHost string
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch;update;patch
@@ -96,7 +104,18 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("ensuring Gateway: %w", err)
 	}
 
+	// EG-managed Service is created asynchronously by Envoy Gateway after it
+	// observes our Gateway. Re-queue when it isn't there yet so workers see
+	// EgressBackendAddress as soon as the data plane is provisioned.
+	requeue, err := r.updateBackendAddress(ctx, &eg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating backend address: %w", err)
+	}
+
 	logger.Info("Reconciled EgressGateway", "eg", req.NamespacedName)
+	if requeue {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -293,3 +312,67 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 }
 
 func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egName }
+
+const envoyGatewayNamespace = "envoy-gateway-system"
+
+// updateBackendAddress publishes the host:port workers should dial to
+// reach this EgressGateway's data plane. Returns requeue=true when the
+// EG-managed Service hasn't materialized yet so the next reconcile picks
+// it up without waiting for an unrelated event.
+func (r *EgressGatewayReconciler) updateBackendAddress(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (bool, error) {
+	gwName := GatewayNamePrefix + eg.Name
+
+	var svcs corev1.ServiceList
+	if err := r.List(ctx, &svcs,
+		client.InNamespace(envoyGatewayNamespace),
+		client.MatchingLabels{
+			"gateway.envoyproxy.io/owning-gateway-name":      gwName,
+			"gateway.envoyproxy.io/owning-gateway-namespace": eg.Namespace,
+		},
+	); err != nil {
+		return false, fmt.Errorf("listing EG-managed services: %w", err)
+	}
+	if len(svcs.Items) == 0 {
+		return true, nil
+	}
+	svc := &svcs.Items[0]
+
+	addr := r.computeBackendAddress(svc)
+	if addr == "" {
+		return true, nil
+	}
+	if eg.Status.EgressBackendAddress == addr {
+		return false, nil
+	}
+	eg.Status.EgressBackendAddress = addr
+	if err := r.Status().Update(ctx, eg); err != nil {
+		return false, fmt.Errorf("updating status: %w", err)
+	}
+	return false, nil
+}
+
+// computeBackendAddress picks the right form depending on whether we're
+// running under `clrk dev` (workers on docker network — must use NodePort
+// on the dev host) or in-cluster (use the Service's cluster DNS name).
+func (r *EgressGatewayReconciler) computeBackendAddress(svc *corev1.Service) string {
+	port := r.findEgressPort(svc)
+	if port == nil {
+		return ""
+	}
+	if r.DevBackendHost != "" {
+		if port.NodePort == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%s:%d", r.DevBackendHost, port.NodePort)
+	}
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, port.Port)
+}
+
+func (r *EgressGatewayReconciler) findEgressPort(svc *corev1.Service) *corev1.ServicePort {
+	for i := range svc.Spec.Ports {
+		if svc.Spec.Ports[i].Port == EgressListenerPort {
+			return &svc.Spec.Ports[i]
+		}
+	}
+	return nil
+}

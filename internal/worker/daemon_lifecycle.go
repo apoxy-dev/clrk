@@ -201,7 +201,16 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			}
 			continue
 		}
-		if backend := egressBackend(da); backend != "" {
+		backend, backendErr := m.resolveEgressBackend(ctx, da)
+		if backendErr != nil {
+			log.Error(backendErr, "Resolving egress backend failed; will retry")
+			_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
+			if !m.sleepBackoff(ctx, &backoffExp) {
+				return
+			}
+			continue
+		}
+		if backend != "" {
 			if err := m.sandboxMgr.SetEgressBackend(sandboxID, backend); err != nil {
 				log.Error(err, "Set egress backend failed")
 			}
@@ -395,23 +404,26 @@ func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alph
 	}
 }
 
-// egressBackend returns the DNS address workers dial for the DaemonAgent's
-// first EgressGateway ref. The EgressGateway controller creates a Gateway
-// (and thus a Service) per EG using the GatewayNamePrefix convention; we
-// resolve it by DNS. Empty return means "no MITM, direct dial".
-func egressBackend(da *clrkv1alpha1.DaemonAgent) string {
+// resolveEgressBackend returns the host:port workers dial for the
+// DaemonAgent's first EgressGateway ref, sourced from
+// EgressGateway.Status.EgressBackendAddress (published by the
+// EgressGateway controller once the Envoy-Gateway-managed Service is
+// provisioned). Empty return + nil error means "no MITM, direct dial".
+// A non-nil error means we should back off and retry — typically the
+// EgressGateway exists but its data plane isn't up yet.
+func (m *daemonLifecycleManager) resolveEgressBackend(ctx context.Context, da *clrkv1alpha1.DaemonAgent) (string, error) {
 	if len(da.Spec.EgressRefs) == 0 {
-		return ""
+		return "", nil
 	}
 	egName := da.Spec.EgressRefs[0].GatewayRef
-	// Envoy Gateway names its Service "envoy-<gateway-namespace>-
-	// <gateway-name>-<hash>"; the hash is non-deterministic so we rely on
-	// a clrk-side headless Service created by the EgressGateway
-	// controller under the same name as the Gateway. Follow-up: replace
-	// with a lookup off EgressGateway.Status.BackendAddress when the
-	// controller populates it.
-	return fmt.Sprintf("clrk-eg-%s.%s.svc.cluster.local:%d",
-		egName, da.Namespace, clrkcontroller.EgressListenerPort)
+	var eg clrkv1alpha1.EgressGateway
+	if err := m.client.Get(ctx, types.NamespacedName{Namespace: da.Namespace, Name: egName}, &eg); err != nil {
+		return "", fmt.Errorf("get EgressGateway %s/%s: %w", da.Namespace, egName, err)
+	}
+	if eg.Status.EgressBackendAddress == "" {
+		return "", fmt.Errorf("EgressGateway %s/%s has no EgressBackendAddress yet", da.Namespace, egName)
+	}
+	return eg.Status.EgressBackendAddress, nil
 }
 
 // loadEgressCA fetches the MITM CA cert PEM for the DaemonAgent's first

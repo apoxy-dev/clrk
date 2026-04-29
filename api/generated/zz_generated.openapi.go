@@ -2012,6 +2012,13 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewayStatus(ref common.ReferenceCallb
 							Format: "int32",
 						},
 					},
+					"egressBackendAddress": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EgressBackendAddress is the host:port workers dial to reach this EgressGateway's Envoy data-plane. Populated by the EgressGateway controller after the Envoy-Gateway-managed Service is provisioned. In-cluster this is the EG Service's cluster DNS name; in `clrk dev` it's a NodePort on the k3s container hostname (workers and k3s share a docker network but ClusterIPs aren't routable across them).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
