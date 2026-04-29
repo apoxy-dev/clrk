@@ -1,13 +1,14 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
@@ -23,7 +24,12 @@ func init() {
 }
 
 func main() {
-	ctrl.SetLogger(zap.New())
+	// Single logging pipeline: stdlib slog (text) is the default for our
+	// own slog.Info/Error sites; controller-runtime's logr is bridged into
+	// the same handler so reconciler logs share format with everything
+	// else this binary emits.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	log := ctrl.Log.WithName("worker")
 
 	restCfg, err := config.FromEnv()

@@ -11,10 +11,10 @@ import (
 	envoytlsv3 "github.com/apoxy-dev/envoy-go/envoy/service/tls/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	egextpb "github.com/envoyproxy/gateway/proto/extension"
+	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
@@ -56,7 +56,12 @@ func main() {
 	kubeconfig := os.Getenv("KUBECONFIG")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	// Single logging pipeline: stdlib slog (text) is the default for our
+	// own slog.Info/Error sites; controller-runtime's logr is bridged into
+	// the same handler so reconciler logs share format with everything
+	// else this binary emits.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	log := ctrl.Log.WithName("controller-manager")
 
 	mgr := apiserver.New()
