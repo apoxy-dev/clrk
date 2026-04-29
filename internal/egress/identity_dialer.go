@@ -45,12 +45,17 @@ var _ netstack.Dialer = (*IdentityDialer)(nil)
 // an attributable record per outbound connection.
 func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	origAddr := addr
-	if rewritten, ok := d.rewriteDNS(addr); ok {
+	rewritten, dnsRewrite := d.rewriteDNS(addr)
+	if dnsRewrite {
 		addr = rewritten
 	}
-	d.logDial(network, origAddr, addr)
+	d.logDial(network, origAddr, addr, dnsRewrite)
 
-	if d.Backend == "" {
+	// DNS dials must bypass the egress-gateway path — the EG listener is
+	// HTTPS-only and would silently drop UDP/53 packets wrapped in PROXY
+	// v2. The destination has already been rewritten to the worker's real
+	// resolver; just hand off to the base dialer.
+	if d.Backend == "" || dnsRewrite {
 		return d.Base.DialContext(ctx, network, addr)
 	}
 
@@ -85,9 +90,9 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 //
 // origDst is what the sandbox addressed; effDst is what we actually
 // dial out (differs only when DNS rewrite kicks in).
-func (d *IdentityDialer) logDial(network, origDst, effDst string) {
+func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite bool) {
 	mode := "direct"
-	if d.Backend != "" {
+	if d.Backend != "" && !dnsRewrite {
 		mode = "egress-gateway"
 	}
 	slog.Info("egress dial",
