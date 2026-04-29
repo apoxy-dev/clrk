@@ -104,12 +104,14 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("ensuring Gateway: %w", err)
 	}
 
-	// EG-managed Service is created asynchronously by Envoy Gateway after it
-	// observes our Gateway. Re-queue when it isn't there yet so workers see
-	// EgressBackendAddress as soon as the data plane is provisioned.
-	requeue, err := r.updateBackendAddress(ctx, &eg)
+	// EG-managed Gateway and Service are reconciled asynchronously by
+	// Envoy Gateway. Mirror the Gateway's Programmed condition onto our
+	// Status.Ready and re-queue until both Ready=True and
+	// EgressBackendAddress is populated so workers see the data plane as
+	// soon as it provisions.
+	requeue, err := r.updateStatus(ctx, &eg)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating backend address: %w", err)
+		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
 	logger.Info("Reconciled EgressGateway", "eg", req.NamespacedName)
@@ -315,13 +317,63 @@ func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egNam
 
 const envoyGatewayNamespace = "envoy-gateway-system"
 
-// updateBackendAddress publishes the host:port workers should dial to
-// reach this EgressGateway's data plane. Returns requeue=true when the
-// EG-managed Service hasn't materialized yet so the next reconcile picks
-// it up without waiting for an unrelated event.
-func (r *EgressGatewayReconciler) updateBackendAddress(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (bool, error) {
+// updateStatus refreshes Status.Conditions[Ready] from the EG-managed
+// Gateway's Programmed condition and Status.EgressBackendAddress from the
+// EG-managed Service. Returns requeue=true while the data plane is still
+// provisioning (Gateway not Programmed or Service absent) so the next
+// reconcile picks it up without waiting for an unrelated event.
+func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (bool, error) {
 	gwName := GatewayNamePrefix + eg.Name
 
+	ready := metav1.Condition{
+		Type:               clrkv1alpha1.EgressGatewayConditionReady,
+		ObservedGeneration: eg.Generation,
+	}
+
+	var gw gwapiv1.Gateway
+	gwErr := r.Get(ctx, types.NamespacedName{Name: gwName, Namespace: eg.Namespace}, &gw)
+	switch {
+	case gwErr == nil && gatewayProgrammed(&gw):
+		ready.Status = metav1.ConditionTrue
+		ready.Reason = "GatewayProgrammed"
+		ready.Message = "Envoy Gateway reports Programmed=True"
+	case gwErr == nil:
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "GatewayNotProgrammed"
+		ready.Message = "Envoy Gateway has not yet reported Programmed=True"
+	case apierrors.IsNotFound(gwErr):
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "GatewayMissing"
+		ready.Message = "Underlying Gateway resource not yet observed"
+	default:
+		return false, fmt.Errorf("getting Gateway: %w", gwErr)
+	}
+
+	addr, addrPending, err := r.resolveBackendAddress(ctx, eg, gwName)
+	if err != nil {
+		return false, err
+	}
+
+	dirty := false
+	if eg.Status.EgressBackendAddress != addr {
+		eg.Status.EgressBackendAddress = addr
+		dirty = true
+	}
+	if meta.SetStatusCondition(&eg.Status.Conditions, ready) {
+		dirty = true
+	}
+	if dirty {
+		if err := r.Status().Update(ctx, eg); err != nil {
+			return false, fmt.Errorf("updating status: %w", err)
+		}
+	}
+	return addrPending || ready.Status != metav1.ConditionTrue, nil
+}
+
+// resolveBackendAddress returns the dialable address for the EG-managed
+// Service, with pending=true if the Service hasn't materialized or
+// hasn't yet been assigned a NodePort.
+func (r *EgressGatewayReconciler) resolveBackendAddress(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) (string, bool, error) {
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs,
 		client.InNamespace(envoyGatewayNamespace),
@@ -330,26 +382,18 @@ func (r *EgressGatewayReconciler) updateBackendAddress(ctx context.Context, eg *
 			"gateway.envoyproxy.io/owning-gateway-namespace": eg.Namespace,
 		},
 	); err != nil {
-		return false, fmt.Errorf("listing EG-managed services: %w", err)
+		return "", false, fmt.Errorf("listing EG-managed services: %w", err)
 	}
 	if len(svcs.Items) == 0 {
-		return true, nil
+		return eg.Status.EgressBackendAddress, true, nil
 	}
-	svc := &svcs.Items[0]
-
-	addr := r.computeBackendAddress(svc)
+	addr := r.computeBackendAddress(&svcs.Items[0])
 	if addr == "" {
-		return true, nil
+		return eg.Status.EgressBackendAddress, true, nil
 	}
-	if eg.Status.EgressBackendAddress == addr {
-		return false, nil
-	}
-	eg.Status.EgressBackendAddress = addr
-	if err := r.Status().Update(ctx, eg); err != nil {
-		return false, fmt.Errorf("updating status: %w", err)
-	}
-	return false, nil
+	return addr, false, nil
 }
+
 
 // computeBackendAddress picks the right form depending on whether we're
 // running under `clrk dev` (workers on docker network — must use NodePort

@@ -9,9 +9,7 @@ spec:
       protocol: TLS
       tls:
         mode: Terminate
-  extProc:
-    enabled: true
-    captureBody:
-      maxBytes: 65536
   otlp:
     endpoint: http://otel-collector.observability.svc:4318
+    captureBody:
+      maxBytes: 65536

@@ -76,7 +76,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerStatus":                schema_clrk_api_clrk_v1alpha1_EgressListenerStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerTLS":                   schema_clrk_api_clrk_v1alpha1_EgressListenerTLS(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources":                  schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref),
-		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExtProcSpec":                         schema_clrk_api_clrk_v1alpha1_ExtProcSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.HeaderExtractor":                     schema_clrk_api_clrk_v1alpha1_HeaderExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.IdentityExtractor":                   schema_clrk_api_clrk_v1alpha1_IdentityExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ImageCacheConfig":                    schema_clrk_api_clrk_v1alpha1_ImageCacheConfig(ref),
@@ -1952,15 +1951,9 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 							},
 						},
 					},
-					"extProc": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ExtProc configures the L7 HTTP body-capture plugin wired into the Envoy HCM filter chain. Disabled by default — the MITM path still works without body capture, traffic just doesn't get logged.",
-							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExtProcSpec"),
-						},
-					},
 					"otlp": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OTLP is the OTLP/HTTP logs sink for captured request/response pairs. Required when ExtProc.Enabled is true.",
+							Description: "OTLP configures L7 capture and the OTLP/HTTP logs sink for captured request/response pairs. L7 capture is always on for HTTP and MITM-terminated TLS listeners; OTLP defines where the records go and how much body is captured. When unset, records are emitted to the controller-manager's structured log instead.",
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"),
 						},
 					},
@@ -1969,7 +1962,7 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExtProcSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"},
 	}
 }
 
@@ -2405,34 +2398,6 @@ func schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref common.ReferenceCallba
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
-	}
-}
-
-func schema_clrk_api_clrk_v1alpha1_ExtProcSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "ExtProcSpec configures the ext_proc body-capture plugin.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"enabled": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Enabled toggles ext_proc for this gateway.",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
-					"captureBody": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CaptureBody bounds how much of the request/response body is captured and emitted to the OTLP sink.",
-							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec"},
 	}
 }
 
@@ -3163,7 +3128,7 @@ func schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "OTLPLogsSinkSpec configures the OTLP/HTTP endpoint receiving captured request/response records from ext_proc.",
+				Description: "OTLPLogsSinkSpec configures the OTLP/HTTP endpoint receiving captured request/response records from ext_proc, plus the bounds on what gets captured.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"endpoint": {
@@ -3190,10 +3155,18 @@ func schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref common.ReferenceCallback
 							},
 						},
 					},
+					"captureBody": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CaptureBody bounds the request/response body bytes captured and emitted as OTLP log records. Defaults: 64KiB per direction; capture application/json, application/x-ndjson, text/event-stream.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec"),
+						},
+					},
 				},
 				Required: []string{"endpoint"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec"},
 	}
 }
 

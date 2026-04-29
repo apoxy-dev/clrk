@@ -12,15 +12,13 @@ spec:
         # the per-EG CA (already in the sandbox's trust store), capture
         # the plaintext via ext_proc, then re-encrypt to the upstream.
         mode: Terminate
-  extProc:
-    enabled: true
-    captureBody:
-      # Bound for OpenAI-flavored payloads; the response from /v1/models
-      # is small but a full chat completion can be much bigger. Tune up
-      # if you exercise streaming completions.
-      maxBytes: 65536
   otlp:
     # Optional: point at any OTLP/HTTP logs endpoint. When unset (or
     # unreachable) ext_proc falls back to the controller-manager's
     # slog handler so captures still land in `clrk dev logs`.
     endpoint: http://otel-collector.default.svc:4318
+    captureBody:
+      # Bound for OpenAI-flavored payloads; the response from /v1/models
+      # is small but a full chat completion can be much bigger. Tune up
+      # if you exercise streaming completions.
+      maxBytes: 65536

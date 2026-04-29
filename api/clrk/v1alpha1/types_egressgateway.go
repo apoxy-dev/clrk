@@ -15,14 +15,15 @@ const (
 )
 
 // EgressListenerProtocol selects the interception layer.
-// +kubebuilder:validation:Enum=TCP;TLS;HTTP;UDP
+// +kubebuilder:validation:Enum=TCP;TLS;HTTP;HTTPS;UDP
 type EgressListenerProtocol string
 
 const (
-	EgressProtocolTCP  EgressListenerProtocol = "TCP"
-	EgressProtocolTLS  EgressListenerProtocol = "TLS"
-	EgressProtocolHTTP EgressListenerProtocol = "HTTP"
-	EgressProtocolUDP  EgressListenerProtocol = "UDP"
+	EgressProtocolTCP   EgressListenerProtocol = "TCP"
+	EgressProtocolTLS   EgressListenerProtocol = "TLS"
+	EgressProtocolHTTP  EgressListenerProtocol = "HTTP"
+	EgressProtocolHTTPS EgressListenerProtocol = "HTTPS"
+	EgressProtocolUDP   EgressListenerProtocol = "UDP"
 )
 
 // EgressTLSMode controls TLS handling on a listener.
@@ -86,28 +87,13 @@ type EgressGatewaySpec struct {
 	// +kubebuilder:validation:MinItems=1
 	Listeners []EgressListener `json:"listeners"`
 
-	// ExtProc configures the L7 HTTP body-capture plugin wired into the
-	// Envoy HCM filter chain. Disabled by default — the MITM path still
-	// works without body capture, traffic just doesn't get logged.
-	// +optional
-	ExtProc *ExtProcSpec `json:"extProc,omitempty"`
-
-	// OTLP is the OTLP/HTTP logs sink for captured request/response pairs.
-	// Required when ExtProc.Enabled is true.
+	// OTLP configures L7 capture and the OTLP/HTTP logs sink for
+	// captured request/response pairs. L7 capture is always on for HTTP
+	// and MITM-terminated TLS listeners; OTLP defines where the records
+	// go and how much body is captured. When unset, records are emitted
+	// to the controller-manager's structured log instead.
 	// +optional
 	OTLP *OTLPLogsSinkSpec `json:"otlp,omitempty"`
-}
-
-// ExtProcSpec configures the ext_proc body-capture plugin.
-type ExtProcSpec struct {
-	// Enabled toggles ext_proc for this gateway.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// CaptureBody bounds how much of the request/response body is captured
-	// and emitted to the OTLP sink.
-	// +optional
-	CaptureBody *BodyCaptureSpec `json:"captureBody,omitempty"`
 }
 
 // BodyCaptureSpec governs request/response body capture bounds.
@@ -126,7 +112,8 @@ type BodyCaptureSpec struct {
 }
 
 // OTLPLogsSinkSpec configures the OTLP/HTTP endpoint receiving captured
-// request/response records from ext_proc.
+// request/response records from ext_proc, plus the bounds on what gets
+// captured.
 type OTLPLogsSinkSpec struct {
 	// Endpoint is the OTLP/HTTP base URL (e.g. "https://otel.example.com").
 	Endpoint string `json:"endpoint"`
@@ -135,7 +122,18 @@ type OTLPLogsSinkSpec struct {
 	// authentication tokens.
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// CaptureBody bounds the request/response body bytes captured and
+	// emitted as OTLP log records. Defaults: 64KiB per direction;
+	// capture application/json, application/x-ndjson, text/event-stream.
+	// +optional
+	CaptureBody *BodyCaptureSpec `json:"captureBody,omitempty"`
 }
+
+// EgressGatewayConditionReady is set on EgressGateway.Status.Conditions
+// to mirror the EG-managed Gateway's Programmed condition. Workers should
+// only dial Status.EgressBackendAddress once Ready=True.
+const EgressGatewayConditionReady = "Ready"
 
 // EgressListenerStatus describes the status of a single listener.
 type EgressListenerStatus struct {

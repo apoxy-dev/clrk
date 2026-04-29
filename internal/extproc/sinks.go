@@ -20,9 +20,8 @@ import (
 const sinkShutdownTimeout = 5 * time.Second
 
 // defaultIncludedContentTypes is the body-capture content-type allow-list
-// applied when an EgressGateway's ExtProc.CaptureBody.IncludeContentTypes
-// is empty. Matched by case-insensitive prefix on the request/response
-// content-type header.
+// applied when OTLP.CaptureBody.IncludeContentTypes is empty. Matched by
+// case-insensitive prefix on the request/response content-type header.
 var defaultIncludedContentTypes = []string{
 	"application/json",
 	"application/x-ndjson",
@@ -130,8 +129,8 @@ func (r *sinkRegistry) shutdownAll(ctx context.Context) {
 func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, error) {
 	maxBytes := captureMaxBytesDefault
 	var included []string
-	if eg.Spec.ExtProc != nil && eg.Spec.ExtProc.CaptureBody != nil {
-		cb := eg.Spec.ExtProc.CaptureBody
+	if eg.Spec.OTLP != nil && eg.Spec.OTLP.CaptureBody != nil {
+		cb := eg.Spec.OTLP.CaptureBody
 		if cb.MaxBytes != nil && *cb.MaxBytes > 0 {
 			maxBytes = int(*cb.MaxBytes)
 		}
