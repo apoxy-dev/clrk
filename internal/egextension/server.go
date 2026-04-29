@@ -127,6 +127,7 @@ type Server struct {
 	// once at construction time avoids a marshal per translation.
 	dfpHTTPFilter *hcmv3.HttpFilter
 	extProcFilter *hcmv3.HttpFilter
+	dfpCluster    *clusterv3.Cluster
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
@@ -141,11 +142,16 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	cluster, err := buildDFPCluster()
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
 		dfpHTTPFilter:         dfp,
 		extProcFilter:         ep,
+		dfpCluster:            cluster,
 	}, nil
 }
 
@@ -202,18 +208,15 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 // filter and the cluster share a single DNS cache configuration so SNI
 // → upstream resolution is consistent.
 func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
-	clusters := req.GetClusters()
-	for _, c := range clusters {
-		if c.GetName() == DFPClusterName {
-			return &pb.PostTranslateModifyResponse{Clusters: clusters, Secrets: req.GetSecrets()}, nil
+	in := req.GetClusters()
+	out := append(make([]*clusterv3.Cluster, 0, len(in)+1), s.dfpCluster)
+	for _, c := range in {
+		if c.GetName() != DFPClusterName {
+			out = append(out, c)
 		}
 	}
-	dfp, err := buildDFPCluster()
-	if err != nil {
-		return nil, err
-	}
 	return &pb.PostTranslateModifyResponse{
-		Clusters: append(clusters, dfp),
+		Clusters: out,
 		Secrets:  req.GetSecrets(),
 	}, nil
 }
@@ -325,22 +328,28 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain) error {
 			return fmt.Errorf("unmarshal HCM: %w", err)
 		}
 
-		// Filter order: DFP (rewrites cluster), ext_proc (captures
-		// req+resp), router (terminal). Anything EG put before router
-		// is preserved upstream of these — drop nothing the operator
-		// configured (auth, ratelimit, etc.) but make sure ours land
-		// just before router so they always run.
-		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+2)
+		// Filter order: ext_proc (captures req+resp, also rewrites
+		// :authority to add :443 when the request omitted the implicit
+		// HTTPS port), DFP (parses host:port off the rewritten
+		// authority for upstream selection), router (terminal). The
+		// ext_proc → DFP order is what lets us fold the port fixup
+		// into our own gRPC handler instead of needing a separate Lua
+		// filter. Anything EG put before router is preserved upstream
+		// of these — drop nothing the operator configured (auth,
+		// ratelimit, etc.) but make sure ours land just before router
+		// so they always run.
+		ours := []*hcmv3.HttpFilter{s.extProcFilter, s.dfpHTTPFilter}
+		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+len(ours))
 		inserted := false
 		for _, existing := range hcm.HttpFilters {
 			if existing.GetName() == routerFilterName && !inserted {
-				newFilters = append(newFilters, s.dfpHTTPFilter, s.extProcFilter)
+				newFilters = append(newFilters, ours...)
 				inserted = true
 			}
 			newFilters = append(newFilters, existing)
 		}
 		if !inserted {
-			newFilters = append(newFilters, s.dfpHTTPFilter, s.extProcFilter)
+			newFilters = append(newFilters, ours...)
 		}
 		hcm.HttpFilters = newFilters
 
@@ -480,9 +489,14 @@ func buildExtProcFilter(targetURI string) (*hcmv3.HttpFilter, error) {
 
 // buildDFPCluster constructs the synthetic DFP cluster the HCM route_config
 // targets. Uses the same DNS cache as the HTTP filter so resolution is
-// shared.
+// shared. Always speaks TLS upstream — the EG terminates the sandbox's
+// TLS at our MITM listener, so without re-encrypting we'd send plaintext
+// to public origins (e.g. Cloudflare-fronted api.openai.com), which they
+// reject with 403. SNI is taken from the per-request Host header, and
+// upstream certs are verified against the envoy image's system trust
+// bundle.
 func buildDFPCluster() (*clusterv3.Cluster, error) {
-	any, err := anypb.New(&dfpclusterv3.ClusterConfig{
+	dfpAny, err := anypb.New(&dfpclusterv3.ClusterConfig{
 		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
 			DnsCacheConfig: dnsCacheConfig,
 		},
@@ -490,6 +504,32 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal dfp cluster: %w", err)
 	}
+
+	tlsCtx := &tlsv3.UpstreamTlsContext{
+		// Derive SNI from the upstream host. Envoy strips the port from
+		// :authority before using it as the SNI value, so the ext_proc
+		// :authority→host:443 rewrite doesn't leak ":443" into the TLS
+		// ClientHello.
+		AutoHostSni: true,
+		CommonTlsContext: &tlsv3.CommonTlsContext{
+			ValidationContextType: &tlsv3.CommonTlsContext_ValidationContext{
+				ValidationContext: &tlsv3.CertificateValidationContext{
+					TrustedCa: &corev3.DataSource{
+						Specifier: &corev3.DataSource_Filename{
+							// System trust bundle present in the
+							// envoyproxy/envoy image (alpine-based).
+							Filename: "/etc/ssl/certs/ca-certificates.crt",
+						},
+					},
+				},
+			},
+		},
+	}
+	tlsAny, err := anypb.New(tlsCtx)
+	if err != nil {
+		return nil, fmt.Errorf("marshal upstream TLS context: %w", err)
+	}
+
 	return &clusterv3.Cluster{
 		Name:           DFPClusterName,
 		ConnectTimeout: durationpb.New(5 * time.Second),
@@ -497,8 +537,12 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 		ClusterDiscoveryType: &clusterv3.Cluster_ClusterType{
 			ClusterType: &clusterv3.Cluster_CustomClusterType{
 				Name:        "envoy.clusters.dynamic_forward_proxy",
-				TypedConfig: any,
+				TypedConfig: dfpAny,
 			},
+		},
+		TransportSocket: &corev3.TransportSocket{
+			Name:       tlsTransportSocketName,
+			ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
 		},
 	}, nil
 }

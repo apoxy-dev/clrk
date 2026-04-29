@@ -14,9 +14,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -134,6 +136,16 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		case *extprocv3.ProcessingRequest_RequestHeaders:
 			rec.RequestHeaders = headersToMap(m.RequestHeaders)
 			resp = headersContinue(true)
+			// Force port 443 onto :authority when none was supplied. The
+			// dynamic_forward_proxy filter parses host:port off the
+			// authority and defaults to :80, so HTTPS requests from the
+			// sandbox (which omit the implicit :443) get plaintext-
+			// dialed to 80 and rejected by hosts behind Cloudflare.
+			// Done here, before the dfp HTTP filter, so dfp parses the
+			// rewritten value. Filter order is ext_proc → dfp → router.
+			if mut := authorityPortMutation(rec.RequestHeaders[":authority"]); mut != nil {
+				resp.GetRequestHeaders().GetResponse().HeaderMutation = mut
+			}
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
 			rec.ResponseHeaders = headersToMap(m.ResponseHeaders)
 			resp = headersContinue(false)
@@ -217,6 +229,26 @@ func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {
 	}
 	if v := fields[MetaInvocationID]; v != nil {
 		rec.InvocationID = v.GetStringValue()
+	}
+}
+
+// authorityPortRE matches a trailing :NN port suffix on a host. We don't
+// need to handle bracketed IPv6 — agents resolve target hostnames, not
+// literals — but the regex is anchored so a colon in a userinfo segment
+// (which is also forbidden in :authority) doesn't false-match.
+var authorityPortRE = regexp.MustCompile(`:[0-9]+$`)
+
+// authorityPortMutation returns a HeaderMutation that rewrites
+// :authority to host:443 when no port is set; nil otherwise. See the
+// caller for context on why this is necessary.
+func authorityPortMutation(authority string) *extprocv3.HeaderMutation {
+	if authority == "" || authorityPortRE.MatchString(authority) {
+		return nil
+	}
+	return &extprocv3.HeaderMutation{
+		SetHeaders: []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{Key: ":authority", Value: authority + ":443"},
+		}},
 	}
 }
 
