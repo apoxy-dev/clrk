@@ -4,9 +4,12 @@
 // fly for the SNI observed in the ClientHello, signed by a per-EgressGateway
 // CA Secret.
 //
-// Envoy identifies the target EgressGateway via initial gRPC metadata set on
-// the handshaker config at xDS-translation time (see internal/egextension).
-// See package constants for the metadata keys the EG extension must attach.
+// Envoy's stock grpc_certificate_provider handshaker only forwards the SNI
+// to FetchCertificate — it does NOT propagate GrpcService.InitialMetadata,
+// so we can't pass the EgressGateway identity in metadata. Instead we use
+// the gRPC peer's source IP to look up the calling Envoy pod and read its
+// `gateway.envoyproxy.io/owning-gateway-*` labels — each EG has its own
+// Envoy pod set, so peer IP uniquely identifies the EG.
 package certprovider
 
 import (
@@ -20,6 +23,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,20 +33,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 )
 
-// gRPC metadata keys carried on every FetchCertificate request. The EG
-// extension server sets these via GrpcService.InitialMetadata so our
-// handler can scope the CA lookup to the right EgressGateway. Both values
-// are required.
+// Labels EG sets on the proxy Pods/Services it provisions for each
+// Gateway. We read these off the calling pod (resolved via peer IP) to
+// scope the CA lookup to the right EgressGateway.
 const (
-	MetaKeyEgressGatewayNamespace = "x-clrk-egressgateway-namespace"
-	MetaKeyEgressGatewayName      = "x-clrk-egressgateway-name"
+	labelOwningGatewayName      = "gateway.envoyproxy.io/owning-gateway-name"
+	labelOwningGatewayNamespace = "gateway.envoyproxy.io/owning-gateway-namespace"
 )
+
+// envoyGatewayPodNamespace is where Envoy Gateway provisions data-plane
+// pods. Standard install path; matches the constant used by the
+// EgressGateway controller.
+const envoyGatewayPodNamespace = "envoy-gateway-system"
 
 const (
 	// leafValidity is how long a minted leaf is advertised as valid. We
@@ -104,8 +113,9 @@ func (s *Server) FetchCertificate(ctx context.Context, req *tlsv3.CertificateReq
 		return errorResponse("missing SNI"), nil
 	}
 
-	egKey, err := egFromContext(ctx)
+	egKey, err := s.egFromPeer(ctx)
 	if err != nil {
+		logger.Error(err, "Resolving EgressGateway from gRPC peer")
 		return errorResponse(err.Error()), nil
 	}
 
@@ -185,27 +195,62 @@ func (s *Server) loadCA(ctx context.Context, key types.NamespacedName, now time.
 	return entry, nil
 }
 
-// egFromContext extracts the EgressGateway namespace+name from the gRPC
-// initial metadata attached by our EG extension.
-func egFromContext(ctx context.Context) (types.NamespacedName, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return types.NamespacedName{}, fmt.Errorf("missing gRPC metadata")
+// egFromPeer maps the gRPC peer's source IP back to the calling Envoy pod
+// and pulls the EgressGateway it belongs to off the Envoy-Gateway-managed
+// owning-gateway labels. The Gateway name is `clrk-eg-<eg-name>` per the
+// EgressGateway controller's GatewayNamePrefix convention; we strip the
+// prefix to recover the EgressGateway name.
+//
+// In `clrk dev` the peer IP is the Service NAT IP (workers/k3s and the
+// controller-manager are on a docker network in front of k3s) so the
+// pod-IP lookup misses. As a development-only fallback we then accept the
+// single EgressGateway in the cluster; multi-EG dev would need real peer
+// identity (e.g. encoding the EG into the gRPC target_uri authority).
+func (s *Server) egFromPeer(ctx context.Context) (types.NamespacedName, error) {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return types.NamespacedName{}, fmt.Errorf("no gRPC peer info on context")
 	}
-	ns := firstMD(md, MetaKeyEgressGatewayNamespace)
-	name := firstMD(md, MetaKeyEgressGatewayName)
-	if ns == "" || name == "" {
-		return types.NamespacedName{}, fmt.Errorf("missing %s / %s metadata",
-			MetaKeyEgressGatewayNamespace, MetaKeyEgressGatewayName)
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		return types.NamespacedName{}, fmt.Errorf("parse peer addr %q: %w", p.Addr.String(), err)
 	}
-	return types.NamespacedName{Namespace: ns, Name: name}, nil
-}
 
-func firstMD(md metadata.MD, key string) string {
-	if v := md.Get(key); len(v) > 0 {
-		return v[0]
+	var pods corev1.PodList
+	if err := s.client.List(ctx, &pods, client.InNamespace(envoyGatewayPodNamespace)); err != nil {
+		return types.NamespacedName{}, fmt.Errorf("list pods in %s: %w", envoyGatewayPodNamespace, err)
 	}
-	return ""
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Status.PodIP != host {
+			continue
+		}
+		gwName := pod.Labels[labelOwningGatewayName]
+		gwNs := pod.Labels[labelOwningGatewayNamespace]
+		if gwName == "" || gwNs == "" {
+			return types.NamespacedName{}, fmt.Errorf("pod %s/%s missing owning-gateway labels",
+				pod.Namespace, pod.Name)
+		}
+		egName := strings.TrimPrefix(gwName, clrkcontroller.GatewayNamePrefix)
+		if egName == gwName {
+			return types.NamespacedName{}, fmt.Errorf(
+				"gateway name %q does not start with clrk EG prefix %q",
+				gwName, clrkcontroller.GatewayNamePrefix)
+		}
+		return types.NamespacedName{Namespace: gwNs, Name: egName}, nil
+	}
+
+	// dev fallback: single-EG cluster.
+	var egs clrkv1alpha1.EgressGatewayList
+	if err := s.client.List(ctx, &egs); err != nil {
+		return types.NamespacedName{}, fmt.Errorf("list EgressGateways: %w", err)
+	}
+	if len(egs.Items) == 1 {
+		eg := egs.Items[0]
+		return types.NamespacedName{Namespace: eg.Namespace, Name: eg.Name}, nil
+	}
+	return types.NamespacedName{}, fmt.Errorf("no pod in %s matches peer IP %s and %d EgressGateways exist (need 1 for dev fallback)",
+		envoyGatewayPodNamespace, host, len(egs.Items))
 }
 
 // mintLeaf signs a new leaf certificate for sni, valid for leafValidity.

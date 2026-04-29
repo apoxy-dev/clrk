@@ -41,7 +41,6 @@ import (
 
 	tlsv3 "github.com/apoxy-dev/envoy-go/envoy/extensions/transport_sockets/tls/v3"
 
-	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 )
@@ -271,6 +270,11 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 		downstream.CommonTlsContext = &tlsv3.CommonTlsContext{}
 	}
 
+	// The stock grpc_certificate_provider handshaker forwards only the
+	// SNI to FetchCertificate; GrpcService.InitialMetadata is dropped, so
+	// we can't pass the EG identity that way. The certprovider server
+	// instead resolves it from the gRPC peer's source IP (each EG has its
+	// own Envoy pod set with owning-gateway labels).
 	handshakerCfg := &tlsv3.GrpcCertificateProviderConfig{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
@@ -278,10 +282,6 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 					TargetUri:  s.CertProviderTargetURI,
 					StatPrefix: "clrk_cert_provider",
 				},
-			},
-			InitialMetadata: []*corev3.HeaderValue{
-				{Key: certprovider.MetaKeyEgressGatewayNamespace, Value: key.namespace},
-				{Key: certprovider.MetaKeyEgressGatewayName, Value: key.name},
 			},
 		},
 		Timeout:         durationpb.New(defaultHandshakerTimeout),
