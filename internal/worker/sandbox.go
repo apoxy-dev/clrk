@@ -5,6 +5,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -63,6 +64,11 @@ type SandboxManager struct {
 	// so callers (Wait) can block on its exit. Kept off SandboxInstance to
 	// avoid leaking a linux-only type into the cross-platform types.go.
 	processes map[SandboxID]*libcontainer.Process
+	// stdLogs retains the line-splitting writers wrapping each running
+	// sandbox's stdout/stderr so Wait can flush their tail buffers when
+	// the init process exits. Same linux-only-leak rationale as
+	// `processes`.
+	stdLogs map[SandboxID][2]*sandboxLineWriter
 }
 
 // NewSandboxManager creates a new SandboxManager.
@@ -76,6 +82,7 @@ func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer 
 		sandboxes:       make(map[SandboxID]*SandboxInstance),
 		containers:      make(map[SandboxID]*libcontainer.Container),
 		processes:       make(map[SandboxID]*libcontainer.Process),
+		stdLogs:         make(map[SandboxID][2]*sandboxLineWriter),
 	}
 }
 
@@ -239,6 +246,19 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 		env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
 
+	// Wrap the sandbox's stdio in line-splitting slog writers so each
+	// line of agent output becomes a structured record attributed to the
+	// owning agent.
+	sbLogger := slog.With(
+		slog.String("sandbox.id", string(id)),
+		slog.String("agent.namespace", sb.Identity.Namespace),
+		slog.String("agent.name", sb.Identity.Name),
+		slog.String("agent.uid", sb.Identity.UID),
+		slog.String("agent.revision", sb.Identity.Revision),
+	)
+	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout")
+	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr")
+
 	p := &libcontainer.Process{
 		Args:            args,
 		Env:             env,
@@ -247,8 +267,8 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 		Cwd:             "/",
 		NoNewPrivileges: ptr.To(true),
 		Stdin:           nil,
-		Stdout:          os.Stdout,
-		Stderr:          os.Stderr,
+		Stdout:          stdoutLog,
+		Stderr:          stderrLog,
 		Init:            true,
 	}
 
@@ -280,6 +300,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	m.mu.Lock()
 	sb.Phase = SandboxRunning
 	m.processes[id] = p
+	m.stdLogs[id] = [2]*sandboxLineWriter{stdoutLog, stderrLog}
 	m.mu.Unlock()
 
 	log.Info("Sandbox started")
@@ -318,7 +339,19 @@ func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessSta
 		sb.Phase = SandboxStopped
 	}
 	delete(m.processes, id)
+	logs, hasLogs := m.stdLogs[id]
+	delete(m.stdLogs, id)
 	m.mu.Unlock()
+
+	// Emit any tail bytes the agent wrote without a trailing newline
+	// before exit so the last line of output isn't dropped.
+	if hasLogs {
+		for _, w := range logs {
+			if w != nil {
+				w.Flush()
+			}
+		}
+	}
 
 	return state, err
 }
