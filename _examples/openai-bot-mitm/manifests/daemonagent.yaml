@@ -1,0 +1,32 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: openai-bot-mitm
+spec:
+  workerPoolRef: default
+  restartPolicy: Always
+  egressRefs:
+    # Routes every outbound dial through the EG-managed Envoy. The
+    # worker's IdentityDialer re-points dials to the EG service +
+    # PROXY-v2-frames them with this agent's identity, so ext_proc
+    # captures arrive attributed to (kind=DaemonAgent, name=openai-bot-mitm).
+    - gatewayRef: openai-bot-mitm
+  template:
+    spec:
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Same bogus token as the L4-only openai-bot example; the
+          # point is the L7 capture, not the auth outcome. With MITM
+          # active, ext_proc records:
+          #   - method=GET, url=https://api.openai.com/v1/models
+          #   - request headers (incl. our bogus Authorization)
+          #   - response headers + body (OpenAI's 401 JSON)
+          # all attributed to this DaemonAgent's identity.
+          while true; do
+            curl -sS -o /dev/null -w 'http %{http_code} %{url_effective}\n' \
+              -H 'Authorization: Bearer sk-clrk-dev-bogus' \
+              https://api.openai.com/v1/models
+            sleep 5
+          done

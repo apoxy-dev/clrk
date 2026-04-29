@@ -1,0 +1,27 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: openai-bot-mitm
+spec:
+  defaultPolicy: allow-all
+  listeners:
+    - name: egress
+      protocol: TLS
+      tls:
+        # MITM: terminate the sandbox's TLS at Envoy, sign a leaf with
+        # the per-EG CA (already in the sandbox's trust store), capture
+        # the plaintext via ext_proc, then re-encrypt to the upstream.
+        mode: Terminate
+  extProc:
+    enabled: true
+    captureBody:
+      # Bound for OpenAI-flavored payloads; the response from /v1/models
+      # is small but a full chat completion can be much bigger. Tune up
+      # if you exercise streaming completions.
+      maxBytes: 65536
+  otlp:
+    # Placeholder collector — clrk dev doesn't ship one. The ext_proc
+    # server falls back to its slog sink, so captures still land in
+    # `clrk dev logs` even without the collector. Replace with your
+    # real OTLP/HTTP endpoint to get structured records elsewhere.
+    endpoint: http://otel-collector.observability.svc:4318
