@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -25,6 +26,28 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
+// Attribute keys clrk publishes that don't live in OTel semconv.
+// Anything semconv has a key for (http.*, server.*, url.*) is sourced
+// from the semconv package directly.
+const (
+	attrAgentKind      = "agent.kind"
+	attrAgentNamespace = "agent.namespace"
+	attrAgentName      = "agent.name"
+	attrAgentUID       = "agent.uid"
+	attrAgentRevision  = "agent.revision"
+	attrInvocationID   = "invocation.id"
+	attrReqBytes       = "clrk.req.bytes"
+	attrRespBytes      = "clrk.resp.bytes"
+	attrReqTruncated   = "clrk.req.truncated"
+	attrRespTruncated  = "clrk.resp.truncated"
+	attrDurationMs     = "clrk.duration_ms"
+	attrTraceID        = "trace_id"
+	attrSpanID         = "span_id"
+	attrBodyBytes      = "clrk.body.bytes"
+	attrBodyTruncated  = "clrk.body.truncated"
+	attrBodyB64        = "clrk.body.b64"
+)
+
 // otlpSink fans out each captured Record to two OTLP signals:
 //
 //   - Logs: one slim summary record per HTTP transaction. Body is a
@@ -44,9 +67,6 @@ type otlpSink struct {
 	propagator propagation.TextMapPropagator
 }
 
-// newOTLPSink builds OTLP/HTTP exporters for both logs and traces
-// pointed at spec.Endpoint and returns a Sink plus a shutdown function
-// that flushes + closes both pipelines on EG removal or process exit.
 func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink, func(context.Context) error, error) {
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
@@ -79,8 +99,6 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 		propagator: propagation.TraceContext{},
 	}
 	shutdown := func(ctx context.Context) error {
-		// Flush both providers; combine errors so callers see anything
-		// that went wrong without dropping signals on the floor.
 		var errs []string
 		if err := tracesProvider.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Sprintf("traces: %v", err))
@@ -96,13 +114,13 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 	return sink, shutdown, nil
 }
 
+// WithEndpointURL on both exporters already derives insecure-mode from
+// the http:// scheme — no separate WithInsecure needed.
+
 func logsExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlploghttp.Option {
 	opts := []otlploghttp.Option{otlploghttp.WithEndpointURL(spec.Endpoint)}
 	if len(spec.Headers) > 0 {
 		opts = append(opts, otlploghttp.WithHeaders(spec.Headers))
-	}
-	if isInsecureEndpoint(spec.Endpoint) {
-		opts = append(opts, otlploghttp.WithInsecure())
 	}
 	return opts
 }
@@ -112,28 +130,24 @@ func tracesExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlptracehttp.O
 	if len(spec.Headers) > 0 {
 		opts = append(opts, otlptracehttp.WithHeaders(spec.Headers))
 	}
-	if isInsecureEndpoint(spec.Endpoint) {
-		opts = append(opts, otlptracehttp.WithInsecure())
-	}
 	return opts
 }
 
-func isInsecureEndpoint(endpoint string) bool {
-	return strings.HasPrefix(strings.ToLower(endpoint), "http://")
+// derived caches the request/response fields parsed once per Emit so
+// both the span and log paths read them without re-touching the
+// header maps.
+type derived struct {
+	method    string
+	authority string
+	scheme    string
+	path      string
+	host      string
+	port      int
+	urlFull   string
+	status    int
 }
 
-func (s *otlpSink) Emit(r Record) {
-	span := s.emitSpan(r)
-	s.emitLog(r, span.SpanContext())
-	span.End(oteltrace.WithTimestamp(spanEnd(r)))
-}
-
-// emitSpan starts a span for the captured transaction, populates its
-// attributes + events, and returns it un-Ended so the caller can stamp
-// the end timestamp after emitting the back-linked log record.
-func (s *otlpSink) emitSpan(r Record) oteltrace.Span {
-	parentCtx := s.extractParent(context.Background(), r.RequestHeaders)
-
+func newDerived(r Record) derived {
 	method := r.RequestHeaders[":method"]
 	authority := r.RequestHeaders[":authority"]
 	scheme := r.RequestHeaders[":scheme"]
@@ -141,43 +155,57 @@ func (s *otlpSink) emitSpan(r Record) oteltrace.Span {
 		scheme = "https"
 	}
 	path := r.RequestHeaders[":path"]
-	status := parseStatus(r.ResponseHeaders[":status"])
+	host, port := splitAuthority(authority)
+	return derived{
+		method:    method,
+		authority: authority,
+		scheme:    scheme,
+		path:      path,
+		host:      host,
+		port:      port,
+		urlFull:   buildURL(scheme, authority, path),
+		status:    parseStatus(r.ResponseHeaders[":status"]),
+	}
+}
 
-	host, port := splitHostPort(authority)
-	urlFull := buildURL(scheme, authority, path)
-	spanName := spanNameFor(method, host, path)
+func (s *otlpSink) Emit(r Record) {
+	d := newDerived(r)
+	span := s.emitSpan(r, d)
+	s.emitLog(r, d, span.SpanContext())
+	span.End(oteltrace.WithTimestamp(spanEnd(r)))
+}
 
-	startOpts := []oteltrace.SpanStartOption{
+// emitSpan returns the un-Ended span; caller stamps end after emitLog
+// so the back-link log carries the matching trace_id/span_id.
+func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
+	parentCtx := s.extractParent(context.Background(), r.RequestHeaders)
+	spanName := spanNameFor(d.method, d.host, d.path)
+
+	attrs := append(agentAttrs(r),
+		semconv.HTTPRequestMethodKey.String(d.method),
+		semconv.ServerAddress(d.host),
+		semconv.ServerPort(d.port),
+		semconv.URLScheme(d.scheme),
+		semconv.URLPath(d.path),
+		semconv.URLFull(d.urlFull),
+		semconv.HTTPResponseStatusCode(d.status),
+		attribute.Int(attrReqBytes, len(r.RequestBody)),
+		attribute.Int(attrRespBytes, len(r.ResponseBody)),
+		attribute.Bool(attrReqTruncated, r.RequestTruncated),
+		attribute.Bool(attrRespTruncated, r.ResponseTruncated),
+	)
+
+	_, span := s.tracer.Start(parentCtx, spanName,
 		oteltrace.WithTimestamp(spanStart(r)),
 		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
-		oteltrace.WithAttributes(
-			attribute.String("agent.kind", r.AgentKind),
-			attribute.String("agent.namespace", r.AgentNamespace),
-			attribute.String("agent.name", r.AgentName),
-			attribute.String("agent.uid", r.AgentUID),
-			attribute.String("agent.revision", r.AgentRevision),
-			attribute.String("invocation.id", r.InvocationID),
-			attribute.String("http.request.method", method),
-			attribute.String("server.address", host),
-			attribute.Int("server.port", port),
-			attribute.String("url.scheme", scheme),
-			attribute.String("url.path", path),
-			attribute.String("url.full", urlFull),
-			attribute.Int("http.response.status_code", status),
-			attribute.Int("clrk.req.bytes", len(r.RequestBody)),
-			attribute.Int("clrk.resp.bytes", len(r.ResponseBody)),
-			attribute.Bool("clrk.req.truncated", r.RequestTruncated),
-			attribute.Bool("clrk.resp.truncated", r.ResponseTruncated),
-		),
-	}
+		oteltrace.WithAttributes(attrs...),
+	)
 
-	_, span := s.tracer.Start(parentCtx, spanName, startOpts...)
-
-	// Span events for each phase. Header events flatten the captured
-	// header map onto the event as `http.<dir>.header.<lowercase>`
-	// attributes (multi-value headers are joined with ", " — there is
-	// no list-of-string attribute kind that backends agree on). Body
-	// events carry the captured bytes base64'd plus a truncation flag.
+	// Header events flatten the captured map onto the event with one
+	// `http.<dir>.header.<lowercased-name>` attribute per header. Multi-
+	// value headers were already collapsed upstream (`headersToMap`); we
+	// can't preserve them as a list because no log/trace backend agrees
+	// on a list-of-string attribute kind.
 	if !r.RequestHeadersAt.IsZero() {
 		span.AddEvent("http.request.headers",
 			oteltrace.WithTimestamp(r.RequestHeadersAt),
@@ -199,79 +227,84 @@ func (s *otlpSink) emitSpan(r Record) oteltrace.Span {
 			oteltrace.WithAttributes(bodyAttrs(r.ResponseBody, r.ResponseTruncated)...))
 	}
 
-	if status >= 400 {
-		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
+	if d.status >= 400 {
+		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", d.status))
 	}
 	return span
 }
 
-// emitLog writes the slim summary log record. Agent + HTTP attrs are
-// indexed for query; the body is a one-line human-readable summary.
-// trace_id and span_id back-link to the matching span.
-func (s *otlpSink) emitLog(r Record, sc oteltrace.SpanContext) {
-	method := r.RequestHeaders[":method"]
-	authority := r.RequestHeaders[":authority"]
-	path := r.RequestHeaders[":path"]
-	status := parseStatus(r.ResponseHeaders[":status"])
-
+func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 	var rec otellog.Record
 	rec.SetTimestamp(r.Timestamp)
-	rec.SetSeverity(severityFor(status))
-	rec.SetBody(otellog.StringValue(summaryLine(r, method, authority, path, status)))
-	attrs := []otellog.KeyValue{
-		otellog.String("agent.kind", r.AgentKind),
-		otellog.String("agent.namespace", r.AgentNamespace),
-		otellog.String("agent.name", r.AgentName),
-		otellog.String("agent.uid", r.AgentUID),
-		otellog.String("agent.revision", r.AgentRevision),
-		otellog.String("invocation.id", r.InvocationID),
-		otellog.String("http.request.method", method),
-		otellog.String("server.address", authority),
-		otellog.String("url.path", path),
-		otellog.Int("http.response.status_code", status),
-		otellog.Int("clrk.req.bytes", len(r.RequestBody)),
-		otellog.Int("clrk.resp.bytes", len(r.ResponseBody)),
-		otellog.Bool("clrk.req.truncated", r.RequestTruncated),
-		otellog.Bool("clrk.resp.truncated", r.ResponseTruncated),
-	}
+	rec.SetSeverity(severityFor(d.status))
+	rec.SetBody(otellog.StringValue(summaryLine(r, d)))
+
+	attrs := make([]otellog.KeyValue, 0, 16)
+	attrs = appendLogKVs(attrs, agentAttrs(r))
+	attrs = append(attrs,
+		otellog.String(string(semconv.HTTPRequestMethodKey), d.method),
+		otellog.String(string(semconv.ServerAddressKey), d.authority),
+		otellog.String(string(semconv.URLPathKey), d.path),
+		otellog.Int(string(semconv.HTTPResponseStatusCodeKey), d.status),
+		otellog.Int(attrReqBytes, len(r.RequestBody)),
+		otellog.Int(attrRespBytes, len(r.ResponseBody)),
+		otellog.Bool(attrReqTruncated, r.RequestTruncated),
+		otellog.Bool(attrRespTruncated, r.ResponseTruncated),
+	)
 	if dur := durationMillis(r); dur >= 0 {
-		attrs = append(attrs, otellog.Int("clrk.duration_ms", dur))
+		attrs = append(attrs, otellog.Int(attrDurationMs, dur))
 	}
 	if sc.HasTraceID() {
 		attrs = append(attrs,
-			otellog.String("trace_id", sc.TraceID().String()),
-			otellog.String("span_id", sc.SpanID().String()),
+			otellog.String(attrTraceID, sc.TraceID().String()),
+			otellog.String(attrSpanID, sc.SpanID().String()),
 		)
 	}
 	rec.AddAttributes(attrs...)
 	s.logger.Emit(context.Background(), rec)
 }
 
-// extractParent reads a W3C `traceparent` header off the captured
-// request and uses it as the parent SpanContext for our span. When no
-// parent is present we emit a root span; in either case we never
-// rewrite traceparent on the wire — the upstream sees whatever the
-// agent emitted unchanged.
+// extractParent threads any inbound W3C traceparent through as the
+// span's parent. We never rewrite traceparent on the wire — the
+// upstream sees whatever the agent emitted unchanged.
 func (s *otlpSink) extractParent(ctx context.Context, headers map[string]string) context.Context {
-	if len(headers) == 0 {
+	if _, ok := headers["traceparent"]; !ok {
 		return ctx
 	}
-	carrier := propagation.MapCarrier{}
-	if v, ok := headers["traceparent"]; ok && v != "" {
-		carrier["traceparent"] = v
-	}
-	if v, ok := headers["tracestate"]; ok && v != "" {
-		carrier["tracestate"] = v
-	}
-	if len(carrier) == 0 {
-		return ctx
-	}
-	return s.propagator.Extract(ctx, carrier)
+	return s.propagator.Extract(ctx, propagation.MapCarrier(headers))
 }
 
-// spanStart picks the most accurate start timestamp available.
-// Prefer RequestHeadersAt (when ext_proc first saw the request);
-// fall back to Timestamp (stream start).
+// agentAttrs returns the identity sub-slice common to span + log.
+func agentAttrs(r Record) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(attrAgentKind, r.AgentKind),
+		attribute.String(attrAgentNamespace, r.AgentNamespace),
+		attribute.String(attrAgentName, r.AgentName),
+		attribute.String(attrAgentUID, r.AgentUID),
+		attribute.String(attrAgentRevision, r.AgentRevision),
+		attribute.String(attrInvocationID, r.InvocationID),
+	}
+}
+
+// appendLogKVs translates attribute.KeyValue (the trace SDK kind) into
+// otellog.KeyValue (the log SDK kind) so we don't maintain two parallel
+// agent-attr arrays.
+func appendLogKVs(dst []otellog.KeyValue, src []attribute.KeyValue) []otellog.KeyValue {
+	for _, kv := range src {
+		switch kv.Value.Type() {
+		case attribute.STRING:
+			dst = append(dst, otellog.String(string(kv.Key), kv.Value.AsString()))
+		case attribute.INT64:
+			dst = append(dst, otellog.Int64(string(kv.Key), kv.Value.AsInt64()))
+		case attribute.BOOL:
+			dst = append(dst, otellog.Bool(string(kv.Key), kv.Value.AsBool()))
+		default:
+			dst = append(dst, otellog.String(string(kv.Key), kv.Value.Emit()))
+		}
+	}
+	return dst
+}
+
 func spanStart(r Record) time.Time {
 	if !r.RequestHeadersAt.IsZero() {
 		return r.RequestHeadersAt
@@ -279,7 +312,6 @@ func spanStart(r Record) time.Time {
 	return r.Timestamp
 }
 
-// spanEnd is the latest meaningful timestamp we observed.
 func spanEnd(r Record) time.Time {
 	if !r.EndAt.IsZero() {
 		return r.EndAt
@@ -302,41 +334,48 @@ func durationMillis(r Record) int {
 	return int(end.Sub(start) / time.Millisecond)
 }
 
+// headerAttrs produces one attribute per header, prefixed for direction.
+// Header keys are pre-lowercased by headersToMap, so we don't re-lower
+// them here (and isSensitiveHeader operates on the same lowercase form).
 func headerAttrs(prefix string, headers map[string]string) []attribute.KeyValue {
 	if len(headers) == 0 {
 		return nil
 	}
 	out := make([]attribute.KeyValue, 0, len(headers))
 	for k, v := range headers {
-		// Authorization-like headers carry credentials; redact rather
-		// than ship to telemetry. The body capture path stays
-		// untouched — operators opt into that explicitly via
-		// CaptureBody.
 		if isSensitiveHeader(k) {
 			v = "[redacted]"
 		}
-		out = append(out, attribute.String(prefix+strings.ToLower(k), v))
+		out = append(out, attribute.String(prefix+k, v))
 	}
 	return out
 }
 
 func bodyAttrs(body []byte, truncated bool) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.Int("clrk.body.bytes", len(body)),
-		attribute.Bool("clrk.body.truncated", truncated),
-		attribute.String("clrk.body.b64", base64.StdEncoding.EncodeToString(body)),
+		attribute.Int(attrBodyBytes, len(body)),
+		attribute.Bool(attrBodyTruncated, truncated),
+		attribute.String(attrBodyB64, base64.StdEncoding.EncodeToString(body)),
 	}
 }
 
-// isSensitiveHeader matches header names whose values shouldn't ride
-// in telemetry. Conservative list — extend cautiously.
+// sensitiveHeaders is the conservative redact list. Keys are lowercase
+// to match headersToMap. Extend cautiously — over-redacting silently
+// hides telemetry operators may need.
+var sensitiveHeaders = map[string]struct{}{
+	"authorization":       {},
+	"proxy-authorization": {},
+	"cookie":              {},
+	"set-cookie":          {},
+	"x-api-key":           {},
+	"x-auth-token":        {},
+	"openai-api-key":      {},
+	"anthropic-api-key":   {},
+}
+
 func isSensitiveHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie",
-		"x-api-key", "x-auth-token", "openai-api-key", "anthropic-api-key":
-		return true
-	}
-	return false
+	_, ok := sensitiveHeaders[name]
+	return ok
 }
 
 func severityFor(status int) otellog.Severity {
@@ -352,25 +391,24 @@ func severityFor(status int) otellog.Severity {
 	}
 }
 
-func summaryLine(r Record, method, authority, path string, status int) string {
-	dur := durationMillis(r)
+func summaryLine(r Record, d derived) string {
 	durTxt := "?"
-	if dur >= 0 {
+	if dur := durationMillis(r); dur >= 0 {
 		durTxt = strconv.Itoa(dur) + "ms"
 	}
 	return fmt.Sprintf("%s %s%s %d %s req=%dB resp=%dB",
-		method, authority, path, status, durTxt, len(r.RequestBody), len(r.ResponseBody))
+		d.method, d.authority, d.path, d.status, durTxt, len(r.RequestBody), len(r.ResponseBody))
 }
 
 func spanNameFor(method, host, path string) string {
-	if method == "" && host == "" {
-		return "HTTP"
-	}
 	if method == "" {
 		method = "REQUEST"
 	}
 	if host == "" {
 		host = path
+	}
+	if host == "" {
+		return method
 	}
 	return method + " " + host
 }
@@ -383,26 +421,25 @@ func buildURL(scheme, authority, path string) string {
 	return u.String()
 }
 
-func splitHostPort(authority string) (string, int) {
+// splitAuthority returns the host and port portions of an HTTP/2
+// :authority. Port 0 indicates no port was set (or it was malformed).
+// Uses net.SplitHostPort so IPv6 literals like `[::1]:443` parse
+// correctly.
+func splitAuthority(authority string) (string, int) {
 	if authority == "" {
 		return "", 0
 	}
-	if i := strings.LastIndex(authority, ":"); i > 0 {
-		host := authority[:i]
-		if p, err := strconv.Atoi(authority[i+1:]); err == nil {
-			return host, p
-		}
+	host, portStr, err := net.SplitHostPort(authority)
+	if err != nil {
+		// No port present — common for HTTP/2 :authority. Strip IPv6
+		// brackets if any and return port 0.
+		return strings.Trim(authority, "[]"), 0
 	}
-	return authority, 0
+	port, _ := strconv.Atoi(portStr)
+	return host, port
 }
 
 func parseStatus(s string) int {
-	if s == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0
-	}
+	n, _ := strconv.Atoi(s)
 	return n
 }

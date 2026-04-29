@@ -3,6 +3,7 @@ package extproc
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -30,13 +31,13 @@ var defaultIncludedContentTypes = []string{
 
 // egSink is a per-EgressGateway capture configuration: the resolved Sink
 // (OTLP or fallback slog), the body-capture cap, the content-type
-// allow-list, plus enough state to know when to rebuild after the EG
-// spec changes.
+// allow-list, plus a snapshot of the spec fields we actually consume so
+// we can decide whether the EG changed in a way that warrants a rebuild.
 type egSink struct {
 	sink            Sink
 	maxCaptureBytes int
 	includedTypes   []string
-	resourceVersion string
+	specSnapshot    *clrkv1alpha1.OTLPLogsSinkSpec
 	shutdown        func(context.Context) error
 }
 
@@ -64,6 +65,12 @@ func newSinkRegistry(c client.Client) *sinkRegistry {
 // returns the (possibly newly-built) cached egSink. Returns an error
 // when no EG identity was attached or the controller-runtime client
 // isn't wired — callers fall back to slogSink in that case.
+//
+// Cache invalidation is keyed on the OTLP spec snapshot, not
+// EG.ResourceVersion. The EG controller writes status frequently
+// (cert rotation, condition flips); rebuilding the OTLP exporter pair
+// on every status write would churn batcher goroutines for no signal
+// change.
 func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if r.client == nil {
 		return nil, fmt.Errorf("no kube client configured")
@@ -79,7 +86,7 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 
 	r.mu.Lock()
-	if hit, ok := r.by[key]; ok && hit.resourceVersion == eg.ResourceVersion {
+	if hit, ok := r.by[key]; ok && reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) {
 		r.mu.Unlock()
 		return hit, nil
 	}
@@ -146,7 +153,7 @@ func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, 
 	out := &egSink{
 		maxCaptureBytes: maxBytes,
 		includedTypes:   included,
-		resourceVersion: eg.ResourceVersion,
+		specSnapshot:    eg.Spec.OTLP.DeepCopy(),
 	}
 
 	if eg.Spec.OTLP != nil && eg.Spec.OTLP.Endpoint != "" {
