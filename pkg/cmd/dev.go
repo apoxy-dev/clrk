@@ -17,6 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/apoxy-dev/clrk/pkg/cmd/devtui"
 	"github.com/apoxy-dev/clrk/pkg/drivers"
@@ -328,8 +330,18 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 
 	// Apply user-supplied manifests before workers start so reconcilers and
 	// workers see the desired world at boot rather than racing against it.
+	// Use the host-side kubeconfig (server: https://127.0.0.1:<HostPort>)
+	// because applyManifests runs in this clrk process on the host, where
+	// the docker-DNS name `clrk-k3s` won't resolve.
 	if len(o.applyPaths) > 0 {
-		if err := applyManifests(ctx, state.k3s.KubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
+		// controller-manager /readyz only confirms the embedded apiserver
+		// is up — k3s still has to probe the aggregated APIService and
+		// publish clrk.apoxy.dev/v1alpha1 in discovery before kinds like
+		// DaemonAgent become resolvable. Wait for that before applying.
+		if err := waitClrkAPIDiscoverable(ctx, state.k3s.HostKubeconfigPath(), 60*time.Second); err != nil {
+			return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
+		}
+		if err := applyManifests(ctx, state.k3s.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
 		}
 	}
@@ -517,6 +529,45 @@ func waitReadyzInContainer(ctx context.Context, container, url string, timeout t
 			return ctx.Err()
 		case <-deadline.C:
 			return errors.New("timed out")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// waitClrkAPIDiscoverable polls k3s discovery until clrk.apoxy.dev/v1alpha1
+// shows up. The aggregated APIService is registered as soon as the
+// controller-manager container is up, but kube-aggregator still has to
+// probe the backend's TLS and mark the service Available — until then
+// REST mappings for clrk kinds resolve to "no matches".
+func waitClrkAPIDiscoverable(ctx context.Context, kubeconfig string, timeout time.Duration) error {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig %s: %w", kubeconfig, err)
+	}
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("discovery client: %w", err)
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		groups, err := dc.ServerGroups()
+		if err == nil {
+			for _, g := range groups.Groups {
+				if g.Name == "clrk.apoxy.dev" {
+					for _, v := range g.Versions {
+						if v.Version == "v1alpha1" {
+							return nil
+						}
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("timed out waiting for clrk.apoxy.dev/v1alpha1 in discovery")
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
