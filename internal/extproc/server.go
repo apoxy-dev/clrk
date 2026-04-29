@@ -53,8 +53,14 @@ type Sink interface {
 // Record is the structured representation of one HTTP request/response
 // observed through ext_proc. All fields are best-effort; Envoy may not
 // deliver bodies or trailers depending on mode.
+//
+// Timestamps mark the wall-clock arrival of each ext_proc callback so
+// the trace sink can synthesize span events with realistic timings.
+// They are zero when the corresponding phase did not occur (e.g. an
+// empty-body request leaves RequestBodyAt zero).
 type Record struct {
 	Timestamp time.Time
+	EndAt     time.Time
 
 	AgentKind      string
 	AgentNamespace string
@@ -63,11 +69,15 @@ type Record struct {
 	AgentRevision  string
 	InvocationID   string
 
+	RequestHeadersAt time.Time
 	RequestHeaders   map[string]string
+	RequestBodyAt    time.Time
 	RequestBody      []byte
 	RequestTruncated bool
 
+	ResponseHeadersAt time.Time
 	ResponseHeaders   map[string]string
+	ResponseBodyAt    time.Time
 	ResponseBody      []byte
 	ResponseTruncated bool
 }
@@ -155,6 +165,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	for {
 		req, err := stream.Recv()
 		if err != nil {
+			rec.EndAt = time.Now()
 			if errors.Is(err, io.EOF) {
 				sink.Emit(rec)
 				return nil
@@ -172,9 +183,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			applyClrkMetadata(&rec, mctx.GetFilterMetadata())
 		}
 
+		now := time.Now()
 		var resp *extprocv3.ProcessingResponse
 		switch m := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
+			rec.RequestHeadersAt = now
 			rec.RequestHeaders = headersToMap(m.RequestHeaders)
 			resp = headersContinue(true)
 			// Force port 443 onto :authority when none was supplied. The
@@ -194,6 +207,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				reqBytesLeft = 0
 			}
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
+			rec.ResponseHeadersAt = now
 			rec.ResponseHeaders = headersToMap(m.ResponseHeaders)
 			resp = headersContinue(false)
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
@@ -201,11 +215,17 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			}
 		case *extprocv3.ProcessingRequest_RequestBody:
 			body, trunc := appendBounded(rec.RequestBody, m.RequestBody.GetBody(), &reqBytesLeft)
+			if rec.RequestBodyAt.IsZero() {
+				rec.RequestBodyAt = now
+			}
 			rec.RequestBody = body
 			rec.RequestTruncated = rec.RequestTruncated || trunc
 			resp = bodyContinue(true)
 		case *extprocv3.ProcessingRequest_ResponseBody:
 			body, trunc := appendBounded(rec.ResponseBody, m.ResponseBody.GetBody(), &respBytesLeft)
+			if rec.ResponseBodyAt.IsZero() {
+				rec.ResponseBodyAt = now
+			}
 			rec.ResponseBody = body
 			rec.ResponseTruncated = rec.ResponseTruncated || trunc
 			resp = bodyContinue(false)
@@ -222,6 +242,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			continue
 		}
 		if err := stream.Send(resp); err != nil {
+			rec.EndAt = time.Now()
 			sink.Emit(rec)
 			return err
 		}
