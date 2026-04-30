@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -214,13 +216,18 @@ const systemTrustPath = "/etc/ssl/certs/ca-certificates.crt"
 
 // buildEnvoyDeploymentSpec assembles the EnvoyProxy.Spec.Provider.Kubernetes.
 // EnvoyDeployment shape, including init container + volumes when the EG
-// requests an additional upstream trust bundle. When no bundle is
-// requested the result is just the image override (matching the
-// previous behavior).
+// requests an additional upstream trust bundle, and a strategic merge
+// patch for HostAliases when the EG pins specific upstream hostnames.
+// When neither is requested the result is just the image override
+// (matching the previous behavior).
 func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv1alpha1.KubernetesDeploymentSpec {
 	dep := &egv1alpha1.KubernetesDeploymentSpec{}
 	if image != "" {
 		dep.Container = &egv1alpha1.KubernetesContainerSpec{Image: &image}
+	}
+
+	if patch := upstreamHostAliasesPatch(eg); patch != nil {
+		dep.Patch = patch
 	}
 
 	bundleSecret := upstreamAdditionalTrustSecret(eg)
@@ -298,6 +305,39 @@ func upstreamAdditionalTrustSecret(eg *clrkv1alpha1.EgressGateway) string {
 		return ""
 	}
 	return string(eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef.Name)
+}
+
+// upstreamHostAliasesPatch returns a strategic-merge KubernetesPatchSpec
+// that programs `spec.template.spec.hostAliases` on the EG-managed
+// Deployment, or nil when no aliases are configured. envoy-gateway's
+// KubernetesPodSpec doesn't surface hostAliases natively, so we use
+// the Deployment-level Patch field — the EG controller applies it as a
+// strategic-merge over the generated Deployment.
+func upstreamHostAliasesPatch(eg *clrkv1alpha1.EgressGateway) *egv1alpha1.KubernetesPatchSpec {
+	if eg.Spec.UpstreamTLS == nil || len(eg.Spec.UpstreamTLS.HostAliases) == 0 {
+		return nil
+	}
+	patch := map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"hostAliases": eg.Spec.UpstreamTLS.HostAliases,
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(patch)
+	if err != nil {
+		// HostAlias is JSON-marshalable; this would only fire on a
+		// schema bug. Better to drop the patch than to surface a
+		// reconcile error that would block the whole rollout.
+		return nil
+	}
+	mt := egv1alpha1.StrategicMerge
+	return &egv1alpha1.KubernetesPatchSpec{
+		Type:  &mt,
+		Value: apiextv1.JSON{Raw: raw},
+	}
 }
 
 // ensureGatewayClass creates the shared GatewayClass the first time it's

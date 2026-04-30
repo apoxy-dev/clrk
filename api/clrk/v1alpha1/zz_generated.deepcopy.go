@@ -912,6 +912,13 @@ func (in *EgressUpstreamTLSSpec) DeepCopyInto(out *EgressUpstreamTLSSpec) {
 		*out = new(v1.SecretObjectReference)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.HostAliases != nil {
+		in, out := &in.HostAliases, &out.HostAliases
+		*out = make([]corev1.HostAlias, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	return
 }
 

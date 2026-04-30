@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -101,17 +102,17 @@ type EgressGatewaySpec struct {
 	UpstreamTLS *EgressUpstreamTLSSpec `json:"upstreamTLS,omitempty"`
 }
 
-// EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream TLS
-// validation behavior. The default trust source is the system bundle
-// at /etc/ssl/certs/ca-certificates.crt baked into the Envoy image —
-// this spec lets operators add CA certificates Envoy should also
-// trust when verifying upstream identities.
+// EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream
+// connection behavior. The default trust source is the system bundle
+// at /etc/ssl/certs/ca-certificates.crt baked into the Envoy image
+// and the default DNS resolver is the cluster DNS — this spec lets
+// operators override either when reaching upstreams that aren't on
+// the public Internet (internal services, integration-test stubs).
 type EgressUpstreamTLSSpec struct {
 	// AdditionalTrustBundleSecretRef references a Secret carrying one
 	// or more CA certificates (PEM, under any data key) that Envoy
 	// should trust in addition to the system bundle. Used for private
-	// upstreams whose certs aren't anchored in a public CA — internal
-	// services, integration-test stub upstreams, etc.
+	// upstreams whose certs aren't anchored in a public CA.
 	//
 	// All non-empty values in the Secret's `data` map are concatenated
 	// and appended to the system bundle inside the Envoy pod via an
@@ -119,6 +120,16 @@ type EgressUpstreamTLSSpec struct {
 	// from the same well-known path it always has.
 	// +optional
 	AdditionalTrustBundleSecretRef *gwapiv1.SecretObjectReference `json:"additionalTrustBundleSecretRef,omitempty"`
+
+	// HostAliases programs the EG-managed Envoy Pod's
+	// spec.hostAliases. Each entry maps an IP to one or more hostnames;
+	// the kubelet writes them into the pod's /etc/hosts ahead of the
+	// cluster DNS lookup chain. Use this to point Envoy's
+	// dynamic_forward_proxy resolver at a specific IP for a given
+	// upstream hostname, e.g. an in-cluster stub pretending to be
+	// api.openai.com without globally hijacking the cluster's CoreDNS.
+	// +optional
+	HostAliases []corev1.HostAlias `json:"hostAliases,omitempty"`
 }
 
 // BodyCaptureSpec governs request/response body capture bounds.
