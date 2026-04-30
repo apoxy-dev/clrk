@@ -24,6 +24,7 @@ import (
 	netutils "k8s.io/utils/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/apoxy-dev/apoxy/api/resource"
 	builder "github.com/apoxy-dev/apoxy/pkg/apiserver/server/builder"
@@ -207,6 +208,7 @@ func (m *Manager) Start(ctx context.Context, opts ...Option) error {
 		LeaderElectionResourceLock:    "leases",
 		LeaderElectionReleaseOnCancel: true,
 		HealthProbeBindAddress:        o.healthBindAddr,
+		Metrics:                       metricsserver.Options{BindAddress: o.metricsBindAddr},
 	})
 	if err != nil {
 		m.ReadyCh <- err

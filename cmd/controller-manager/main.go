@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	envoytlsv3 "github.com/apoxy-dev/envoy-go/envoy/service/tls/v3"
@@ -15,16 +16,19 @@ import (
 	egextpb "github.com/envoyproxy/gateway/proto/extension"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/egcontrolplane"
 	"github.com/apoxy-dev/clrk/internal/egextension"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	"github.com/apoxy-dev/clrk/pkg/apiserver"
+	"github.com/apoxy-dev/clrk/pkg/crds"
 )
 
 const (
@@ -42,7 +46,10 @@ func main() {
 		leaderID          = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
 		leaderNS          = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
 		metricsAddr       = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
-		healthAddr        = flag.String("health-addr", ":8081", "Controller-manager healthz bind address.")
+		// Default :8082 to avoid colliding with the supervised
+		// envoy-gateway child whose controller-runtime manager hardcodes
+		// :8081 for its own healthz/probe endpoint.
+		healthAddr        = flag.String("health-addr", ":8082", "Controller-manager healthz bind address.")
 		ingressController = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
 		workerDeployment  = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
 		egController      = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
@@ -50,6 +57,8 @@ func main() {
 		grpcAddr          = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
 		grpcAdvertiseURI  = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
 		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.EgressBackendAddress is published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
+		envoyGatewayBinary = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
+		crdInstallMode    = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -97,12 +106,14 @@ func main() {
 	if *leaderElection {
 		opts = append(opts, apiserver.WithLeaderElection(*leaderID, *leaderNS))
 	}
+	var clusterCfg *rest.Config
 	if kubeconfig != "" {
 		cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			log.Error(err, "Unable to load kubeconfig", "path", kubeconfig)
 			os.Exit(1)
 		}
+		clusterCfg = cfg
 		opts = append(opts, apiserver.WithClientConfig(cfg))
 	}
 
@@ -114,6 +125,21 @@ func main() {
 	if err, open := <-mgr.ReadyCh; open && err != nil {
 		log.Error(err, "Apiserver failed to become ready")
 		os.Exit(1)
+	}
+
+	// Sideload Gateway API + Envoy Gateway CRDs into the cluster the EG
+	// control plane will reconcile against. Skipped in single-binary mode
+	// (no kubeconfig) where there's no separate cluster to install into.
+	if clusterCfg != nil && (*ingressController || *egController) {
+		mode, err := parseCRDMode(*crdInstallMode)
+		if err != nil {
+			log.Error(err, "Invalid --crd-install-mode")
+			os.Exit(1)
+		}
+		if err := crds.Install(ctx, clusterCfg, crds.InstallOptions{Mode: mode}); err != nil {
+			log.Error(err, "CRD install failed")
+			os.Exit(1)
+		}
 	}
 
 	cm := mgr.CtrlManager()
@@ -202,6 +228,20 @@ func main() {
 		extprocSrv.Stop(shutCtx)
 	}()
 
+	egErrCh := make(chan error, 1)
+	if clusterCfg != nil && (*ingressController || *egController) {
+		host, port := splitGRPCAddr(*grpcAddr, defaultGRPCPort)
+		go func() {
+			egErrCh <- egcontrolplane.Run(ctx, egcontrolplane.Config{
+				BinaryPath:    *envoyGatewayBinary,
+				Kubeconfig:    kubeconfig,
+				RestConfig:    clusterCfg,
+				ExtensionHost: host,
+				ExtensionPort: port,
+			})
+		}()
+	}
+
 	slog.Info("Controller-manager running",
 		"apiserver", *bindAddr,
 		"port", *bindPort,
@@ -215,10 +255,50 @@ func main() {
 	// apiserver goroutine will now call mgr.Start(ctx) and block there.
 	close(mgr.StartCh)
 
-	if err := <-errCh; err != nil {
-		log.Error(err, "Manager exited with error")
-		os.Exit(1)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			log.Error(err, "Manager exited with error")
+			os.Exit(1)
+		}
+	case err := <-egErrCh:
+		if err != nil {
+			log.Error(err, "envoy-gateway supervisor exited; tearing down")
+			os.Exit(1)
+		}
 	}
+}
+
+// parseCRDMode maps the --crd-install-mode flag string to crds.Mode.
+func parseCRDMode(s string) (crds.Mode, error) {
+	switch s {
+	case "always":
+		return crds.ModeAlways, nil
+	case "if-missing":
+		return crds.ModeIfMissing, nil
+	case "skip":
+		return crds.ModeSkip, nil
+	default:
+		return 0, fmt.Errorf("unknown crd-install-mode %q (want always|if-missing|skip)", s)
+	}
+}
+
+// splitGRPCAddr splits a "host:port" or ":port" listener spec into a
+// loopback-friendly host and int port for the EG child to dial.
+func splitGRPCAddr(addr string, defaultPort int) (host string, port int) {
+	host = "127.0.0.1"
+	port = defaultPort
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return host, port
+	}
+	if h != "" && h != "0.0.0.0" && h != "::" {
+		host = h
+	}
+	if v, err := strconv.Atoi(p); err == nil {
+		port = v
+	}
+	return host, port
 }
 
 func defaultDBPath() string {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
@@ -64,6 +65,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&o.reloadTar, "reload-tar", nil, "Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is `worker[-N]` or `controller-manager`. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar")
 	cmd.AddCommand(newDevStatusCmd())
 	cmd.AddCommand(newDevLogsCmd())
+	cmd.AddCommand(newDevWaitReadyCmd())
 	return cmd
 }
 
@@ -271,96 +273,71 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 	slog.Info("k3s API is ready", "kubeconfig", state.k3s.KubeconfigPath())
 
-	// Order matters: EG install.yaml ships its own (older) gateway-api
-	// CRDs and would clobber a freshly-installed v1.2.1 set, dropping the
-	// Gateway.spec.infrastructure field our EgressGateway controller
-	// programs. Install EG first, then upgrade the CRDs to v1.2.1.
-	if err := state.k3s.InstallEnvoyGateway(ctx); err != nil {
-		return state, fmt.Errorf("installing Envoy Gateway operator: %w", err)
-	}
-	slog.Info("Envoy Gateway operator installed")
-
-	if err := state.k3s.InstallGatewayAPI(ctx); err != nil {
-		return state, fmt.Errorf("installing Gateway API CRDs: %w", err)
-	}
-	slog.Info("Gateway API CRDs installed")
-
 	state.cm = drivers.NewControllerManagerDriver()
 	cmOpts, err := controllerManagerOpts(o)
 	if err != nil {
 		return state, err
 	}
 
-	if err := withStatus(prog, drivers.ControllerManagerContainerName, func() error {
-		if _, err := state.cm.Start(ctx, cmOpts...); err != nil {
-			return err
-		}
-		slog.Info("Controller-manager running", "container", drivers.ControllerManagerContainerName)
+	// cm and workers both depend only on k3s (which is up). Bring them
+	// up in parallel — workers spend the cm /readyz wait pulling their
+	// own image instead of sitting idle.
+	state.workers = make([]*drivers.WorkerDriver, o.workers)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return withStatus(prog, drivers.ControllerManagerContainerName, func() error {
+			if _, err := state.cm.Start(gctx, cmOpts...); err != nil {
+				return err
+			}
+			slog.Info("Controller-manager running", "container", drivers.ControllerManagerContainerName)
 
-		cmIP, err := dockerutils.IPOnNetwork(ctx, drivers.ControllerManagerContainerName, drivers.NetworkName)
+			cmIP, err := dockerutils.IPOnNetwork(gctx, drivers.ControllerManagerContainerName, drivers.NetworkName)
+			if err != nil {
+				return fmt.Errorf("getting controller-manager IP: %w", err)
+			}
+			if err := bootstrapClrkAPIService(gctx, state.k3s, cmIP, 8443); err != nil {
+				return fmt.Errorf("registering clrk APIService: %w", err)
+			}
+			if err := state.k3s.ApplyControllerManagerBridge(gctx, cmIP, 9443, 18000); err != nil {
+				return fmt.Errorf("bridging controller-manager: %w", err)
+			}
+			slog.Info("Controller-manager registered + bridged", "backend", cmIP)
+
+			if err := waitReadyzInContainer(gctx, drivers.ControllerManagerContainerName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
+				return fmt.Errorf("controller-manager never became ready: %w", err)
+			}
+			return nil
+		})
+	})
+	for i := 0; i < o.workers; i++ {
+		i := i
+		w := drivers.NewWorkerDriver(i)
+		state.workers[i] = w
+		wOpts, err := workerOpts(o, w)
 		if err != nil {
-			return fmt.Errorf("getting controller-manager IP: %w", err)
+			return state, err
 		}
-		if err := bootstrapClrkAPIService(ctx, state.k3s, cmIP, 8443); err != nil {
-			return fmt.Errorf("registering clrk APIService: %w", err)
-		}
-		slog.Info("clrk APIService registered in k3s", "backend", cmIP)
-
-		// Bridge Envoy-Gateway-provisioned Envoy pods (inside k3s) to the
-		// controller-manager's gRPC on the docker network. ConfigMap patch
-		// restarts the EG operator so it picks up the new extensionManager.
-		if err := state.k3s.ApplyControllerManagerBridge(ctx, cmIP, 9443); err != nil {
-			return fmt.Errorf("bridging controller-manager gRPC: %w", err)
-		}
-		if err := state.k3s.ConfigureEnvoyGatewayExtension(ctx,
-			"clrk-controller-manager.clrk-system.svc.cluster.local", 9443); err != nil {
-			return fmt.Errorf("configuring Envoy Gateway extension: %w", err)
-		}
-		slog.Info("Envoy Gateway extensionManager wired to controller-manager",
-			"bridge", fmt.Sprintf("clrk-controller-manager.clrk-system.svc.cluster.local:%d → %s:%d", 9443, cmIP, 9443))
-
-		if err := waitReadyzInContainer(ctx, drivers.ControllerManagerContainerName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
-			return fmt.Errorf("controller-manager never became ready: %w", err)
-		}
-		return nil
-	}); err != nil {
+		g.Go(func() error {
+			return withStatus(prog, w.Name(), func() error {
+				if _, err := w.Start(gctx, wOpts...); err != nil {
+					return fmt.Errorf("starting worker %d: %w", i, err)
+				}
+				slog.Info("Worker running", "container", w.Name())
+				return nil
+			})
+		})
+	}
+	if err := g.Wait(); err != nil {
 		return state, err
 	}
-	slog.Info("Apiserver /readyz is OK")
 
-	// Apply user-supplied manifests before workers start so reconcilers and
-	// workers see the desired world at boot rather than racing against it.
-	// Use the host-side kubeconfig (server: https://127.0.0.1:<HostPort>)
-	// because applyManifests runs in this clrk process on the host, where
-	// the docker-DNS name `clrk-k3s` won't resolve.
 	if len(o.applyPaths) > 0 {
-		// controller-manager /readyz only confirms the embedded apiserver
-		// is up — k3s still has to probe the aggregated APIService and
-		// publish clrk.apoxy.dev/v1alpha1 in discovery before kinds like
-		// DaemonAgent become resolvable. Wait for that before applying.
 		if err := waitClrkAPIDiscoverable(ctx, state.k3s.HostKubeconfigPath(), 60*time.Second); err != nil {
 			return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
 		}
 		if err := applyManifests(ctx, state.k3s.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
 		}
-	}
-
-	state.workers = make([]*drivers.WorkerDriver, 0, o.workers)
-	for i := 0; i < o.workers; i++ {
-		w := drivers.NewWorkerDriver(i)
-		wOpts, err := workerOpts(o, w)
-		if err != nil {
-			return state, err
-		}
-		if err := withStatus(prog, w.Name(), func() error {
-			_, err := w.Start(ctx, wOpts...)
-			return err
-		}); err != nil {
-			return state, fmt.Errorf("starting worker %d: %w", i, err)
-		}
-		slog.Info("Worker running", "container", w.Name())
-		state.workers = append(state.workers, w)
 	}
 
 	return state, nil
