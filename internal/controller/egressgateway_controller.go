@@ -267,16 +267,20 @@ func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv
 		},
 	)
 
-	// busybox: small + has cat/sh; runs once and exits. Concatenate
-	// every file in /extra (the secret data keys are arbitrary — we
-	// don't presume tls.crt vs ca.crt) so any single-file or multi-
-	// key Secret layout works.
+	// alpine: small (5MB), ships with the ca-certificates package by
+	// default at the same /etc/ssl/certs/ca-certificates.crt path the
+	// envoy image reads from. busybox would be smaller but has no
+	// cacerts file — we'd have nothing to seed the merged bundle from.
+	//
+	// Concatenate every file in /extra (the secret data keys are
+	// arbitrary — we don't presume tls.crt vs ca.crt) so any
+	// single-file or multi-key Secret layout works.
 	//
 	// InitContainers belongs to KubernetesDeploymentSpec (not the
 	// nested Pod sub-spec) per envoy-gateway's API shape.
 	dep.InitContainers = append(dep.InitContainers, corev1.Container{
 		Name:    "clrk-trust-merge",
-		Image:   "docker.io/library/busybox:1.36",
+		Image:   "docker.io/library/alpine:3.20",
 		Command: []string{"sh", "-c"},
 		Args: []string{
 			`cat ` + systemTrustPath + ` > ` + mergedPath + `/ca-certificates.crt && ` +
