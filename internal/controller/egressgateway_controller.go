@@ -192,15 +192,11 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 		},
 	}
 	op, err := ctrl.CreateOrUpdate(ctx, r.Client, ep, func() error {
-		if img != "" {
-			ep.Spec.Provider = &egv1alpha1.EnvoyProxyProvider{
-				Type: egv1alpha1.ProviderTypeKubernetes,
-				Kubernetes: &egv1alpha1.EnvoyProxyKubernetesProvider{
-					EnvoyDeployment: &egv1alpha1.KubernetesDeploymentSpec{
-						Container: &egv1alpha1.KubernetesContainerSpec{Image: &img},
-					},
-				},
-			}
+		ep.Spec.Provider = &egv1alpha1.EnvoyProxyProvider{
+			Type: egv1alpha1.ProviderTypeKubernetes,
+			Kubernetes: &egv1alpha1.EnvoyProxyKubernetesProvider{
+				EnvoyDeployment: buildEnvoyDeploymentSpec(eg, img),
+			},
 		}
 		return ctrl.SetControllerReference(eg, ep, r.Scheme)
 	})
@@ -209,6 +205,99 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 	}
 	log.FromContext(ctx).V(1).Info("EnvoyProxy reconciled", "op", op, "name", name)
 	return nil
+}
+
+// systemTrustPath is the file Envoy reads when validating upstream
+// certs. Matches the path egextension's DFP cluster pins as TrustedCa
+// and the path the upstream envoy/alpine image ships its CA bundle at.
+const systemTrustPath = "/etc/ssl/certs/ca-certificates.crt"
+
+// buildEnvoyDeploymentSpec assembles the EnvoyProxy.Spec.Provider.Kubernetes.
+// EnvoyDeployment shape, including init container + volumes when the EG
+// requests an additional upstream trust bundle. When no bundle is
+// requested the result is just the image override (matching the
+// previous behavior).
+func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv1alpha1.KubernetesDeploymentSpec {
+	dep := &egv1alpha1.KubernetesDeploymentSpec{}
+	if image != "" {
+		dep.Container = &egv1alpha1.KubernetesContainerSpec{Image: &image}
+	}
+
+	bundleSecret := upstreamAdditionalTrustSecret(eg)
+	if bundleSecret == "" {
+		return dep
+	}
+
+	// Mount the additional CA bundle. Strategy: an emptyDir volume
+	// holds a merged ca-certificates.crt; an init container concatenates
+	// the image's system bundle with every cert in the secret into that
+	// emptyDir; the main Envoy container then mounts the merged file
+	// as a subPath, overlaying just the system bundle file (the rest of
+	// /etc/ssl/certs stays intact).
+	const (
+		mergedVol  = "clrk-trust-merged"
+		secretVol  = "clrk-extra-trust"
+		mergedPath = "/clrk-trust"
+	)
+
+	if dep.Pod == nil {
+		dep.Pod = &egv1alpha1.KubernetesPodSpec{}
+	}
+	dep.Pod.Volumes = append(dep.Pod.Volumes,
+		corev1.Volume{
+			Name:         mergedVol,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		corev1.Volume{
+			Name: secretVol,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: bundleSecret},
+			},
+		},
+	)
+
+	// busybox: small + has cat/sh; runs once and exits. Concatenate
+	// every file in /extra (the secret data keys are arbitrary — we
+	// don't presume tls.crt vs ca.crt) so any single-file or multi-
+	// key Secret layout works.
+	//
+	// InitContainers belongs to KubernetesDeploymentSpec (not the
+	// nested Pod sub-spec) per envoy-gateway's API shape.
+	dep.InitContainers = append(dep.InitContainers, corev1.Container{
+		Name:    "clrk-trust-merge",
+		Image:   "docker.io/library/busybox:1.36",
+		Command: []string{"sh", "-c"},
+		Args: []string{
+			`cat ` + systemTrustPath + ` > ` + mergedPath + `/ca-certificates.crt && ` +
+				`for f in /extra/*; do [ -f "$f" ] && echo >> ` + mergedPath + `/ca-certificates.crt && cat "$f" >> ` + mergedPath + `/ca-certificates.crt; done`,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: mergedVol, MountPath: mergedPath},
+			{Name: secretVol, MountPath: "/extra", ReadOnly: true},
+		},
+	})
+
+	if dep.Container == nil {
+		dep.Container = &egv1alpha1.KubernetesContainerSpec{}
+	}
+	dep.Container.VolumeMounts = append(dep.Container.VolumeMounts, corev1.VolumeMount{
+		Name:      mergedVol,
+		MountPath: systemTrustPath,
+		SubPath:   "ca-certificates.crt",
+		ReadOnly:  true,
+	})
+	return dep
+}
+
+// upstreamAdditionalTrustSecret returns the Secret name to mount as
+// the additional trust bundle, or "" when none is configured. Secret
+// is read from the EG's own namespace; cross-namespace secret refs
+// would need ReferenceGrant gating which we don't ship today.
+func upstreamAdditionalTrustSecret(eg *clrkv1alpha1.EgressGateway) string {
+	if eg.Spec.UpstreamTLS == nil || eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef == nil {
+		return ""
+	}
+	return string(eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef.Name)
 }
 
 // ensureGatewayClass creates the shared GatewayClass the first time it's

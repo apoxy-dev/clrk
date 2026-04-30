@@ -94,6 +94,31 @@ type EgressGatewaySpec struct {
 	// to the controller-manager's structured log instead.
 	// +optional
 	OTLP *OTLPLogsSinkSpec `json:"otlp,omitempty"`
+
+	// UpstreamTLS adjusts how the EG-managed Envoy validates TLS when
+	// re-encrypting traffic to upstreams (the egress dial after MITM).
+	// +optional
+	UpstreamTLS *EgressUpstreamTLSSpec `json:"upstreamTLS,omitempty"`
+}
+
+// EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream TLS
+// validation behavior. The default trust source is the system bundle
+// at /etc/ssl/certs/ca-certificates.crt baked into the Envoy image —
+// this spec lets operators add CA certificates Envoy should also
+// trust when verifying upstream identities.
+type EgressUpstreamTLSSpec struct {
+	// AdditionalTrustBundleSecretRef references a Secret carrying one
+	// or more CA certificates (PEM, under any data key) that Envoy
+	// should trust in addition to the system bundle. Used for private
+	// upstreams whose certs aren't anchored in a public CA — internal
+	// services, integration-test stub upstreams, etc.
+	//
+	// All non-empty values in the Secret's `data` map are concatenated
+	// and appended to the system bundle inside the Envoy pod via an
+	// init container; the main Envoy container reads the merged bundle
+	// from the same well-known path it always has.
+	// +optional
+	AdditionalTrustBundleSecretRef *gwapiv1.SecretObjectReference `json:"additionalTrustBundleSecretRef,omitempty"`
 }
 
 // BodyCaptureSpec governs request/response body capture bounds.
