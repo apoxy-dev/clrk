@@ -50,6 +50,17 @@ func (w *ConfigWatcher) SetupWithManager(mgr manager.Manager) error {
 		return fmt.Errorf("setting up EgressL4Route watcher: %w", err)
 	}
 
+	// Watch LoggingPolicy. The router doesn't read its fields yet; the
+	// watcher exists so applying a LoggingPolicy CR doesn't blow up the
+	// worker on an unknown-CRD informer error and so that future field
+	// consumption picks up changes via the same reconcile path.
+	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&clrkv1alpha1.LoggingPolicy{}).
+		Named("logging-policy-watcher").
+		Complete(reconcile.Func(w.reconcile)); err != nil {
+		return fmt.Errorf("setting up LoggingPolicy watcher: %w", err)
+	}
+
 	return nil
 }
 
