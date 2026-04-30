@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers/dockerutils"
+	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
 )
 
 const (

@@ -17,7 +17,7 @@ import (
 	apiregclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/typed/apiregistration/v1"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // newDevWaitReadyCmd is `clrk dev wait-ready`. Polls a running clrk

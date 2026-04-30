@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // newDevStatusCmd is `clrk dev status`. Reports the per-container state

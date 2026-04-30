@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // reloadWorker stops and recreates clrk-worker-<idx> with the current

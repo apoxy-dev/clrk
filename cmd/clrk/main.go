@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/apoxy-dev/clrk/pkg/cmd"
+	"github.com/apoxy-dev/clrk/internal/cmd"
 )
 
 func main() {

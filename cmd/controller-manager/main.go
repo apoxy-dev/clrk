@@ -27,8 +27,8 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egextension"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
-	"github.com/apoxy-dev/clrk/pkg/apiserver"
-	"github.com/apoxy-dev/clrk/pkg/crds"
+	"github.com/apoxy-dev/clrk/internal/apiserver"
+	"github.com/apoxy-dev/clrk/internal/crds"
 )
 
 const (

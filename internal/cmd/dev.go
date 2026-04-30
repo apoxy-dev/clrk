@@ -21,9 +21,9 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/apoxy-dev/clrk/pkg/cmd/devtui"
-	"github.com/apoxy-dev/clrk/pkg/drivers"
-	"github.com/apoxy-dev/clrk/pkg/drivers/dockerutils"
+	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
+	"github.com/apoxy-dev/clrk/internal/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
 )
 
 type devOpts struct {

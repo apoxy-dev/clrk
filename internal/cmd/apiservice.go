@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // bootstrapClrkAPIService registers the clrk apiserver as an aggregated

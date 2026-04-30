@@ -14,7 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/apoxy-dev/clrk/pkg/cmd/devtui"
+	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
 )
 
 // watcher drives rebuilds in --watch mode. It observes filesystem events on

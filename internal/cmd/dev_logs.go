@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/apoxy-dev/clrk/pkg/drivers"
+	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // newDevLogsCmd is `clrk dev logs [-f]`. Streams the docker logs of every
