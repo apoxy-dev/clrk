@@ -255,7 +255,13 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 		return fmt.Errorf("creating kine storage: %w", err)
 	}
 
-	srvBuilder := builder.NewServerBuilder()
+	// Opt into the apoxy-cli builder's CRD-style metadata.generation
+	// handling: PrepareForCreate seeds generation=1, PrepareForUpdate
+	// bumps it on Spec changes. Required for revision controllers that
+	// key off da.Generation (e.g. DaemonAgentRevisionReconciler), and
+	// for any controller using GenerationChangedPredicate.
+	// See APO-508.
+	srvBuilder := builder.NewServerBuilder().WithGenerationTracking()
 	for _, r := range o.resources {
 		srvBuilder = srvBuilder.WithResourceAndStorage(r, kineStore)
 	}
