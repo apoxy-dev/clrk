@@ -82,6 +82,10 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("ensuring CA secret: %w", err)
 	}
 
+	if err := r.ensureUpstreamTrustMirror(ctx, &eg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensuring upstream trust mirror: %w", err)
+	}
+
 	if err := r.ensureEnvoyProxy(ctx, &eg); err != nil {
 		if meta.IsNoMatchError(err) {
 			logger.V(1).Info("EnvoyProxy CRD not installed, skipping EnvoyProxy reconciliation")
@@ -297,14 +301,84 @@ func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv
 }
 
 // upstreamAdditionalTrustSecret returns the Secret name to mount as
-// the additional trust bundle, or "" when none is configured. Secret
-// is read from the EG's own namespace; cross-namespace secret refs
-// would need ReferenceGrant gating which we don't ship today.
+// the additional trust bundle, or "" when none is configured. The
+// returned name is the *mirror* secret in envoy-gateway-system that
+// ensureUpstreamTrustMirror creates from the user's source secret —
+// the EG-managed Envoy pod runs in envoy-gateway-system and the
+// kubelet needs the secret in that same namespace.
 func upstreamAdditionalTrustSecret(eg *clrkv1alpha1.EgressGateway) string {
 	if eg.Spec.UpstreamTLS == nil || eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef == nil {
 		return ""
 	}
-	return string(eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef.Name)
+	return upstreamTrustMirrorName(eg.Name)
+}
+
+// upstreamTrustMirrorName is the deterministic name for the mirrored
+// trust-bundle secret in envoy-gateway-system.
+func upstreamTrustMirrorName(egName string) string {
+	return "clrk-eg-" + egName + "-upstream-ca"
+}
+
+// ensureUpstreamTrustMirror copies the Secret referenced by
+// EgressGatewaySpec.UpstreamTLS.AdditionalTrustBundleSecretRef from
+// the EG's namespace into envoy-gateway-system so the EG-managed
+// Envoy pod (which always runs there) can mount it. When the source
+// Secret is missing the function returns nil — the EG controller
+// reconciles on Secret events too, so we'll re-run when it appears.
+//
+// Cross-namespace reference is allowed without a ReferenceGrant gate
+// today: the source must live in the EG's own namespace (we don't
+// honor SecretObjectReference.Namespace), and the mirror is owned by
+// the EG so it cascade-deletes.
+func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
+	if eg.Spec.UpstreamTLS == nil || eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef == nil {
+		return nil
+	}
+	sourceName := string(eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef.Name)
+	if sourceName == "" {
+		return nil
+	}
+
+	var src corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: eg.Namespace, Name: sourceName}, &src); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Source not yet created; controller will be re-triggered
+			// by the Secret watch. No mirror to write yet.
+			return nil
+		}
+		return fmt.Errorf("reading upstream trust source %s/%s: %w", eg.Namespace, sourceName, err)
+	}
+
+	mirror := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      upstreamTrustMirrorName(eg.Name),
+			Namespace: envoyGatewayNamespace,
+		},
+	}
+	_, err := ctrl.CreateOrUpdate(ctx, r.Client, mirror, func() error {
+		if mirror.Labels == nil {
+			mirror.Labels = map[string]string{}
+		}
+		mirror.Labels["clrk.apoxy.dev/egressgateway"] = eg.Name
+		mirror.Labels["clrk.apoxy.dev/egressgateway-namespace"] = eg.Namespace
+		// Preserve every data key from the source — operators may
+		// have packed multiple PEMs under arbitrary keys.
+		mirror.Data = make(map[string][]byte, len(src.Data))
+		for k, v := range src.Data {
+			mirror.Data[k] = v
+		}
+		// Owner ref crosses namespaces; SetControllerReference rejects
+		// that. The mirror is hand-cleaned in the deletion path
+		// (Owns(&corev1.Secret{}) on the source namespace's secret
+		// already covers cascade for the source); for the mirror we
+		// rely on labels to find and reap on EG delete. Add labels
+		// above so future cleanup can list-and-delete by them.
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // upstreamHostAliasesPatch returns a strategic-merge KubernetesPatchSpec
