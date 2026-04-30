@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +32,18 @@ var defaultIncludedContentTypes = []string{
 
 // egSink is a per-EgressGateway capture configuration: the resolved Sink
 // (OTLP or fallback slog), the body-capture cap, the content-type
-// allow-list, plus a snapshot of the spec fields we actually consume so
-// we can decide whether the EG changed in a way that warrants a rebuild.
+// allow-list, the AIProviderRoute matcher built from APRs attached to
+// this EG, plus a snapshot of the spec + APR list-version we use to
+// decide whether to rebuild on subsequent stream starts.
 type egSink struct {
 	sink            Sink
 	maxCaptureBytes int
 	includedTypes   []string
 	specSnapshot    *clrkv1alpha1.OTLPLogsSinkSpec
 	shutdown        func(context.Context) error
+
+	routes        *routeTable
+	routesVersion string
 }
 
 // sinkRegistry caches one egSink per EgressGateway, keyed by ns/name.
@@ -85,8 +90,21 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 		return nil, fmt.Errorf("get EgressGateway %s: %w", key, err)
 	}
 
+	// List APRs cluster-wide; a route in any namespace can attach to
+	// this EG via parentRef. The cached client backs this with an
+	// informer so the call is cheap. Pass routes to buildRouteTable
+	// only when the spec or APR set changed; otherwise reuse the
+	// existing cached entry.
+	var aprs clrkv1alpha1.AIProviderRouteList
+	if err := r.client.List(ctx, &aprs); err != nil {
+		return nil, fmt.Errorf("list AIProviderRoutes: %w", err)
+	}
+	aprVersion := aiproviderRoutesVersion(aprs.Items, key)
+
 	r.mu.Lock()
-	if hit, ok := r.by[key]; ok && reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) {
+	if hit, ok := r.by[key]; ok &&
+		reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) &&
+		hit.routesVersion == aprVersion {
 		r.mu.Unlock()
 		return hit, nil
 	}
@@ -100,6 +118,8 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build sink: %w", err)
 	}
+	built.routes = buildRouteTable(key.Namespace, key.Name, aprs.Items)
+	built.routesVersion = aprVersion
 
 	r.mu.Lock()
 	r.by[key] = built
@@ -115,6 +135,29 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 		}(prev.shutdown)
 	}
 	return built, nil
+}
+
+// aiproviderRoutesVersion fingerprints the list of APRs that attach to
+// the given EG. We only consider routes that pass the parentRef check
+// (irrelevant routes shouldn't trigger a rebuild). The fingerprint is
+// just sorted (name, resourceVersion) pairs; correctness only requires
+// that any meaningful change to the attached set produces a different
+// string.
+func aiproviderRoutesVersion(routes []clrkv1alpha1.AIProviderRoute, eg types.NamespacedName) string {
+	var parts []string
+	for _, r := range routes {
+		if !routeAttachesTo(r, eg.Namespace, eg.Name) {
+			continue
+		}
+		parts = append(parts, r.Namespace+"/"+r.Name+"@"+r.ResourceVersion)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	// Sort for determinism — list order from the cached client isn't
+	// guaranteed stable across calls.
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // shutdownAll tears down every cached sink. Best-effort: errors are

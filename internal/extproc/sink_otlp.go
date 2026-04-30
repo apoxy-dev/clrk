@@ -29,6 +29,10 @@ import (
 // Attribute keys clrk publishes that don't live in OTel semconv.
 // Anything semconv has a key for (http.*, server.*, url.*) is sourced
 // from the semconv package directly.
+//
+// gen_ai.* are OTel GenAI semconv keys. semconv/v1.26.0 doesn't ship
+// typed helpers for them yet, so we declare the strings here. Swap to
+// typed helpers once the upstream package adds them.
 const (
 	attrAgentKind      = "agent.kind"
 	attrAgentNamespace = "agent.namespace"
@@ -46,6 +50,23 @@ const (
 	attrBodyBytes      = "clrk.body.bytes"
 	attrBodyTruncated  = "clrk.body.truncated"
 	attrBodyB64        = "clrk.body.b64"
+
+	attrGenAISystem        = "gen_ai.system"
+	attrGenAIOperationName = "gen_ai.operation.name"
+	attrGenAIRequestModel  = "gen_ai.request.model"
+	attrGenAIResponseModel = "gen_ai.response.model"
+	attrGenAIInputTokens   = "gen_ai.usage.input_tokens"
+	attrGenAIOutputTokens  = "gen_ai.usage.output_tokens"
+	attrGenAIStream        = "gen_ai.response.stream"
+
+	attrAPRRouteMatched   = "clrk.aiproviderroute.matched"
+	attrAPRRouteName      = "clrk.aiproviderroute.name"
+	attrAPRRouteNamespace = "clrk.aiproviderroute.namespace"
+	attrBodyUsageVisible  = "clrk.body.usage_visible"
+
+	attrBudgetDenied    = "clrk.budget.denied"
+	attrBudgetDailyUsed = "clrk.budget.daily_used"
+	attrBudgetDailyMax  = "clrk.budget.daily_max"
 )
 
 // otlpSink fans out each captured Record to two OTLP signals:
@@ -179,7 +200,7 @@ func (s *otlpSink) Emit(r Record) {
 // so the back-link log carries the matching trace_id/span_id.
 func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	parentCtx := s.extractParent(context.Background(), r.RequestHeaders)
-	spanName := spanNameFor(d.method, d.host, d.path)
+	spanName := spanNameFor(r, d)
 
 	attrs := append(agentAttrs(r),
 		semconv.HTTPRequestMethodKey.String(d.method),
@@ -194,6 +215,8 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 		attribute.Bool(attrReqTruncated, r.RequestTruncated),
 		attribute.Bool(attrRespTruncated, r.ResponseTruncated),
 	)
+	attrs = appendGenAIAttrs(attrs, r)
+	attrs = appendAPRAttrs(attrs, r)
 
 	_, span := s.tracer.Start(parentCtx, spanName,
 		oteltrace.WithTimestamp(spanStart(r)),
@@ -260,8 +283,79 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 			otellog.String(attrSpanID, sc.SpanID().String()),
 		)
 	}
+	attrs = appendLogKVs(attrs, genAIAttrs(r))
+	attrs = appendLogKVs(attrs, aprAttrs(r))
 	rec.AddAttributes(attrs...)
 	s.logger.Emit(context.Background(), rec)
+}
+
+// genAIAttrs returns the gen_ai.* attribute slice for this record.
+// Empty when the host wasn't a known AI provider. UsageVisible is
+// only published as `clrk.body.usage_visible=false` when the response
+// was truncated AND the parser couldn't find usage — those are the
+// cases where bumping CaptureBody.MaxBytes would help.
+func genAIAttrs(r Record) []attribute.KeyValue {
+	if r.Provider == nil {
+		return nil
+	}
+	p := r.Provider
+	out := []attribute.KeyValue{
+		attribute.String(attrGenAISystem, p.System),
+	}
+	if p.Operation != "" {
+		out = append(out, attribute.String(attrGenAIOperationName, p.Operation))
+	}
+	if p.RequestModel != "" {
+		out = append(out, attribute.String(attrGenAIRequestModel, p.RequestModel))
+	}
+	if p.ResponseModel != "" {
+		out = append(out, attribute.String(attrGenAIResponseModel, p.ResponseModel))
+	}
+	if p.InputTokens > 0 {
+		out = append(out, attribute.Int64(attrGenAIInputTokens, p.InputTokens))
+	}
+	if p.OutputTokens > 0 {
+		out = append(out, attribute.Int64(attrGenAIOutputTokens, p.OutputTokens))
+	}
+	if p.StreamResponse {
+		out = append(out, attribute.Bool(attrGenAIStream, true))
+	}
+	// Surface the visibility-of-usage signal only when it's actionable:
+	// usage hidden behind truncation. Any other "absent" state (error
+	// response, stream) doesn't benefit from raising the byte cap.
+	if r.ResponseTruncated && !p.UsageVisible && !p.StreamResponse {
+		out = append(out, attribute.Bool(attrBodyUsageVisible, false))
+	}
+	return out
+}
+
+// appendGenAIAttrs is the slice-append form genAIAttrs callers use to
+// avoid one allocation when the record has provider info.
+func appendGenAIAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
+	return append(dst, genAIAttrs(r)...)
+}
+
+func aprAttrs(r Record) []attribute.KeyValue {
+	if r.MatchedRouteName == "" {
+		return nil
+	}
+	out := []attribute.KeyValue{
+		attribute.Bool(attrAPRRouteMatched, true),
+		attribute.String(attrAPRRouteNamespace, r.MatchedRouteNamespace),
+		attribute.String(attrAPRRouteName, r.MatchedRouteName),
+	}
+	if r.BudgetDenied {
+		out = append(out,
+			attribute.Bool(attrBudgetDenied, true),
+			attribute.Int64(attrBudgetDailyUsed, r.BudgetDailyUsed),
+			attribute.Int64(attrBudgetDailyMax, r.BudgetDailyMax),
+		)
+	}
+	return out
+}
+
+func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
+	return append(dst, aprAttrs(r)...)
 }
 
 // extractParent threads any inbound W3C traceparent through as the
@@ -396,16 +490,45 @@ func summaryLine(r Record, d derived) string {
 	if dur := durationMillis(r); dur >= 0 {
 		durTxt = strconv.Itoa(dur) + "ms"
 	}
-	return fmt.Sprintf("%s %s%s %d %s req=%dB resp=%dB",
+	base := fmt.Sprintf("%s %s%s %d %s req=%dB resp=%dB",
 		d.method, d.authority, d.path, d.status, durTxt, len(r.RequestBody), len(r.ResponseBody))
+	if r.Provider != nil {
+		// Acceptance criterion line:
+		//   provider=anthropic model=claude-3-5-sonnet input_tokens=42 output_tokens=128
+		base += fmt.Sprintf(" provider=%s", r.Provider.System)
+		if r.Provider.RequestModel != "" {
+			base += fmt.Sprintf(" model=%s", r.Provider.RequestModel)
+		}
+		if r.Provider.InputTokens > 0 {
+			base += fmt.Sprintf(" input_tokens=%d", r.Provider.InputTokens)
+		}
+		if r.Provider.OutputTokens > 0 {
+			base += fmt.Sprintf(" output_tokens=%d", r.Provider.OutputTokens)
+		}
+	}
+	if r.MatchedRouteName != "" {
+		base += fmt.Sprintf(" route=%s/%s", r.MatchedRouteNamespace, r.MatchedRouteName)
+	}
+	return base
 }
 
-func spanNameFor(method, host, path string) string {
+// spanNameFor follows OTel GenAI conventions when the request matched
+// a known provider: "<operation> <model>" (e.g. "chat gpt-4o"). Falls
+// back to the HTTP-style "<METHOD> <host>" otherwise.
+func spanNameFor(r Record, d derived) string {
+	if r.Provider != nil && r.Provider.Operation != "" {
+		if r.Provider.RequestModel != "" {
+			return r.Provider.Operation + " " + r.Provider.RequestModel
+		}
+		return r.Provider.Operation
+	}
+	method := d.method
 	if method == "" {
 		method = "REQUEST"
 	}
+	host := d.host
 	if host == "" {
-		host = path
+		host = d.path
 	}
 	if host == "" {
 		return method

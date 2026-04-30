@@ -14,15 +14,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"regexp"
 	"strings"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/apoxy-dev/clrk/internal/egidentity"
+	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 )
 
 // MetadataNamespace is the dynamic-metadata key carrying clrk PROXY v2 TLV
@@ -80,6 +86,27 @@ type Record struct {
 	ResponseBodyAt    time.Time
 	ResponseBody      []byte
 	ResponseTruncated bool
+
+	// Provider holds parsed AI-provider facts (gen_ai.* shape) when the
+	// request's :authority host matched a known provider. Nil for any
+	// other host.
+	Provider *parsers.ProviderInfo
+
+	// MatchedRouteNamespace / MatchedRouteName identify the
+	// AIProviderRoute that accepted this transaction; empty when no
+	// route attached to the calling EG matched.
+	MatchedRouteNamespace string
+	MatchedRouteName      string
+
+	// BudgetDenied is set when the matched route's TokenBudget caused
+	// us to short-circuit the request with an HTTP 429. The captured
+	// record will only have RequestHeaders populated in that case
+	// (response phases never ran).
+	BudgetDenied bool
+	// BudgetDailyUsed / BudgetDailyMax are the counter snapshot at the
+	// moment of the deny decision, attached for operator visibility.
+	BudgetDailyUsed int64
+	BudgetDailyMax  int64
 }
 
 // ServerOption configures the ext_proc Server.
@@ -100,6 +127,7 @@ type Server struct {
 	sinkOverride Sink
 
 	registry *sinkRegistry
+	budget   *budgetStore
 }
 
 // New constructs an ext_proc server. The client is used to look up
@@ -110,6 +138,7 @@ func New(c client.Client, opts ...ServerOption) *Server {
 	s := &Server{
 		client:   c,
 		registry: newSinkRegistry(c),
+		budget:   newBudgetStore(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -138,25 +167,40 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// per message — config changes between request and response of a
 	// single transaction would split the record, which is worse than
 	// using the start-of-stream config.
+	//
+	// Sink emission and registry-driven config (capture bounds, route
+	// table, EG identity) are independent: a test can use
+	// WithSinkOverride to capture emitted records while still letting
+	// the registry resolve routes + budget against a fake client. When
+	// the registry is unavailable (no client wired, EG missing), we
+	// fall back to slogSink for emission and skip route/budget logic.
 	var (
-		sink            Sink
-		maxCaptureBytes int
+		sink            Sink = s.sinkOverride
+		maxCaptureBytes int  = captureMaxBytesDefault
 		includedTypes   []string
+		routes          *routeTable
+		egKey           types.NamespacedName
 	)
-	if s.sinkOverride != nil {
-		sink = s.sinkOverride
-		maxCaptureBytes = captureMaxBytesDefault
-	} else {
+	if s.client != nil {
 		es, err := s.registry.get(ctx)
 		if err != nil {
-			logger.V(1).Info("Falling back to slog sink", "reason", err.Error())
-			sink = slogSink{}
-			maxCaptureBytes = captureMaxBytesDefault
+			if sink == nil {
+				logger.V(1).Info("Falling back to slog sink", "reason", err.Error())
+			}
 		} else {
-			sink = es.sink
+			if sink == nil {
+				sink = es.sink
+			}
 			maxCaptureBytes = es.maxCaptureBytes
 			includedTypes = es.includedTypes
+			routes = es.routes
+			if k, kerr := egidentity.MustFromContext(ctx); kerr == nil {
+				egKey = k
+			}
 		}
+	}
+	if sink == nil {
+		sink = slogSink{}
 	}
 
 	reqBytesLeft := maxCaptureBytes
@@ -167,11 +211,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		if err != nil {
 			rec.EndAt = time.Now()
 			if errors.Is(err, io.EOF) {
+				matched := enrichRecord(&rec, routes)
+				s.chargeBudget(matched, egKey, rec)
 				sink.Emit(rec)
 				return nil
 			}
 			// Client cancelled or transport error. Still emit whatever we
 			// captured before the break.
+			matched := enrichRecord(&rec, routes)
+			s.chargeBudget(matched, egKey, rec)
 			sink.Emit(rec)
 			return err
 		}
@@ -189,6 +237,28 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		case *extprocv3.ProcessingRequest_RequestHeaders:
 			rec.RequestHeadersAt = now
 			rec.RequestHeaders = headersToMap(m.RequestHeaders)
+			// Pre-flight TokenBudget check: if the matched route's
+			// daily counter is already over cap, return ImmediateResponse
+			// 429 instead of letting the request reach the upstream. The
+			// match here uses model="" because we haven't buffered the
+			// body yet — model-scoped rules can't enforce pre-flight by
+			// design (see routeTable.match).
+			if denied, used, max := s.evaluateBudget(routes, egKey, rec.RequestHeaders); denied != "" {
+				rec.BudgetDenied = true
+				rec.BudgetDailyUsed = used
+				rec.BudgetDailyMax = max
+				rec.MatchedRouteName = denied
+				if err := stream.Send(immediateResponse429("clrk: token budget exceeded for route " + denied)); err != nil {
+					rec.EndAt = time.Now()
+					enrichRecord(&rec, routes)
+					sink.Emit(rec)
+					return err
+				}
+				// Don't break — keep the stream up so Envoy can drain;
+				// the next Recv() will return EOF and we emit the record
+				// from the EOF branch above.
+				continue
+			}
 			resp = headersContinue(true)
 			// Force port 443 onto :authority when none was supplied. The
 			// dynamic_forward_proxy filter parses host:port off the
@@ -243,10 +313,168 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		}
 		if err := stream.Send(resp); err != nil {
 			rec.EndAt = time.Now()
+			matched := enrichRecord(&rec, routes)
+			s.chargeBudget(matched, egKey, rec)
 			sink.Emit(rec)
 			return err
 		}
 	}
+}
+
+// enrichRecord runs the provider parser on the captured headers/bodies
+// and, if a parser matched, asks the per-EG route table to identify
+// the AIProviderRoute that accepted the transaction. Returns the
+// matched routeRule (for downstream budget charging) or nil. Both
+// outcomes are no-ops when the request didn't reach a known provider
+// host or when no APR is attached to the calling EG.
+//
+// Called once per stream, just before sink.Emit, so partial-capture
+// records (truncated bodies) still attempt parsing.
+func enrichRecord(rec *Record, routes *routeTable) *routeRule {
+	host, _ := splitHostPort(rec.RequestHeaders[":authority"])
+	if parser := parsers.For(host); parser != nil {
+		rec.Provider = parser.Parse(parsers.Input{
+			Method:        rec.RequestHeaders[":method"],
+			Path:          rec.RequestHeaders[":path"],
+			ReqHeaders:    rec.RequestHeaders,
+			RespHeaders:   rec.ResponseHeaders,
+			ReqBody:       rec.RequestBody,
+			ReqTruncated:  rec.RequestTruncated,
+			RespBody:      rec.ResponseBody,
+			RespTruncated: rec.ResponseTruncated,
+		})
+	}
+	if routes == nil || rec.Provider == nil {
+		return nil
+	}
+	rr := routes.match(rec.Provider.System, rec.RequestHeaders[":path"], rec.Provider.RequestModel)
+	if rr == nil {
+		return nil
+	}
+	rec.MatchedRouteNamespace = rr.routeNamespace
+	rec.MatchedRouteName = rr.routeName
+	return rr
+}
+
+// evaluateBudget runs the pre-flight TokenBudget check at request-
+// headers time. Returns ("", 0, 0) when nothing should block the
+// request; otherwise returns the route name plus current daily total
+// and cap, and the caller is expected to short-circuit with a 429.
+//
+// Pre-flight matches with model="" because the request body hasn't
+// been buffered yet — model-scoped rules don't enforce here (see
+// routeTable.match for the rationale).
+func (s *Server) evaluateBudget(routes *routeTable, eg types.NamespacedName, headers map[string]string) (route string, used, max int64) {
+	if s.budget == nil || routes == nil || eg.Name == "" {
+		return "", 0, 0
+	}
+	host, _ := splitHostPort(headers[":authority"])
+	system := parsers.SystemFor(host)
+	if system == "" {
+		return "", 0, 0
+	}
+	rr := routes.match(system, headers[":path"], "")
+	if rr == nil || rr.tokenBudget == nil || rr.tokenBudget.MaxTokensPerDay == nil {
+		return "", 0, 0
+	}
+	cap := *rr.tokenBudget.MaxTokensPerDay
+	if cap <= 0 {
+		return "", 0, 0
+	}
+	bk := budgetKey{
+		egNamespace:    eg.Namespace,
+		egName:         eg.Name,
+		routeNamespace: rr.routeNamespace,
+		routeName:      rr.routeName,
+	}
+	if s.budget.Allow(bk, cap) {
+		return "", 0, 0
+	}
+	return rr.routeName, s.budget.snapshot(bk), cap
+}
+
+// chargeBudget increments the daily counter for the matched route by
+// the parsed input+output token total. No-op when the route has no
+// TokenBudget, the parser found no usage, or the request was denied
+// at pre-flight (in which case nothing reached the upstream).
+func (s *Server) chargeBudget(rr *routeRule, eg types.NamespacedName, rec Record) {
+	if s.budget == nil || rr == nil || rr.tokenBudget == nil {
+		return
+	}
+	if rec.BudgetDenied || rec.Provider == nil {
+		return
+	}
+	tokens := rec.Provider.InputTokens + rec.Provider.OutputTokens
+	if tokens <= 0 {
+		return
+	}
+	s.budget.Add(budgetKey{
+		egNamespace:    eg.Namespace,
+		egName:         eg.Name,
+		routeNamespace: rr.routeNamespace,
+		routeName:      rr.routeName,
+	}, tokens)
+}
+
+// immediateResponse429 builds an ext_proc ImmediateResponse that
+// short-circuits the upstream call with HTTP 429 and a small JSON
+// body explaining the deny reason. Envoy synthesizes the client
+// response from this; the client sees a 429 immediately.
+func immediateResponse429(detail string) *extprocv3.ProcessingResponse {
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &extprocv3.ImmediateResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
+				Body:   []byte(`{"error":` + jsonString(detail) + `}`),
+				Headers: &extprocv3.HeaderMutation{
+					SetHeaders: []*corev3.HeaderValueOption{{
+						Header: &corev3.HeaderValue{Key: "content-type", Value: "application/json"},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// jsonString quotes s as a JSON string. Tiny helper so we don't pull
+// encoding/json in just to format an error body.
+func jsonString(s string) string {
+	out := make([]byte, 0, len(s)+2)
+	out = append(out, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"', '\\':
+			out = append(out, '\\', c)
+		case '\n':
+			out = append(out, '\\', 'n')
+		case '\r':
+			out = append(out, '\\', 'r')
+		case '\t':
+			out = append(out, '\\', 't')
+		default:
+			if c < 0x20 {
+				continue
+			}
+			out = append(out, c)
+		}
+	}
+	out = append(out, '"')
+	return string(out)
+}
+
+// splitHostPort returns host without port from an HTTP/2 :authority,
+// stripping IPv6 brackets. Distinct from sink_otlp.splitAuthority,
+// which returns host+port; we only need the host here.
+func splitHostPort(authority string) (string, string) {
+	if authority == "" {
+		return "", ""
+	}
+	host, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		return strings.Trim(authority, "[]"), ""
+	}
+	return host, port
 }
 
 func headersToMap(h *extprocv3.HttpHeaders) map[string]string {
