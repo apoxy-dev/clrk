@@ -1391,6 +1391,20 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref common.ReferenceC
 				Description: "CredentialInjectionSpec defines the desired state of a CredentialInjectionPolicy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"parentRefs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or EgressGateway listeners. The proxy applies the credential to traffic matching the referenced parent.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1.ParentReference"),
+									},
+								},
+							},
+						},
+					},
 					"secretRef": {
 						SchemaProps: spec.SchemaProps{
 							Description: "SecretRef points at a K8s Secret containing the credential.",
@@ -1434,11 +1448,11 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref common.ReferenceC
 						},
 					},
 				},
-				Required: []string{"secretRef", "target"},
+				Required: []string{"parentRefs", "secretRef", "target"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig", "sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig", "sigs.k8s.io/gateway-api/apis/v1.ParentReference", "sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"},
 	}
 }
 

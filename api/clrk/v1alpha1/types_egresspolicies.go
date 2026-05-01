@@ -30,6 +30,19 @@ type ProviderAuthConfig struct {
 
 // CredentialInjectionSpec defines the desired state of a CredentialInjectionPolicy.
 type CredentialInjectionSpec struct {
+	// ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or
+	// EgressGateway listeners. The proxy applies the credential to
+	// traffic matching the referenced parent.
+	//
+	// Match semantics by parent kind:
+	//   - AIProviderRoute: applies when the request matches that APR's
+	//     rules (provider + endpoint + model gates).
+	//   - MCPRoute: applies when the request matches that route
+	//     (no-op until MCPRoute consumption ships).
+	//   - EgressGateway: catch-all for any traffic on the gateway that
+	//     no narrower policy claimed.
+	ParentRefs []gwapiv1.ParentReference `json:"parentRefs"`
+
 	// SecretRef points at a K8s Secret containing the credential.
 	SecretRef gwapiv1.SecretObjectReference `json:"secretRef"`
 
