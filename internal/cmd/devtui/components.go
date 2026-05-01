@@ -10,6 +10,15 @@ import (
 // orchestration log (slog output redirected into the TUI).
 const ClrkSource = "cli"
 
+// OtelLogsSource and OtelTracesSource are the synthetic component
+// names for the in-process OTLP receiver panes. Records pushed via
+// prog.SendLog under these names land in their dedicated sidebar
+// panes instead of being mixed into the controller-manager pane.
+const (
+	OtelLogsSource   = "otel-logs"
+	OtelTracesSource = "otel-traces"
+)
+
 // maxLogLines bounds each component's ring buffer. Older lines are dropped
 // when the buffer fills.
 const maxLogLines = 2000

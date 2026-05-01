@@ -62,3 +62,14 @@ func (p *Program) SendWatcher(event WatcherEvent, prefix string, dur time.Durati
 	}
 	p.p.Send(msg)
 }
+
+// MarkSyntheticReady flips a synthetic component (e.g. otel-logs) to
+// StatusReady so its sidebar glyph shows green from the start. Use
+// this for components that have no driver lifecycle to track —
+// they're "ready" the moment the TUI is up.
+func MarkSyntheticReady(p *Program, name string) {
+	if p == nil {
+		return
+	}
+	p.SetStatus(name, StatusReady)
+}

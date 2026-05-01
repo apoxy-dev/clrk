@@ -71,6 +71,9 @@ func runArgs(name, image string, o *Options) []string {
 	for _, host := range sortedIntKeys(o.Ports) {
 		args = append(args, "--publish", strconv.Itoa(host)+":"+strconv.Itoa(o.Ports[host]))
 	}
+	for _, k := range sortedStringKeys(o.ExtraHosts) {
+		args = append(args, "--add-host", k+":"+o.ExtraHosts[k])
+	}
 
 	args = append(args, image)
 	args = append(args, o.Args...)

@@ -21,10 +21,16 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/apoxy-dev/clrk/internal/cmd/devotel"
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
 	"github.com/apoxy-dev/clrk/internal/drivers"
 	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
 )
+
+// devOtelPort is the host TCP port the in-process OTLP/HTTP receiver
+// listens on. Hardcoded to keep `clrk dev` flag-free; the first time
+// it conflicts with another tool we'll expose --otel-port.
+const devOtelPort = 14318
 
 type devOpts struct {
 	watch           bool
@@ -38,6 +44,9 @@ type devOpts struct {
 	applyPaths      []string
 	applyRecursive  bool
 	reloadTar       []string
+	secrets         []string
+	parsedSecrets   []secretSpec
+	otelEndpoint    string
 }
 
 func newDevCmd() *cobra.Command {
@@ -63,6 +72,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
 	cmd.Flags().StringArrayVar(&o.reloadTar, "reload-tar", nil, "Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is `worker[-N]` or `controller-manager`. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar")
+	cmd.Flags().StringArrayVar(&o.secrets, "secret", nil, "Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with `_` → `-` (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.")
 	cmd.AddCommand(newDevStatusCmd())
 	cmd.AddCommand(newDevLogsCmd())
 	cmd.AddCommand(newDevWaitReadyCmd())
@@ -75,6 +85,17 @@ func runDev(ctx context.Context, o *devOpts) error {
 	}
 	if err := os.MkdirAll(o.dataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
+	}
+
+	// Validate --secret early so a typo or missing env var fails before
+	// we pull images and start k3s. Resolved values stay on devOpts for
+	// bringUp to apply once the cluster is reachable.
+	for _, raw := range o.secrets {
+		s, err := parseDevSecretFlag(raw)
+		if err != nil {
+			return err
+		}
+		o.parsedSecrets = append(o.parsedSecrets, s)
 	}
 
 	// Refuse to start a second `clrk dev` against the same dataDir.
@@ -106,14 +127,28 @@ func runDev(ctx context.Context, o *devOpts) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if o.tui {
-		return runDevTUI(ctx, o)
+	// Bring up the docker network and the in-process OTLP receiver
+	// before any container starts so controller-manager can dial
+	// `host.docker.internal:14318` on its first tick. Receiver
+	// lifetime is tied to ctx — when the user Ctrl-C's, the listener
+	// closes via the goroutine inside devotel.Start.
+	if err := drivers.EnsureNetwork(ctx); err != nil {
+		return fmt.Errorf("ensuring docker network: %w", err)
 	}
-	return runDevPlain(ctx, o)
+	receiver, err := devotel.Start(ctx, fmt.Sprintf("0.0.0.0:%d", devOtelPort))
+	if err != nil {
+		return fmt.Errorf("starting OTel receiver on :%d: %w", devOtelPort, err)
+	}
+	o.otelEndpoint = fmt.Sprintf("http://host.docker.internal:%d", devOtelPort)
+
+	if o.tui {
+		return runDevTUI(ctx, o, receiver)
+	}
+	return runDevPlain(ctx, o, receiver)
 }
 
 // runDevPlain is the original streaming-stdout path, kept for CI / non-TTY.
-func runDevPlain(ctx context.Context, o *devOpts) error {
+func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) error {
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 	state, err := bringUp(ctx, o, nil)
 	if err != nil {
@@ -128,6 +163,10 @@ func runDevPlain(ctx context.Context, o *devOpts) error {
 		streamLogs(ctx, w.Name())
 	}
 
+	go forwardOtel(ctx, receiver, func(name, line string) {
+		fmt.Fprintf(os.Stdout, "[%s] %s\n", name, line)
+	})
+
 	if o.watch {
 		state.startWatcher(ctx, o, nil)
 	}
@@ -139,6 +178,22 @@ func runDevPlain(ctx context.Context, o *devOpts) error {
 	<-ctx.Done()
 	slog.Info("Shutting down")
 	return nil
+}
+
+// forwardOtel pumps decoded OTLP records into sink, tagged with the
+// pane / prefix name. Caller picks the sink (TUI or stdout); the
+// select loop is identical regardless.
+func forwardOtel(ctx context.Context, receiver *devotel.Receiver, sink func(name, line string)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case rec := <-receiver.Logs():
+			sink(devtui.OtelLogsSource, devotel.FormatLog(rec))
+		case sp := <-receiver.Traces():
+			sink(devtui.OtelTracesSource, devotel.FormatSpan(sp))
+		}
+	}
 }
 
 // startReloadWatchers parses --reload-tar flags and spawns one watcher
@@ -158,7 +213,7 @@ func startReloadWatchers(ctx context.Context, o *devOpts) error {
 
 // runDevTUI orchestrates components in a background goroutine while the TUI
 // renders status and per-component logs on the main goroutine.
-func runDevTUI(ctx context.Context, o *devOpts) error {
+func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) error {
 	componentNames := []string{
 		drivers.K3sContainerName,
 		drivers.ControllerManagerContainerName,
@@ -166,8 +221,11 @@ func runDevTUI(ctx context.Context, o *devOpts) error {
 	for i := 0; i < o.workers; i++ {
 		componentNames = append(componentNames, drivers.NewWorkerDriver(i).Name())
 	}
+	componentNames = append(componentNames, devtui.OtelLogsSource, devtui.OtelTracesSource)
 
 	prog := devtui.New(componentNames)
+	devtui.MarkSyntheticReady(prog, devtui.OtelLogsSource)
+	devtui.MarkSyntheticReady(prog, devtui.OtelTracesSource)
 
 	prevSlog := slog.Default()
 	slog.SetDefault(slog.New(devtui.NewSlogHandler(prog, slog.LevelInfo)))
@@ -191,6 +249,9 @@ func runDevTUI(ctx context.Context, o *devOpts) error {
 		for _, w := range state.workers {
 			go streamLogsTo(orchestrateCtx, prog, w.Name())
 		}
+		go forwardOtel(orchestrateCtx, receiver, func(name, line string) {
+			prog.SendLog(name, line, devtui.StreamStdout)
+		})
 		if o.watch {
 			state.startWatcher(orchestrateCtx, o, prog)
 		}
@@ -337,6 +398,11 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	if err := bootstrapDefaultWorkerPool(ctx, state.k3s.HostKubeconfigPath()); err != nil {
 		return state, fmt.Errorf("bootstrapping default WorkerPool: %w", err)
 	}
+	if len(o.parsedSecrets) > 0 {
+		if err := applySecretSpecs(ctx, state.k3s.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {
+			return state, fmt.Errorf("applying --secret: %w", err)
+		}
+	}
 	if len(o.applyPaths) > 0 {
 		if err := applyManifests(ctx, state.k3s.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
@@ -352,18 +418,32 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 // is intentionally NOT here — it's idempotent on bringUp and a reload skips
 // it entirely since k3s already has those records.
 func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
+	env := map[string]string{
+		"KUBECONFIG": "/var/lib/clrk/kubeconfig",
+		// Tolerate duplicate Envoy protobuf registrations: envoy-go and
+		// envoyproxy/go-control-plane both register TLS proto files
+		// because envoyproxy/gateway's extension proto transitively
+		// imports go-control-plane's TLS types. Matches the pattern
+		// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
+		"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
+	}
+	if o.otelEndpoint != "" {
+		// Default OTLP target for any EgressGateway whose Spec.OTLP.Endpoint
+		// is empty — see internal/extproc/sinks.go effectiveOTLP. Production
+		// controller-manager Deployments don't set this env, so behaviour
+		// there is unchanged.
+		env["CLRK_DEV_OTEL_ENDPOINT"] = o.otelEndpoint
+	}
 	opts := []drivers.Option{
 		drivers.WithImage(o.controllerImage),
 		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
-		drivers.WithEnv(map[string]string{
-			"KUBECONFIG": "/var/lib/clrk/kubeconfig",
-			// Tolerate duplicate Envoy protobuf registrations: envoy-go and
-			// envoyproxy/go-control-plane both register TLS proto files
-			// because envoyproxy/gateway's extension proto transitively
-			// imports go-control-plane's TLS types. Matches the pattern
-			// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
-			"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
-		}),
+		drivers.WithEnv(env),
+		// Resolve `host.docker.internal` to the docker bridge IP so the
+		// controller-manager can dial the in-process devotel receiver
+		// the host runs. macOS Docker Desktop already publishes this
+		// name; the explicit add-host makes the same name work on
+		// Linux without a config-file edit.
+		drivers.WithExtraHost("host.docker.internal", "host-gateway"),
 		drivers.WithArgs(
 			"--db=/var/lib/clrk/data.db",
 			"--bind-addr=0.0.0.0",

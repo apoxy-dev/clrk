@@ -32,6 +32,7 @@ type Options struct {
 	Volumes     map[string]string
 	Labels      map[string]string
 	Ports       map[int]int
+	ExtraHosts  map[string]string
 }
 
 // Option configures driver behavior.
@@ -40,10 +41,11 @@ type Option func(*Options)
 // DefaultOptions returns an empty Options struct with maps pre-allocated.
 func DefaultOptions() *Options {
 	return &Options{
-		Env:     map[string]string{},
-		Volumes: map[string]string{},
-		Labels:  map[string]string{},
-		Ports:   map[int]int{},
+		Env:        map[string]string{},
+		Volumes:    map[string]string{},
+		Labels:     map[string]string{},
+		Ports:      map[int]int{},
+		ExtraHosts: map[string]string{},
 	}
 }
 
@@ -86,6 +88,13 @@ func WithLabel(key, value string) Option {
 // WithPort adds a host:container port publish mapping.
 func WithPort(host, container int) Option {
 	return func(o *Options) { o.Ports[host] = container }
+}
+
+// WithExtraHost adds an /etc/hosts entry inside the container.
+// The address may be a literal IP or the docker-special token
+// `host-gateway` (resolves to the host bridge address).
+func WithExtraHost(name, address string) Option {
+	return func(o *Options) { o.ExtraHosts[name] = address }
 }
 
 // Apply runs the option funcs in order and returns the resulting Options.

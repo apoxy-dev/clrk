@@ -136,10 +136,15 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 }
 
 // WithEndpointURL on both exporters already derives insecure-mode from
-// the http:// scheme — no separate WithInsecure needed.
+// the http:// scheme — no separate WithInsecure needed. We always
+// append the signal-specific path (`/v1/logs`, `/v1/traces`) when the
+// configured endpoint has no path or just `/` so users can write
+// `Endpoint: http://otel-collector:4318` without remembering to
+// enumerate per-signal suffixes. Existing endpoints that already
+// include a non-trivial path are left untouched.
 
 func logsExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlploghttp.Option {
-	opts := []otlploghttp.Option{otlploghttp.WithEndpointURL(spec.Endpoint)}
+	opts := []otlploghttp.Option{otlploghttp.WithEndpointURL(endpointForSignal(spec.Endpoint, "/v1/logs"))}
 	if len(spec.Headers) > 0 {
 		opts = append(opts, otlploghttp.WithHeaders(spec.Headers))
 	}
@@ -147,11 +152,28 @@ func logsExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlploghttp.Optio
 }
 
 func tracesExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlptracehttp.Option {
-	opts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(spec.Endpoint)}
+	opts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpointForSignal(spec.Endpoint, "/v1/traces"))}
 	if len(spec.Headers) > 0 {
 		opts = append(opts, otlptracehttp.WithHeaders(spec.Headers))
 	}
 	return opts
+}
+
+// endpointForSignal appends the signal-specific path when the
+// configured endpoint has no path or only the root `/`. Required
+// because otlploghttp/otlptracehttp WithEndpointURL uses the URL's
+// Path verbatim — a bare `http://host:4318` ends up POSTing to `/`,
+// which collectors return 404 for.
+func endpointForSignal(endpoint, signalPath string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return endpoint
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = signalPath
+		return u.String()
+	}
+	return endpoint
 }
 
 // derived caches the request/response fields parsed once per Emit so

@@ -13,22 +13,22 @@ parser + **proxy-side credential injection** stack:
   `gen_ai.*` attributes, and the controller-manager logs a one-line
   summary.
 
-## Setup (one-time)
-
-The `anthropic-credentials` Secret is **operator-applied**, never
-committed to manifests. This is the architectural rule: API keys live
-on the proxy side, never inside agent specs.
-
-```bash
-kubectl create secret generic anthropic-credentials \
-  --from-literal=api-key="$ANTHROPIC_API_KEY"
-```
-
 ## Run under `clrk dev`
 
+The Anthropic API key is **never** put on the agent. The proxy injects
+it on egress via `CredentialInjectionPolicy`. `clrk dev --secret`
+reads the key from the host shell env, server-side-applies it as a
+Secret in `default`, and only then runs `--apply` on the manifests:
+
 ```bash
-clrk dev --apply _examples/echo-bot/manifests
+ANTHROPIC_API_KEY=sk-ant-... clrk dev \
+  --apply _examples/echo-bot/manifests \
+  --secret anthropic-credentials=ANTHROPIC_API_KEY:api-key
 ```
+
+The `--secret` argument shape is `NAME=ENVVAR[:KEY]`. Without `:KEY`
+the key defaults to `ENVVAR` lowercased with `_` → `-`. Multiple
+`--secret` flags sharing a `NAME` merge into one Secret.
 
 ## What you should see
 
@@ -36,14 +36,17 @@ clrk dev --apply _examples/echo-bot/manifests
   (GatewayClass, EnvoyProxy, Gateway) ready.
 - `kubectl get secret clrk-egressgateway-ca-echo-bot` — the per-EG
   MITM CA.
-- `kubectl logs -l apiserver-control=controller-manager -n default \
-   | grep extproc.summary` — one captured record per echo-bot poll:
+- TUI sidebar shows two new panes: `otel-logs` and `otel-traces`.
+  After the first echo-bot cycle, `otel-logs` carries one line per
+  call:
   ```
-  INFO extproc.summary provider=anthropic operation=chat
-       model=claude-3-5-haiku-20241022
-       input_tokens=12 output_tokens=… status=200
-       agent.name=echo-bot route=anthropic
+  POST api.anthropic.com/v1/messages 200 540ms provider=anthropic
+       model=claude-haiku-4-5 input_tokens=12 output_tokens=24
+       route=default/anthropic trace=…
   ```
+  `otel-traces` carries the matching span. The same line *no longer*
+  appears in the controller-manager pane — the dev OTLP receiver
+  handles it instead of slogSink.
 - `kubectl logs -l clrk.apoxy.dev/agent=echo-bot` — `cat /tmp/resp.json`
   prints Anthropic's response body.
 

@@ -3,6 +3,7 @@ package extproc
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -15,6 +16,17 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 )
+
+// devOTLPEndpointEnv is set by `clrk dev` on the controller-manager
+// container. When per-EG OTLP endpoint is empty and this env is set,
+// the registry routes records to the dev receiver instead of slogSink.
+// Production deployments don't set this env, so behaviour is unchanged.
+const devOTLPEndpointEnv = "CLRK_DEV_OTEL_ENDPOINT"
+
+// devOTLPEndpoint is captured once at process start. The env doesn't
+// change at runtime; reading it on every per-stream sinkRegistry.get
+// would be needless work.
+var devOTLPEndpoint = strings.TrimSpace(os.Getenv(devOTLPEndpointEnv))
 
 // sinkShutdownTimeout bounds how long we wait for a replaced sink's
 // background workers to flush during cache rebuild. OTLP exporters use
@@ -192,7 +204,8 @@ func (r *sinkRegistry) shutdownAll(ctx context.Context) {
 }
 
 // buildEgSink builds a fresh egSink for the given EG spec. Picks OTLP
-// when an endpoint is configured, falls back to slogSink otherwise.
+// when an endpoint is configured (either on the EG or via the dev
+// CLRK_DEV_OTEL_ENDPOINT env), falls back to slogSink otherwise.
 func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, error) {
 	maxBytes := captureMaxBytesDefault
 	var included []string
@@ -215,8 +228,12 @@ func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, 
 		specSnapshot:    eg.Spec.OTLP.DeepCopy(),
 	}
 
-	if eg.Spec.OTLP != nil && eg.Spec.OTLP.Endpoint != "" {
-		sink, shutdown, err := newOTLPSink(ctx, *eg.Spec.OTLP)
+	if endpoint := effectiveOTLPEndpoint(eg.Spec.OTLP); endpoint != "" {
+		exportSpec := clrkv1alpha1.OTLPLogsSinkSpec{Endpoint: endpoint}
+		if eg.Spec.OTLP != nil {
+			exportSpec.Headers = eg.Spec.OTLP.Headers
+		}
+		sink, shutdown, err := newOTLPSink(ctx, exportSpec)
 		if err != nil {
 			return nil, fmt.Errorf("otlp sink: %w", err)
 		}
@@ -227,6 +244,17 @@ func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, 
 
 	out.sink = slogSink{}
 	return out, nil
+}
+
+// effectiveOTLPEndpoint returns the URL to dial. Per-EG config always
+// wins. When the EG didn't set an endpoint and clrk dev is running
+// (devOTLPEndpoint is set), the dev receiver is used so capture lands
+// in the TUI's otel panes instead of the controller-manager pane.
+func effectiveOTLPEndpoint(spec *clrkv1alpha1.OTLPLogsSinkSpec) string {
+	if spec != nil && spec.Endpoint != "" {
+		return spec.Endpoint
+	}
+	return devOTLPEndpoint
 }
 
 func lowerAll(in []string) []string {
