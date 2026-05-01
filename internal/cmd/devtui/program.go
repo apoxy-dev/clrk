@@ -11,10 +11,24 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// preRunQueueSize bounds the number of messages buffered before Run()
+// starts draining. Sized to absorb the bring-up burst (a couple of
+// status flips per component plus early slog records) without dropping;
+// once Run is up the forwarder keeps pace with tea.Program.
+const preRunQueueSize = 1024
+
 // Program wraps a tea.Program with typed senders so callers don't need to
 // import bubbletea directly.
+//
+// All Send* methods are non-blocking. They post to a buffered queue that
+// a single forwarder drains into tea.Program once Run() starts its event
+// loop. tea.Program.Send is itself blocking on an unbuffered channel
+// until Run() begins reading — funneling through the buffer here keeps
+// callers (slog handler, orchestrator goroutines) from deadlocking each
+// other during bring-up.
 type Program struct {
-	p *tea.Program
+	p     *tea.Program
+	queue chan tea.Msg
 }
 
 // New constructs a TUI program for the given component names. The clrk
@@ -25,13 +39,16 @@ func New(componentNames []string) *Program {
 		m,
 		tea.WithAltScreen(),
 	)
-	return &Program{p: p}
+	return &Program{
+		p:     p,
+		queue: make(chan tea.Msg, preRunQueueSize),
+	}
 }
 
-// Run blocks until the user quits or ctx is cancelled. It's safe to call
-// Send* from any goroutine before, during, and after Run, but messages sent
-// after Run returns are dropped.
+// Run blocks until the user quits or ctx is cancelled. Send* calls made
+// before Run are buffered and replayed once the event loop is up.
 func (p *Program) Run(ctx context.Context) error {
+	go p.forward(ctx)
 	go func() {
 		<-ctx.Done()
 		p.p.Quit()
@@ -40,18 +57,44 @@ func (p *Program) Run(ctx context.Context) error {
 	return err
 }
 
+// forward drains the pre-Run buffer (and the steady-state stream) into
+// tea.Program. tea.Program.Send blocks on its unbuffered msgs channel
+// until the event loop is reading; serializing through this single
+// goroutine isolates that blocking from every Send* caller.
+func (p *Program) forward(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-p.queue:
+			p.p.Send(msg)
+		}
+	}
+}
+
+// send is the single chokepoint every public Send* helper funnels
+// through. Drops on a full queue rather than block — under normal load
+// the 1024-slot buffer is more than enough; if a pathological burst
+// fills it the dropped message is preferable to wedging the caller.
+func (p *Program) send(msg tea.Msg) {
+	select {
+	case p.queue <- msg:
+	default:
+	}
+}
+
 // Quit asks the program to exit gracefully. Idempotent.
 func (p *Program) Quit() { p.p.Quit() }
 
 // SetStatus updates a component's status glyph. The error string is not
 // rendered — failures are surfaced via slog into the cli pane.
 func (p *Program) SetStatus(name string, status Status) {
-	p.p.Send(ComponentStatusMsg{Name: name, Status: status})
+	p.send(ComponentStatusMsg{Name: name, Status: status})
 }
 
 // SendLog appends a line to a component's buffer.
 func (p *Program) SendLog(source, line string, stream LogStream) {
-	p.p.Send(LogLineMsg{Source: source, Line: line, Stream: stream})
+	p.send(LogLineMsg{Source: source, Line: line, Stream: stream})
 }
 
 // SendWatcher reports a watcher lifecycle event.
@@ -60,7 +103,7 @@ func (p *Program) SendWatcher(event WatcherEvent, prefix string, dur time.Durati
 	if err != nil {
 		msg.Err = err.Error()
 	}
-	p.p.Send(msg)
+	p.send(msg)
 }
 
 // MarkSyntheticReady flips a synthetic component (e.g. otel-logs) to
