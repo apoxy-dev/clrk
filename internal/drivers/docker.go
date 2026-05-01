@@ -19,13 +19,27 @@ const ownerLabel = "dev.apoxy.clrk/owner=clrk"
 
 // EnsureNetwork creates the shared docker network if it does not already
 // exist. Safe to call concurrently; the docker daemon serializes creates.
+//
+// IPv6 is enabled on the bridge so Envoy's DFP cluster can reach AAAA-only
+// hops. If we find a pre-existing v4-only `clrk` network (e.g. created by
+// an older clrk dev), tear it down and recreate — the alternative is
+// silent ENETUNREACH on every IPv6 upstream.
 func EnsureNetwork(ctx context.Context) error {
-	if err := exec.CommandContext(ctx, "docker", "network", "inspect", NetworkName).Run(); err == nil {
-		return nil
+	out, err := exec.CommandContext(ctx, "docker", "network", "inspect", "-f", "{{.EnableIPv6}}", NetworkName).Output()
+	if err == nil {
+		if strings.TrimSpace(string(out)) == "true" {
+			return nil
+		}
+		if rmOut, rmErr := exec.CommandContext(ctx, "docker", "network", "rm", NetworkName).CombinedOutput(); rmErr != nil {
+			return fmt.Errorf("removing v4-only docker network %q (detach attached containers first): %w: %s", NetworkName, rmErr, bytes.TrimSpace(rmOut))
+		}
 	}
-	out, err := exec.CommandContext(ctx, "docker", "network", "create", NetworkName).CombinedOutput()
+	createOut, err := exec.CommandContext(ctx, "docker", "network", "create",
+		"--ipv6",
+		"--subnet", "fd00:dead:beef::/64",
+		NetworkName).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("creating docker network %q: %w: %s", NetworkName, err, bytes.TrimSpace(out))
+		return fmt.Errorf("creating docker network %q: %w: %s", NetworkName, err, bytes.TrimSpace(createOut))
 	}
 	return nil
 }

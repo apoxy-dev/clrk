@@ -115,6 +115,14 @@ func (d *K3sDriver) Start(ctx context.Context, opts ...Option) (string, error) {
 		"--write-kubeconfig-mode=644",
 		"--tls-san="+K3sContainerName,
 		"--tls-san=localhost",
+		// Dual-stack so envoy pods can reach AAAA-only or AAAA-preferred
+		// upstreams (api.anthropic.com etc.). Pairs with EnsureNetwork's
+		// IPv6 bridge — without both, pod-side ENETUNREACH on every v6
+		// destination. ULA pod/service CIDRs; outbound v6 NATs through
+		// the docker bridge.
+		"--cluster-cidr=10.42.0.0/16,fd00:42::/56",
+		"--service-cidr=10.43.0.0/16,fd00:43::/112",
+		"--flannel-ipv6-masq",
 	)
 
 	if _, err := runDocker(ctx, args...); err != nil {
