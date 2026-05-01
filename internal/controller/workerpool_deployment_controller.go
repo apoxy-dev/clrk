@@ -133,6 +133,26 @@ func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.Work
 		podTemplate.Labels[k] = v
 	}
 
+	// Inject CLRK_POOL_NAME into every container in the template via
+	// downward API off the workerpool label we just stamped. The worker
+	// binary reads this to advertise itself into WorkerPool.status.workers.
+	// Skipped per-container if the operator already set CLRK_POOL_NAME
+	// explicitly (manual override wins).
+	for i := range podTemplate.Spec.Containers {
+		c := &podTemplate.Spec.Containers[i]
+		if hasEnv(c.Env, "CLRK_POOL_NAME") {
+			continue
+		}
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name: "CLRK_POOL_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.labels['clrk.apoxy.dev/workerpool']",
+				},
+			},
+		})
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      wp.Name + "-workers",
@@ -171,6 +191,15 @@ func (r *WorkerPoolDeploymentReconciler) desiredService(wp *clrkv1alpha1.WorkerP
 			Type: corev1.ServiceTypeClusterIP,
 		},
 	}
+}
+
+func hasEnv(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *WorkerPoolDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {

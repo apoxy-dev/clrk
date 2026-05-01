@@ -50,6 +50,9 @@ func main() {
 	}
 
 	poolName := os.Getenv("CLRK_POOL_NAME")
+	if poolName == "" {
+		poolName = "default"
+	}
 	podName := os.Getenv("POD_NAME")
 	namespace := os.Getenv("POD_NAMESPACE")
 

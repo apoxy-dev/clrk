@@ -331,10 +331,13 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		return state, err
 	}
 
+	if err := waitClrkAPIDiscoverable(ctx, state.k3s.HostKubeconfigPath(), 60*time.Second); err != nil {
+		return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
+	}
+	if err := bootstrapDefaultWorkerPool(ctx, state.k3s.HostKubeconfigPath()); err != nil {
+		return state, fmt.Errorf("bootstrapping default WorkerPool: %w", err)
+	}
 	if len(o.applyPaths) > 0 {
-		if err := waitClrkAPIDiscoverable(ctx, state.k3s.HostKubeconfigPath(), 60*time.Second); err != nil {
-			return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
-		}
 		if err := applyManifests(ctx, state.k3s.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
 		}
@@ -404,10 +407,14 @@ func workerOpts(o *devOpts, w *drivers.WorkerDriver) ([]drivers.Option, error) {
 			// Route all resource access through k3s; clrk.apoxy.dev is
 			// served by the controller-manager container via an
 			// aggregated APIService and transparently proxied by k3s.
-			"KUBECONFIG":     "/var/lib/clrk/kubeconfig",
-			"CLRK_POOL_NAME": "default",
-			"POD_NAME":       w.Name(),
-			"POD_NAMESPACE":  "default",
+			//
+			// CLRK_POOL_NAME is unset; the worker binary defaults to
+			// "default" when missing. In prod the WorkerPoolDeployment
+			// controller injects it via downward API off the
+			// `clrk.apoxy.dev/workerpool` PodTemplate label.
+			"KUBECONFIG":    "/var/lib/clrk/kubeconfig",
+			"POD_NAME":      w.Name(),
+			"POD_NAMESPACE": "default",
 		}),
 	}
 	if o.watch {
