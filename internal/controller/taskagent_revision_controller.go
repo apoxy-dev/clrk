@@ -44,6 +44,7 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		return ctrl.Result{}, err
 	}
+	statusBase := ta.DeepCopy()
 
 	now := metav1.Now()
 
@@ -164,7 +165,7 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	ta.Status.ObservedGeneration = ta.Generation
-	if err := r.Status().Update(ctx, &ta); err != nil {
+	if err := r.Status().Patch(ctx, &ta, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 

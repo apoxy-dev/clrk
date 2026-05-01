@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -213,6 +214,20 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		if backend != "" {
 			if err := m.sandboxMgr.SetEgressBackend(sandboxID, backend); err != nil {
 				log.Error(err, "Set egress backend failed")
+			}
+			// EG.Status.EgressBackendAddress flips True the moment the
+			// Service has a NodePort, but envoy-gateway needs another
+			// few seconds to bring up the pod and bind. Without this
+			// gate the agent's first egress dial races and gets
+			// connection-refused, restarting via the back-off loop —
+			// burns 3-9s per traffic test. APO-569.
+			if err := waitTCPDialable(ctx, backend, 30*time.Second); err != nil {
+				log.Error(err, "Egress backend never became dialable", "backend", backend)
+				_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
+				if !m.sleepBackoff(ctx, &backoffExp) {
+					return
+				}
+				continue
 			}
 		}
 		startedAt := time.Now()
@@ -450,4 +465,30 @@ func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alp
 		return nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", key, corev1.TLSCertKey)
 	}
 	return caPEM, nil
+}
+
+// waitTCPDialable retries a TCP dial against addr until it succeeds or
+// timeout elapses. ctx cancellation also exits early. Used to gate
+// sandbox start on the EgressGateway's envoy-gateway pod actually
+// serving its NodePort, not just the Service having an assigned port.
+// APO-569.
+func waitTCPDialable(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	const dialTimeout = 500 * time.Millisecond
+	const probeInterval = 250 * time.Millisecond
+	for {
+		conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("dialing %s: %w", addr, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(probeInterval):
+		}
+	}
 }

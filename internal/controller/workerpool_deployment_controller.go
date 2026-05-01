@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -41,9 +40,10 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		return ctrl.Result{}, err
 	}
+	statusBase := wp.DeepCopy()
 
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: wp.Name + "-workers", Namespace: wp.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, deploy, func() error {
 		desired := r.desiredDeployment(&wp)
 		deploy.Labels = desired.Labels
 		deploy.Spec = desired.Spec
@@ -53,7 +53,7 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: wp.Name + "-workers", Namespace: wp.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, svc, func() error {
 		desired := r.desiredService(&wp)
 		svc.Spec.Selector = desired.Spec.Selector
 		svc.Spec.Ports = desired.Spec.Ports
@@ -105,7 +105,7 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 	meta.SetStatusCondition(&wp.Status.Conditions, available)
 	meta.SetStatusCondition(&wp.Status.Conditions, progressing)
 
-	if err := r.Status().Update(ctx, &wp); err != nil {
+	if err := r.Status().Patch(ctx, &wp, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 

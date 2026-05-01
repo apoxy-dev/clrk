@@ -197,7 +197,7 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 			Namespace: eg.Namespace,
 		},
 	}
-	op, err := ctrl.CreateOrUpdate(ctx, r.Client, ep, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, ep, func() error {
 		ep.Spec.Provider = &egv1alpha1.EnvoyProxyProvider{
 			Type: egv1alpha1.ProviderTypeKubernetes,
 			Kubernetes: &egv1alpha1.EnvoyProxyKubernetesProvider{
@@ -205,11 +205,10 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 			},
 		}
 		return ctrl.SetControllerReference(eg, ep, r.Scheme)
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
-	log.FromContext(ctx).V(1).Info("EnvoyProxy reconciled", "op", op, "name", name)
+	log.FromContext(ctx).V(1).Info("EnvoyProxy reconciled", "name", name)
 	return nil
 }
 
@@ -359,7 +358,7 @@ func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context,
 			Namespace: envoyGatewayNamespace,
 		},
 	}
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, mirror, func() error {
+	err := createOrUpdateWithRetry(ctx, r.Client, mirror, func() error {
 		if mirror.Labels == nil {
 			mirror.Labels = map[string]string{}
 		}
@@ -424,12 +423,11 @@ func upstreamHostAliasesPatch(eg *clrkv1alpha1.EgressGateway) *egv1alpha1.Kubern
 // the private-Envoy image override applies per-EgressGateway.
 func (r *EgressGatewayReconciler) ensureGatewayClass(ctx context.Context) error {
 	gc := &gwapiv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: EgressGatewayClassName}}
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, gc, func() error {
+	return createOrUpdateWithRetry(ctx, r.Client, gc, func() error {
 		gc.Spec.ControllerName = gwapiv1.GatewayController("gateway.envoyproxy.io/gatewayclass-controller")
 		gc.Spec.ParametersRef = nil
 		return nil
 	})
-	return err
 }
 
 // ensureGateway creates or updates the Gateway referencing our class with a
@@ -452,7 +450,7 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 			Namespace: eg.Namespace,
 		},
 	}
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, gw, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, gw, func() error {
 		caSecret := gwapiv1.ObjectName(EgressGatewayCASecretName(eg.Name))
 		tlsMode := gwapiv1.TLSModeTerminate
 		allRoutes := gwapiv1.NamespacesFromAll
@@ -481,8 +479,7 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 			},
 		}
 		return ctrl.SetControllerReference(eg, gw, r.Scheme)
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 	return r.ensureCatchAllRoute(ctx, eg)
@@ -501,7 +498,7 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 		},
 	}
 	port := gwapiv1.PortNumber(80)
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, rt, func() error {
+	return createOrUpdateWithRetry(ctx, r.Client, rt, func() error {
 		rt.Spec.ParentRefs = []gwapiv1.ParentReference{{
 			Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name),
 		}}
@@ -517,7 +514,6 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 		}}
 		return ctrl.SetControllerReference(eg, rt, r.Scheme)
 	})
-	return err
 }
 
 func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egName }
@@ -531,6 +527,7 @@ const envoyGatewayNamespace = "envoy-gateway-system"
 // reconcile picks it up without waiting for an unrelated event.
 func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (bool, error) {
 	gwName := GatewayNamePrefix + eg.Name
+	statusBase := eg.DeepCopy()
 
 	ready := metav1.Condition{
 		Type:               clrkv1alpha1.EgressGatewayConditionReady,
@@ -570,7 +567,9 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 		dirty = true
 	}
 	if dirty {
-		if err := r.Status().Update(ctx, eg); err != nil {
+		// MergeFrom (no optimistic lock) so concurrent envoy-gateway
+		// status patches don't 409 us. See APO-567.
+		if err := r.Status().Patch(ctx, eg, client.MergeFrom(statusBase)); err != nil {
 			return false, fmt.Errorf("updating status: %w", err)
 		}
 	}

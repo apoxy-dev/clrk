@@ -44,6 +44,12 @@ func (r *DaemonAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		return ctrl.Result{}, err
 	}
+	// Snapshot before any mutation so the closing Status().Patch sends a
+	// merge-patch of just our Status diff. Avoids the resourceVersion
+	// conflict storm we'd get from a full Status().Update — sibling
+	// reconcilers (egress watcher, revision watcher) bump our object's
+	// RV between Get and Update on every reconcile burst.
+	statusBase := da.DeepCopy()
 
 	now := metav1.Now()
 
@@ -164,7 +170,7 @@ func (r *DaemonAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	da.Status.ObservedGeneration = da.Generation
-	if err := r.Status().Update(ctx, &da); err != nil {
+	if err := r.Status().Patch(ctx, &da, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 

@@ -11,7 +11,6 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
@@ -37,9 +36,10 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return ctrl.Result{}, err
 	}
+	taStatusBase := ta.DeepCopy()
 
 	gw := &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: ta.Name, Namespace: ta.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, gw, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, gw, func() error {
 		desired := desiredGateway(&ta)
 		gw.Labels = desired.Labels
 		gw.Spec = desired.Spec
@@ -65,7 +65,7 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	meta.SetStatusCondition(&ta.Status.Conditions, gatewayReady)
 
 	hr := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: ta.Name, Namespace: ta.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, hr, func() error {
+	if err := createOrUpdateWithRetry(ctx, r.Client, hr, func() error {
 		desired := desiredHTTPRoute(&ta)
 		hr.Labels = desired.Labels
 		hr.Spec = desired.Spec
@@ -74,7 +74,7 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("reconciling HTTPRoute: %w", err)
 	}
 
-	if err := r.Status().Update(ctx, &ta); err != nil {
+	if err := r.Status().Patch(ctx, &ta, client.MergeFrom(taStatusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 

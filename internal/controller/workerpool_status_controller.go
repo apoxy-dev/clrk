@@ -37,6 +37,7 @@ func (r *WorkerPoolStatusReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return ctrl.Result{}, err
 	}
+	statusBase := wp.DeepCopy()
 
 	// Compute optimistic capacity from spec. The deployment reconciler
 	// (when running) replaces this with a ReadyReplicas-based figure.
@@ -93,7 +94,7 @@ func (r *WorkerPoolStatusReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	meta.SetStatusCondition(&wp.Status.Conditions, configured)
 
-	if err := r.Status().Update(ctx, &wp); err != nil {
+	if err := r.Status().Patch(ctx, &wp, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
