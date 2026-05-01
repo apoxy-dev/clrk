@@ -5,8 +5,10 @@ package worker
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 )
@@ -19,10 +21,15 @@ import (
 // Used to fan the libcontainer process's stdout / stderr into the
 // worker's structured log pipeline so agent output is attributable and
 // shaped like the rest of our logs.
+//
+// When fileSink is non-nil each line is also appended (with a `[stdout]`
+// / `[stderr]` prefix and a trailing newline) so `clrk agents logs` can
+// `tail -F` the file from outside the worker process.
 type sandboxLineWriter struct {
-	logger *slog.Logger
-	level  slog.Level
-	stream string // "stdout" or "stderr"
+	logger   *slog.Logger
+	level    slog.Level
+	stream   string // "stdout" or "stderr".
+	fileSink *os.File
 
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -30,11 +37,12 @@ type sandboxLineWriter struct {
 
 const sandboxLineMaxBytes = 64 * 1024
 
-func newSandboxLineWriter(base *slog.Logger, level slog.Level, stream string) *sandboxLineWriter {
+func newSandboxLineWriter(base *slog.Logger, level slog.Level, stream string, fileSink *os.File) *sandboxLineWriter {
 	return &sandboxLineWriter{
-		logger: base.With(slog.String("stream", stream)),
-		level:  level,
-		stream: stream,
+		logger:   base.With(slog.String("stream", stream)),
+		level:    level,
+		stream:   stream,
+		fileSink: fileSink,
 	}
 }
 
@@ -84,4 +92,16 @@ func (w *sandboxLineWriter) emit(line string) {
 	w.logger.LogAttrs(context.Background(), w.level, "sandbox output",
 		slog.String("line", line),
 	)
+	if w.fileSink != nil {
+		// Best-effort: a failed write should never break sandbox stdio.
+		_, _ = fmt.Fprintf(w.fileSink, "[%s] %s\n", w.stream, line)
+	}
+}
+
+func openAgentLogFile(rootDir, namespace, name string) (*os.File, error) {
+	if rootDir == "" {
+		return nil, fmt.Errorf("logs dir not configured")
+	}
+	return os.OpenFile(AgentLogPath(rootDir, namespace, name),
+		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 }

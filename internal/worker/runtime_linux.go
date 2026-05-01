@@ -16,6 +16,7 @@ const (
 	clrkStateDir  = "/run/clrk/state"
 	clrkRootDir   = "/run/clrk/rootfs"
 	clrkImagesDir = "/run/clrk/images"
+	clrkLogsDir   = WorkerLogsDir
 
 	heartbeatInterval = 30 * time.Second
 )
@@ -30,7 +31,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	)
 
 	// Create runtime directories.
-	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir} {
+	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir, clrkLogsDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("creating dir %s: %w", dir, err)
 		}
@@ -41,7 +42,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 
 	// Initialize components.
 	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, imageStore, router)
+	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, imageStore, router)
 
 	// Clean up orphaned containers from previous incarnation.
 	if err := sandboxMgr.Cleanup(ctx); err != nil {

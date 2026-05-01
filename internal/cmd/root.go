@@ -32,6 +32,8 @@ func init() {
 	RootCmd.AddCommand(newDevCmd())
 	RootCmd.AddCommand(newApplyCmd())
 	RootCmd.AddCommand(newSecretCmd())
+	RootCmd.AddCommand(newAgentsCmd())
+	RootCmd.AddCommand(newPoolsCmd())
 }
 
 func defaultClrkDir() string {

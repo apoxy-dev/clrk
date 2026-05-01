@@ -46,6 +46,7 @@ func init() {
 type SandboxManager struct {
 	stateDir   string // libcontainer state dir (e.g. /run/clrk/state).
 	rootDir    string // Per-sandbox rootfs overlay dir (e.g. /run/clrk/rootfs).
+	logsDir    string // Per-agent stdio log files (e.g. /run/clrk/logs).
 	imageStore *ImageStore
 	dialer     netstack.Dialer // Egress dialer for sandbox netstacks.
 	// workerResolvers is the worker container's own DNS server list.
@@ -64,25 +65,36 @@ type SandboxManager struct {
 	// so callers (Wait) can block on its exit. Kept off SandboxInstance to
 	// avoid leaking a linux-only type into the cross-platform types.go.
 	processes map[SandboxID]*libcontainer.Process
-	// stdLogs retains the line-splitting writers wrapping each running
-	// sandbox's stdout/stderr so Wait can flush their tail buffers when
-	// the init process exits. Same linux-only-leak rationale as
-	// `processes`.
-	stdLogs map[SandboxID][2]*sandboxLineWriter
+	// stdLogs retains the line-splitting writers and the per-agent log
+	// file wrapping each running sandbox's stdout/stderr so Wait can
+	// flush tail buffers and close the file when the init process exits.
+	// Same linux-only-leak rationale as `processes`.
+	stdLogs map[SandboxID]sandboxLogs
+}
+
+// sandboxLogs bundles the two line-splitting writers wrapping a running
+// sandbox's stdio with the shared per-agent file they tee into. Both
+// writers prefix their lines with `[stdout]` / `[stderr]` so a single
+// log file is enough.
+type sandboxLogs struct {
+	stdout *sandboxLineWriter
+	stderr *sandboxLineWriter
+	file   *os.File
 }
 
 // NewSandboxManager creates a new SandboxManager.
-func NewSandboxManager(stateDir, rootDir string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
+func NewSandboxManager(stateDir, rootDir, logsDir string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
 	return &SandboxManager{
 		stateDir:        stateDir,
 		rootDir:         rootDir,
+		logsDir:         logsDir,
 		imageStore:      imageStore,
 		dialer:          dialer,
 		workerResolvers: readWorkerResolvers(),
 		sandboxes:       make(map[SandboxID]*SandboxInstance),
 		containers:      make(map[SandboxID]*libcontainer.Container),
 		processes:       make(map[SandboxID]*libcontainer.Process),
-		stdLogs:         make(map[SandboxID][2]*sandboxLineWriter),
+		stdLogs:         make(map[SandboxID]sandboxLogs),
 	}
 }
 
@@ -256,8 +268,13 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 		slog.String("agent.uid", sb.Identity.UID),
 		slog.String("agent.revision", sb.Identity.Revision),
 	)
-	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout")
-	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr")
+	logFile, err := openAgentLogFile(m.logsDir, sb.Identity.Namespace, sb.Identity.Name)
+	if err != nil {
+		// Tee-to-file is best-effort; agent stdio still flows to slog.
+		log.Error(err, "Opening agent log file (continuing without file tee)")
+	}
+	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout", logFile)
+	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr", logFile)
 
 	p := &libcontainer.Process{
 		Args:            args,
@@ -300,7 +317,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	m.mu.Lock()
 	sb.Phase = SandboxRunning
 	m.processes[id] = p
-	m.stdLogs[id] = [2]*sandboxLineWriter{stdoutLog, stderrLog}
+	m.stdLogs[id] = sandboxLogs{stdout: stdoutLog, stderr: stderrLog, file: logFile}
 	m.mu.Unlock()
 
 	log.Info("Sandbox started")
@@ -344,12 +361,17 @@ func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessSta
 	m.mu.Unlock()
 
 	// Emit any tail bytes the agent wrote without a trailing newline
-	// before exit so the last line of output isn't dropped.
+	// before exit so the last line of output isn't dropped, then close
+	// the per-agent tee file.
 	if hasLogs {
-		for _, w := range logs {
-			if w != nil {
-				w.Flush()
-			}
+		if logs.stdout != nil {
+			logs.stdout.Flush()
+		}
+		if logs.stderr != nil {
+			logs.stderr.Flush()
+		}
+		if logs.file != nil {
+			_ = logs.file.Close()
 		}
 	}
 
@@ -453,6 +475,10 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 	m.mu.Lock()
 	delete(m.sandboxes, id)
 	delete(m.containers, id)
+	if logs, ok := m.stdLogs[id]; ok && logs.file != nil {
+		_ = logs.file.Close()
+	}
+	delete(m.stdLogs, id)
 	m.mu.Unlock()
 
 	log.Info("Sandbox deleted")
