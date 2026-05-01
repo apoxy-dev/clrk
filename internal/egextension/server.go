@@ -507,6 +507,12 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
 			ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
 		},
+		// Per-message timeout. Default is 200ms, which is too tight: on
+		// the first stream after a sink-registry rebuild the handler does
+		// a List(CIP)+List(APR)+per-CIP Secret Get, which can run past
+		// 200ms on a cold informer cache. 5s gives slack without papering
+		// over a real handler hang.
+		MessageTimeout: durationpb.New(5 * time.Second),
 		MetadataOptions: &extprocv3.MetadataOptions{
 			ForwardingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
 				Untyped: []string{extproc.MetadataNamespace},

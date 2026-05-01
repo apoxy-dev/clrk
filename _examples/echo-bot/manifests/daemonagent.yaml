@@ -4,19 +4,31 @@ metadata:
   name: echo-bot
 spec:
   workerPoolRef: default
-  restartPolicy: Always
+  # OnFailure: respawn after each clean exit. The agent issues one
+  # Anthropic call and exits; the daemon supervisor brings it back up
+  # so the demo loops without `while true`.
+  restartPolicy: OnFailure
   egressRefs:
     - gatewayRef: echo-bot
   template:
     spec:
-      # Use a public image so dev doesn't need a private pull secret.
-      # The worker pulls via ORAS straight to sandbox rootfs.
       image: docker.io/curlimages/curl:8.10.1
       command: ["sh", "-c"]
       args:
         - |
-          while true; do
-            curl -sS -o /dev/null -w 'http %{http_code} %{url_effective}\n' \
-              https://httpbin.org/anything
-            sleep 5
-          done
+          # The agent makes ONE Anthropic call and exits. Note: no
+          # `x-api-key` header — the proxy injects it via the attached
+          # CredentialInjectionPolicy. The agent never sees the key.
+          curl -sS -o /tmp/resp.json -w 'http %{http_code} %{url_effective}\n' \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H 'content-type: application/json' \
+            -H 'anthropic-version: 2023-06-01' \
+            -d '{
+              "model": "claude-3-5-haiku-20241022",
+              "max_tokens": 64,
+              "messages": [{"role": "user", "content": "Say hi in three words."}]
+            }'
+          # Print the model echo to stdout so `kubectl logs` shows the
+          # provider response without the secret ever being on the wire
+          # from the agent's side.
+          cat /tmp/resp.json

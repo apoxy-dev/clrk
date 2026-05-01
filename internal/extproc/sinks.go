@@ -33,8 +33,10 @@ var defaultIncludedContentTypes = []string{
 // egSink is a per-EgressGateway capture configuration: the resolved Sink
 // (OTLP or fallback slog), the body-capture cap, the content-type
 // allow-list, the AIProviderRoute matcher built from APRs attached to
-// this EG, plus a snapshot of the spec + APR list-version we use to
-// decide whether to rebuild on subsequent stream starts.
+// this EG, the credential-injection table built from CIPs attached to
+// this EG (directly or via APR), plus a snapshot of the spec + APR list-
+// version + CIP list-version we use to decide whether to rebuild on
+// subsequent stream starts.
 type egSink struct {
 	sink            Sink
 	maxCaptureBytes int
@@ -44,6 +46,9 @@ type egSink struct {
 
 	routes        *routeTable
 	routesVersion string
+
+	creds        *credTable
+	credsVersion string
 }
 
 // sinkRegistry caches one egSink per EgressGateway, keyed by ns/name.
@@ -101,10 +106,19 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	aprVersion := aiproviderRoutesVersion(aprs.Items, key)
 
+	// Same shape for CredentialInjectionPolicies. Cluster-wide list
+	// because policies can attach across namespaces via parentRefs.
+	var cips clrkv1alpha1.CredentialInjectionPolicyList
+	if err := r.client.List(ctx, &cips); err != nil {
+		return nil, fmt.Errorf("list CredentialInjectionPolicies: %w", err)
+	}
+	credVersion := credPoliciesVersion(cips.Items, aprs.Items, key)
+
 	r.mu.Lock()
 	if hit, ok := r.by[key]; ok &&
 		reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) &&
-		hit.routesVersion == aprVersion {
+		hit.routesVersion == aprVersion &&
+		hit.credsVersion == credVersion {
 		r.mu.Unlock()
 		return hit, nil
 	}
@@ -120,6 +134,8 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	built.routes = buildRouteTable(key.Namespace, key.Name, aprs.Items)
 	built.routesVersion = aprVersion
+	built.creds = buildCredTable(ctx, r.client, key.Namespace, key.Name, aprs.Items, cips.Items)
+	built.credsVersion = credVersion
 
 	r.mu.Lock()
 	r.by[key] = built

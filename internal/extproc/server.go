@@ -179,6 +179,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		maxCaptureBytes int  = captureMaxBytesDefault
 		includedTypes   []string
 		routes          *routeTable
+		creds           *credTable
 		egKey           types.NamespacedName
 	)
 	if s.client != nil {
@@ -194,6 +195,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			maxCaptureBytes = es.maxCaptureBytes
 			includedTypes = es.includedTypes
 			routes = es.routes
+			creds = es.creds
 			if k, kerr := egidentity.MustFromContext(ctx); kerr == nil {
 				egKey = k
 			}
@@ -267,7 +269,22 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// dialed to 80 and rejected by hosts behind Cloudflare.
 			// Done here, before the dfp HTTP filter, so dfp parses the
 			// rewritten value. Filter order is ext_proc → dfp → router.
-			if mut := authorityPortMutation(rec.RequestHeaders[":authority"]); mut != nil {
+			mut := authorityPortMutation(rec.RequestHeaders[":authority"])
+			// Inject credentials from any CredentialInjectionPolicy
+			// attached to the matched APR or to the EG itself. This is
+			// the architectural enforcement that API keys never live
+			// inside the agent: the proxy adds them on the way out.
+			// Match uses model="" because the request body isn't
+			// buffered yet — same constraint as the budget pre-flight
+			// (see routeTable.match).
+			if injs := lookupCreds(creds, routes, rec.RequestHeaders); len(injs) > 0 {
+				if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
+					logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+						"policies", collisions)
+				}
+				mut = applyInjections(mut, injs)
+			}
+			if mut != nil {
 				resp.GetRequestHeaders().GetResponse().HeaderMutation = mut
 			}
 			// Apply content-type body gate per-direction. If the request
@@ -354,6 +371,25 @@ func enrichRecord(rec *Record, routes *routeTable) *routeRule {
 	rec.MatchedRouteNamespace = rr.routeNamespace
 	rec.MatchedRouteName = rr.routeName
 	return rr
+}
+
+// lookupCreds matches the request to an APR (if any) and returns the
+// credentials that should be injected. Pure read against pre-resolved
+// tables; called from the RequestHeaders branch where we do header
+// mutation. Returns an empty slice when no CIPs attach to this
+// transaction.
+func lookupCreds(creds *credTable, routes *routeTable, headers map[string]string) []credInjection {
+	if creds == nil {
+		return nil
+	}
+	var rr *routeRule
+	if routes != nil {
+		host, _ := splitHostPort(headers[":authority"])
+		if system := parsers.SystemFor(host); system != "" {
+			rr = routes.match(system, headers[":path"], "")
+		}
+	}
+	return creds.lookup(rr)
 }
 
 // evaluateBudget runs the pre-flight TokenBudget check at request-
@@ -546,7 +582,9 @@ func authorityPortMutation(authority string) *extprocv3.HeaderMutation {
 	}
 	return &extprocv3.HeaderMutation{
 		SetHeaders: []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{Key: ":authority", Value: authority + ":443"},
+			// RawValue (not Value) — see applyInjections for the rationale.
+			Header:       &corev3.HeaderValue{Key: ":authority", RawValue: []byte(authority + ":443")},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 		}},
 	}
 }

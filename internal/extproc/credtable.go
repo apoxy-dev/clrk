@@ -1,0 +1,303 @@
+package extproc
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+)
+
+// Parent-ref kind names CredentialInjectionPolicy may target.
+const (
+	aiProviderRouteKind = "AIProviderRoute"
+	mcpRouteKind        = "MCPRoute"
+)
+
+// credInjection is one resolved CredentialInjectionPolicy ready for
+// request-time application. headerName is lower-cased so callers can
+// match against the captured Record map without re-normalizing.
+type credInjection struct {
+	policyName  string
+	headerName  string
+	headerValue string
+}
+
+// credTable holds resolved CredentialInjectionPolicies attached to one
+// EgressGateway (directly or via an APR that parent-refs this EG). Built
+// alongside the routeTable in sinks.go and read on the request hot path
+// by lookup().
+//
+// MVP only honors Target=Header. QueryParam and ProviderAuth policies
+// are silently skipped at build time (file follow-ups).
+type credTable struct {
+	// byRoute keys credentials by (namespace, name) of the APR/MCPRoute
+	// the policy parents to. Multiple policies on the same route stack.
+	byRoute map[types.NamespacedName][]credInjection
+	// gateway holds policies that parent directly to the EG. Always
+	// applied on top of any matched-route credentials.
+	gateway []credInjection
+}
+
+func newEmptyCredTable() *credTable {
+	return &credTable{byRoute: map[types.NamespacedName][]credInjection{}}
+}
+
+// buildCredTable resolves the set of CredentialInjectionPolicies that
+// attach to (egNamespace, egName) — directly or via an APR — reads their
+// Secrets via the cached client, and returns the lookup table. Errors
+// fetching individual Secrets (missing, malformed) are logged and the
+// offending policy is skipped; one bad CIP must not break others on the
+// same EG.
+func buildCredTable(
+	ctx context.Context,
+	c client.Client,
+	egNamespace, egName string,
+	aprs []clrkv1alpha1.AIProviderRoute,
+	cips []clrkv1alpha1.CredentialInjectionPolicy,
+) *credTable {
+	log := logr.FromContextOrDiscard(ctx).WithName("credtable")
+
+	aprAttached := map[types.NamespacedName]bool{}
+	for _, r := range aprs {
+		if routeAttachesTo(r, egNamespace, egName) {
+			aprAttached[types.NamespacedName{Namespace: r.Namespace, Name: r.Name}] = true
+		}
+	}
+
+	tbl := newEmptyCredTable()
+	for i := range cips {
+		cip := &cips[i]
+		for _, ref := range cip.Spec.ParentRefs {
+			group, kind := refGroupKind(ref)
+			if group != clrkAPIGroup {
+				continue
+			}
+			refNS := cip.Namespace
+			if ref.Namespace != nil && *ref.Namespace != "" {
+				refNS = string(*ref.Namespace)
+			}
+			refName := string(ref.Name)
+
+			switch kind {
+			case egressGatewayKind:
+				if refNS != egNamespace || refName != egName {
+					continue
+				}
+				if inj := resolveCIP(ctx, c, cip, log); inj != nil {
+					tbl.gateway = append(tbl.gateway, *inj)
+				}
+			case aiProviderRouteKind:
+				key := types.NamespacedName{Namespace: refNS, Name: refName}
+				if !aprAttached[key] {
+					continue
+				}
+				if inj := resolveCIP(ctx, c, cip, log); inj != nil {
+					tbl.byRoute[key] = append(tbl.byRoute[key], *inj)
+				}
+			case mcpRouteKind:
+				// No-op until MCPRoute consumption ships (APO-556).
+				continue
+			}
+		}
+	}
+	return tbl
+}
+
+// resolveCIP loads the referenced Secret and produces a credInjection.
+// Returns nil for non-Header targets (skipped — file follow-ups for
+// QueryParam / ProviderAuth) or on Secret lookup failure.
+func resolveCIP(ctx context.Context, c client.Client, cip *clrkv1alpha1.CredentialInjectionPolicy, log logr.Logger) *credInjection {
+	spec := &cip.Spec
+	if spec.Target != clrkv1alpha1.CredentialTargetHeader {
+		log.V(1).Info("Skipping non-Header credential target",
+			"policy", cip.Namespace+"/"+cip.Name, "target", spec.Target)
+		return nil
+	}
+	if spec.HeaderName == nil || *spec.HeaderName == "" {
+		log.Info("CredentialInjectionPolicy Target=Header missing HeaderName",
+			"policy", cip.Namespace+"/"+cip.Name)
+		return nil
+	}
+
+	secretNS := cip.Namespace
+	if spec.SecretRef.Namespace != nil && *spec.SecretRef.Namespace != "" {
+		secretNS = string(*spec.SecretRef.Namespace)
+	}
+	secretKey := types.NamespacedName{Namespace: secretNS, Name: string(spec.SecretRef.Name)}
+	var secret corev1.Secret
+	if err := c.Get(ctx, secretKey, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("CredentialInjectionPolicy Secret not found",
+				"policy", cip.Namespace+"/"+cip.Name, "secret", secretKey.String())
+		} else {
+			log.Error(err, "Failed to read credential Secret",
+				"policy", cip.Namespace+"/"+cip.Name, "secret", secretKey.String())
+		}
+		return nil
+	}
+
+	dataKey := spec.SecretKey
+	if dataKey == "" {
+		dataKey = "token"
+	}
+	raw, ok := secret.Data[dataKey]
+	if !ok || len(raw) == 0 {
+		log.Info("CredentialInjectionPolicy Secret missing or empty key",
+			"policy", cip.Namespace+"/"+cip.Name, "secret", secretKey.String(), "key", dataKey)
+		return nil
+	}
+
+	return &credInjection{
+		policyName:  cip.Namespace + "/" + cip.Name,
+		headerName:  strings.ToLower(*spec.HeaderName),
+		headerValue: string(raw),
+	}
+}
+
+// lookup returns the credentials applicable to a transaction matched
+// against the given route. Route-attached entries first, gateway
+// catch-all stacked on top. Pass rr=nil for transactions that matched
+// no APR (gateway-only).
+func (t *credTable) lookup(rr *routeRule) []credInjection {
+	if t == nil {
+		return nil
+	}
+	var out []credInjection
+	if rr != nil {
+		if hits := t.byRoute[types.NamespacedName{Namespace: rr.routeNamespace, Name: rr.routeName}]; len(hits) > 0 {
+			out = append(out, hits...)
+		}
+	}
+	if len(t.gateway) > 0 {
+		out = append(out, t.gateway...)
+	}
+	return out
+}
+
+// applyInjections appends SetHeaders entries to (or builds) a
+// HeaderMutation that injects the supplied credentials. Returns nil
+// when injs is empty and existing was nil.
+func applyInjections(existing *extprocv3.HeaderMutation, injs []credInjection) *extprocv3.HeaderMutation {
+	if len(injs) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = &extprocv3.HeaderMutation{}
+	}
+	for _, inj := range injs {
+		existing.SetHeaders = append(existing.SetHeaders, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{
+				Key: inj.headerName,
+				// Envoy 1.36 ext_proc mutation_utils reads only RawValue
+				// and silently ignores Value. Setting Value here gets the
+				// header set to empty string, so credential injection
+				// becomes a no-op.
+				RawValue: []byte(inj.headerValue),
+			},
+			// Always overwrite any agent-supplied value (smuggle defense).
+			// Default is APPEND_IF_EXISTS_OR_ADD which would concatenate
+			// to the agent value with a comma, breaking auth schemes that
+			// don't tolerate multi-value headers.
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	}
+	return existing
+}
+
+// redactInjected replaces the value of every header whose name matches
+// an injected key with "<redacted>" in the captured-record map. Called
+// just after injection so OTLP records never carry the raw secret. The
+// returned slice lists policies whose header names collided with an
+// agent-supplied non-empty value — operators want to know an agent is
+// trying to smuggle a credential.
+func redactInjected(headers map[string]string, injs []credInjection) (collisions []string) {
+	if len(headers) == 0 || len(injs) == 0 {
+		return nil
+	}
+	for _, inj := range injs {
+		if existing, ok := headers[inj.headerName]; ok && existing != "" && existing != "<redacted>" {
+			collisions = append(collisions, inj.policyName)
+		}
+		headers[inj.headerName] = "<redacted>"
+	}
+	return collisions
+}
+
+func refGroupKind(ref gwapiv1.ParentReference) (group, kind string) {
+	if ref.Group != nil {
+		group = string(*ref.Group)
+	}
+	if ref.Kind != nil {
+		kind = string(*ref.Kind)
+	}
+	return
+}
+
+// credPoliciesVersion fingerprints the CIPs that attach to the given
+// EG (directly or via an APR). Mirrors aiproviderRoutesVersion in
+// shape: sorted ns/name@resourceVersion list. Used by sinkRegistry to
+// decide whether to rebuild the cached egSink.
+//
+// Note: this fingerprint does NOT incorporate referenced Secret
+// resourceVersions. Operators rotating the underlying Secret without
+// touching the CIP must `kubectl annotate cip ... rotated-at=...` (or
+// similar) to bump the CIP's resourceVersion and force a rebuild. This
+// is a documented MVP limitation; APO-561 follow-up tracks proper
+// Secret-watch invalidation.
+func credPoliciesVersion(
+	cips []clrkv1alpha1.CredentialInjectionPolicy,
+	aprs []clrkv1alpha1.AIProviderRoute,
+	eg types.NamespacedName,
+) string {
+	aprAttached := map[types.NamespacedName]bool{}
+	for _, r := range aprs {
+		if routeAttachesTo(r, eg.Namespace, eg.Name) {
+			aprAttached[types.NamespacedName{Namespace: r.Namespace, Name: r.Name}] = true
+		}
+	}
+
+	var parts []string
+	for i := range cips {
+		cip := &cips[i]
+		matched := false
+		for _, ref := range cip.Spec.ParentRefs {
+			group, kind := refGroupKind(ref)
+			if group != clrkAPIGroup {
+				continue
+			}
+			refNS := cip.Namespace
+			if ref.Namespace != nil && *ref.Namespace != "" {
+				refNS = string(*ref.Namespace)
+			}
+			switch kind {
+			case egressGatewayKind:
+				if refNS == eg.Namespace && string(ref.Name) == eg.Name {
+					matched = true
+				}
+			case aiProviderRouteKind:
+				if aprAttached[types.NamespacedName{Namespace: refNS, Name: string(ref.Name)}] {
+					matched = true
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if matched {
+			parts = append(parts, fmt.Sprintf("%s/%s@%s", cip.Namespace, cip.Name, cip.ResourceVersion))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
