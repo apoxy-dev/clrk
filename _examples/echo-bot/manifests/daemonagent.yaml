@@ -24,7 +24,7 @@ spec:
             -H 'content-type: application/json' \
             -H 'anthropic-version: 2023-06-01' \
             -d '{
-              "model": "claude-3-5-haiku-20241022",
+              "model": "claude-haiku-4-5",
               "max_tokens": 64,
               "messages": [{"role": "user", "content": "Say hi in three words."}]
             }'
