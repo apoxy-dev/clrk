@@ -75,6 +75,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener":                      schema_clrk_api_clrk_v1alpha1_EgressListener(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerStatus":                schema_clrk_api_clrk_v1alpha1_EgressListenerStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerTLS":                   schema_clrk_api_clrk_v1alpha1_EgressListenerTLS(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec":               schema_clrk_api_clrk_v1alpha1_EgressUpstreamTLSSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources":                  schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.HeaderExtractor":                     schema_clrk_api_clrk_v1alpha1_HeaderExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.IdentityExtractor":                   schema_clrk_api_clrk_v1alpha1_IdentityExtractor(ref),
@@ -1393,7 +1394,7 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref common.ReferenceC
 				Properties: map[string]spec.Schema{
 					"parentRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or EgressGateway listeners. The proxy applies the credential to traffic matching the referenced parent.",
+							Description: "ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or EgressGateway listeners. The proxy applies the credential to traffic matching the referenced parent.\n\nMatch semantics by parent kind:\n  - AIProviderRoute: applies when the request matches that APR's\n    rules (provider + endpoint + model gates).\n  - MCPRoute: applies when the request matches that route\n    (no-op until MCPRoute consumption ships).\n  - EgressGateway: catch-all for any traffic on the gateway that\n    no narrower policy claimed.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -1971,12 +1972,18 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"),
 						},
 					},
+					"upstreamTLS": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpstreamTLS adjusts how the EG-managed Envoy validates TLS when re-encrypting traffic to upstreams (the egress dial after MITM).",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec"),
+						},
+					},
 				},
 				Required: []string{"defaultPolicy", "listeners"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"},
 	}
 }
 
@@ -2379,6 +2386,41 @@ func schema_clrk_api_clrk_v1alpha1_EgressListenerTLS(ref common.ReferenceCallbac
 		},
 		Dependencies: []string{
 			"sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_EgressUpstreamTLSSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream connection behavior. The default trust source is the system bundle at /etc/ssl/certs/ca-certificates.crt baked into the Envoy image and the default DNS resolver is the cluster DNS — this spec lets operators override either when reaching upstreams that aren't on the public Internet (internal services, integration-test stubs).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"additionalTrustBundleSecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AdditionalTrustBundleSecretRef references a Secret carrying one or more CA certificates (PEM, under any data key) that Envoy should trust in addition to the system bundle. Used for private upstreams whose certs aren't anchored in a public CA.\n\nAll non-empty values in the Secret's `data` map are concatenated and appended to the system bundle inside the Envoy pod via an init container; the main Envoy container reads the merged bundle from the same well-known path it always has.",
+							Ref:         ref("sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"),
+						},
+					},
+					"hostAliases": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HostAliases programs the EG-managed Envoy Pod's spec.hostAliases. Each entry maps an IP to one or more hostnames; the kubelet writes them into the pod's /etc/hosts ahead of the cluster DNS lookup chain. Use this to point Envoy's dynamic_forward_proxy resolver at a specific IP for a given upstream hostname, e.g. an in-cluster stub pretending to be api.openai.com without globally hijacking the cluster's CoreDNS.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/api/core/v1.HostAlias"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/core/v1.HostAlias", "sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"},
 	}
 }
 
@@ -3147,8 +3189,7 @@ func schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref common.ReferenceCallback
 				Properties: map[string]spec.Schema{
 					"endpoint": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Endpoint is the OTLP/HTTP base URL (e.g. \"https://otel.example.com\").",
-							Default:     "",
+							Description: "Endpoint is the OTLP/HTTP base URL (e.g. \"https://otel.example.com\"). Optional — when empty in dev (`clrk dev` sets the CLRK_DEV_OTEL_ENDPOINT env on the controller-manager) records flow to the in-process dev receiver and surface in the TUI's otel-logs/otel-traces panes; in prod with no env override, capture falls back to the controller-manager's structured log.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -3176,7 +3217,6 @@ func schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref common.ReferenceCallback
 						},
 					},
 				},
-				Required: []string{"endpoint"},
 			},
 		},
 		Dependencies: []string{

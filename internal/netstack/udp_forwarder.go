@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -90,7 +91,19 @@ func udpHandler(ctx context.Context, dialer Dialer) udp.ForwarderHandler {
 			var wq waiter.Queue
 			ep, tcpipErr := req.CreateEndpoint(&wq)
 			if tcpipErr != nil {
-				logger.Error("Failed to create endpoint", slog.String("error", tcpipErr.String()))
+				// gVisor's UDP forwarder dispatches per-packet handlers
+				// without a 5-tuple session table; concurrent packets on
+				// the same flow (DNS retransmits with a connect()ed
+				// socket are the most common case) all race to bind the
+				// same local port. The losing handler returns ErrPortInUse
+				// and drops the packet. The original packet's session is
+				// already in flight and DNS will retransmit if needed, so
+				// this is benign — log debug instead of error.
+				if _, isPortInUse := tcpipErr.(*tcpip.ErrPortInUse); isPortInUse {
+					logger.Debug("Skipping duplicate UDP flow", slog.String("error", tcpipErr.String()))
+				} else {
+					logger.Error("Failed to create endpoint", slog.String("error", tcpipErr.String()))
+				}
 				cancel()
 				return
 			}

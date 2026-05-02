@@ -152,7 +152,13 @@ type BodyCaptureSpec struct {
 // captured.
 type OTLPLogsSinkSpec struct {
 	// Endpoint is the OTLP/HTTP base URL (e.g. "https://otel.example.com").
-	Endpoint string `json:"endpoint"`
+	// Optional — when empty in dev (`clrk dev` sets the
+	// CLRK_DEV_OTEL_ENDPOINT env on the controller-manager) records flow
+	// to the in-process dev receiver and surface in the TUI's
+	// otel-logs/otel-traces panes; in prod with no env override, capture
+	// falls back to the controller-manager's structured log.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 
 	// Headers are added to every OTLP export — typically used to carry
 	// authentication tokens.

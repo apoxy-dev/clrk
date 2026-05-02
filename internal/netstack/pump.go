@@ -96,6 +96,12 @@ func (p *PacketPump) inbound() error {
 		n, err := p.tapFD.Read(buf)
 		if err != nil {
 			pktPool.Put(bufp)
+			// Sandbox teardown closes the TAP fd while inbound is
+			// blocked in Read. Treat that as a clean exit instead of
+			// noisily logging "Netstack pump exited" on every delete.
+			if p.closed.Load() {
+				return nil
+			}
 			return fmt.Errorf("reading from TUN: %w", err)
 		}
 
