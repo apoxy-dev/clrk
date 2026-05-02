@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -108,14 +109,13 @@ func (m *daemonLifecycleManager) Ensure(da *clrkv1alpha1.DaemonAgent, rev *clrkv
 	go func() {
 		defer close(loop.done)
 		m.run(loopCtx, daCopy, revCopy)
-
-		m.mu.Lock()
-		// Only clear the map entry if we're still the registered loop —
-		// a rollover could have already replaced us.
-		if cur, ok := m.loops[key]; ok && cur == loop {
-			delete(m.loops, key)
-		}
-		m.mu.Unlock()
+		// Intentionally NOT deleting from the loops map. A clean run()
+		// return means the supervisor decided to Stop (RestartPolicy
+		// honored). The watcher reconciles AgentSandboxRevision on
+		// every heartbeat status update; if Ensure could find no entry
+		// it would respawn the loop and the agent would churn forever.
+		// Stop() (called on rev change or agent deletion) and Shutdown()
+		// are the only paths that remove map entries.
 	}()
 }
 
@@ -179,9 +179,17 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			Revision:  rev.Name,
 		}
 
-		caPEM, err := m.loadEgressCA(ctx, da)
+		// Resolve EG dependencies (CA, backend address, dialable backend)
+		// BEFORE creating any sandbox state. The EG controller bring-up
+		// can take 30-60s in dev; without this gate we'd Create + Delete
+		// libcontainer state on every retry and burn the per-attempt
+		// backoff multiple times before the EG is even reachable.
+		caPEM, backend, err := m.waitForEgressReady(ctx, da, log)
 		if err != nil {
-			log.Error(err, "Failed to load EgressGateway CA")
+			if ctx.Err() != nil {
+				return
+			}
+			log.Info("EgressGateway not ready; will retry", "error", err)
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return
 			}
@@ -202,32 +210,9 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			}
 			continue
 		}
-		backend, backendErr := m.resolveEgressBackend(ctx, da)
-		if backendErr != nil {
-			log.Error(backendErr, "Resolving egress backend failed; will retry")
-			_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
-			if !m.sleepBackoff(ctx, &backoffExp) {
-				return
-			}
-			continue
-		}
 		if backend != "" {
 			if err := m.sandboxMgr.SetEgressBackend(sandboxID, backend); err != nil {
 				log.Error(err, "Set egress backend failed")
-			}
-			// EG.Status.EgressBackendAddress flips True the moment the
-			// Service has a NodePort, but envoy-gateway needs another
-			// few seconds to bring up the pod and bind. Without this
-			// gate the agent's first egress dial races and gets
-			// connection-refused, restarting via the back-off loop —
-			// burns 3-9s per traffic test. APO-569.
-			if err := waitTCPDialable(ctx, backend, 30*time.Second); err != nil {
-				log.Error(err, "Egress backend never became dialable", "backend", backend)
-				_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
-				if !m.sleepBackoff(ctx, &backoffExp) {
-					return
-				}
-				continue
 			}
 		}
 		startedAt := time.Now()
@@ -465,6 +450,65 @@ func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alp
 		return nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", key, corev1.TLSCertKey)
 	}
 	return caPEM, nil
+}
+
+// waitForEgressReady polls until all of the DaemonAgent's EG
+// dependencies are usable: the CA Secret exists, the EG status carries
+// an EgressBackendAddress, and that address is TCP-dialable. Returns
+// (caPEM, backend, nil) on success. Designed to be called BEFORE
+// libcontainer Create so the cold-start window doesn't churn netstack
+// state on every retry. Logs at Debug — the caller logs at Info when
+// the gate doesn't clear within one polling interval.
+func (m *daemonLifecycleManager) waitForEgressReady(
+	ctx context.Context,
+	da *clrkv1alpha1.DaemonAgent,
+	log logr.Logger,
+) ([]byte, string, error) {
+	const (
+		warmupTimeout = 5 * time.Minute
+		pollInterval  = 1 * time.Second
+	)
+	deadline := time.Now().Add(warmupTimeout)
+	logged := false
+	for {
+		caPEM, caErr := m.loadEgressCA(ctx, da)
+		backend, backendErr := m.resolveEgressBackend(ctx, da)
+		if caErr == nil && backendErr == nil {
+			if backend == "" {
+				return caPEM, "", nil
+			}
+			if err := waitTCPDialable(ctx, backend, 30*time.Second); err == nil {
+				return caPEM, backend, nil
+			} else {
+				if !logged {
+					log.Info("Egress backend not yet dialable; will keep polling", "backend", backend, "err", err)
+					logged = true
+				}
+			}
+		} else if !logged {
+			err := caErr
+			if err == nil {
+				err = backendErr
+			}
+			log.Info("Egress prerequisites not ready; will keep polling", "err", err)
+			logged = true
+		}
+		if time.Now().After(deadline) {
+			err := caErr
+			if err == nil {
+				err = backendErr
+			}
+			if err == nil {
+				err = fmt.Errorf("EgressGateway warmup timed out after %s", warmupTimeout)
+			}
+			return nil, "", err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // waitTCPDialable retries a TCP dial against addr until it succeeds or

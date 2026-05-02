@@ -99,8 +99,17 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct otlploghttp exporter: %w", err)
 	}
+	// 1s flush keeps dev/TUI feedback snappy; the upstream defaults
+	// (logs: 1s, traces: 5s) introduced a visible 5s gap between an
+	// HTTP transaction completing and its span landing in the
+	// otel-traces pane. Production OTLP collectors batch on their own
+	// receiver side, so making the exporter chatty here doesn't change
+	// what the backend ultimately stores.
+	const dfltBatchTimeout = 1 * time.Second
 	logsProvider := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(logsExp)),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logsExp,
+			sdklog.WithExportInterval(dfltBatchTimeout),
+		)),
 		sdklog.WithResource(res),
 	)
 
@@ -110,7 +119,9 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 		return nil, nil, fmt.Errorf("construct otlptracehttp exporter: %w", err)
 	}
 	tracesProvider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(tracesExp),
+		sdktrace.WithBatcher(tracesExp,
+			sdktrace.WithBatchTimeout(dfltBatchTimeout),
+		),
 		sdktrace.WithResource(res),
 	)
 

@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
+	"syscall"
 
 	"github.com/dpeckett/contextio"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -105,7 +107,15 @@ func tcpHandler(ctx context.Context, dialer Dialer) func(req *tcp.ForwarderReque
 			// Splice bidirectionally.
 			wn, err := contextio.SpliceContext(ctx, local, remote, nil)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Warn("Failed to forward session", slog.Any("error", err))
+				// Upstreams that close-on-write (Anthropic SSE, Envoy
+				// after the response) surface as ECONNRESET on splice
+				// — the bytes already reached the agent, so this isn't
+				// actionable. Keep WARN for genuine forwarding errors.
+				if isBenignPeerClose(err) {
+					logger.Debug("Peer closed connection mid-splice", slog.Any("error", err))
+				} else {
+					logger.Warn("Failed to forward session", slog.Any("error", err))
+				}
 				req.Complete(true) // send RST
 				return
 			}
@@ -114,4 +124,19 @@ func tcpHandler(ctx context.Context, dialer Dialer) func(req *tcp.ForwarderReque
 			req.Complete(false) // send FIN
 		}()
 	}
+}
+
+// isBenignPeerClose tells the routine close-on-write cases (ECONNRESET
+// after the upstream finished writing the response, or the broken-pipe
+// equivalent on the other direction) apart from real forwarding
+// failures the operator should see.
+func isBenignPeerClose(err error) bool {
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// gonet wraps tcpip errors as net.OpError without a typed cause,
+	// so fall back to the message text for the cases above.
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe")
 }

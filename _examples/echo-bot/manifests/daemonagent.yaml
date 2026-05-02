@@ -4,10 +4,11 @@ metadata:
   name: echo-bot
 spec:
   workerPoolRef: default
-  # OnFailure: respawn after each clean exit. The agent issues one
-  # Anthropic call and exits; the daemon supervisor brings it back up
-  # so the demo loops without `while true`.
-  restartPolicy: OnFailure
+  # Always: even after a successful Anthropic call the daemon supervisor
+  # respawns the agent so the demo keeps producing new ext_proc records
+  # in the otel-logs / otel-traces panes. RestartPolicy: OnFailure would
+  # stop after one clean call (k8s-style semantic).
+  restartPolicy: Always
   egressRefs:
     - gatewayRef: echo-bot
   template:
@@ -16,19 +17,22 @@ spec:
       command: ["sh", "-c"]
       args:
         - |
-          # The agent makes ONE Anthropic call and exits. Note: no
-          # `x-api-key` header — the proxy injects it via the attached
+          # The agent loops `call → sleep` so `RestartPolicy: Always`
+          # doesn't churn libcontainer + netstack on every iteration.
+          # Each call issues ONE Anthropic POST without an `x-api-key`
+          # header — the proxy injects it via the attached
           # CredentialInjectionPolicy. The agent never sees the key.
-          curl -sS -o /tmp/resp.json -w 'http %{http_code} %{url_effective}\n' \
-            -X POST https://api.anthropic.com/v1/messages \
-            -H 'content-type: application/json' \
-            -H 'anthropic-version: 2023-06-01' \
-            -d '{
-              "model": "claude-haiku-4-5",
-              "max_tokens": 64,
-              "messages": [{"role": "user", "content": "Say hi in three words."}]
-            }'
-          # Print the model echo to stdout so `kubectl logs` shows the
-          # provider response without the secret ever being on the wire
-          # from the agent's side.
-          cat /tmp/resp.json
+          while :; do
+            curl -sS -o /tmp/resp.json -w 'http %{http_code} %{url_effective}\n' \
+              -X POST https://api.anthropic.com/v1/messages \
+              -H 'content-type: application/json' \
+              -H 'anthropic-version: 2023-06-01' \
+              -d '{
+                "model": "claude-haiku-4-5",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Say hi in three words."}]
+              }'
+            cat /tmp/resp.json
+            echo
+            sleep 5
+          done
