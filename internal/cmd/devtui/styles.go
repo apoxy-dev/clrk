@@ -45,6 +45,38 @@ var (
 
 	streamStderrStyle = lipgloss.NewStyle().Foreground(colorWarn)
 	streamClrkStyle   = lipgloss.NewStyle().Foreground(colorAccent)
+
+	// Header styles. The header box renders on top of every screen,
+	// flush with the terminal edge.
+	headerBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(colorBorder).
+			Padding(0, 1)
+	headerLogoStyle      = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	headerTitleStyle     = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	headerSubtitleStyle  = lipgloss.NewStyle().Foreground(colorMuted)
+	headerStatLabelStyle = lipgloss.NewStyle().Foreground(colorMuted)
+	headerStatValueStyle = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	headerNavStyle       = lipgloss.NewStyle().Foreground(colorMuted)
+
+	// Agent row styling — kind glyph picks a hue per CRD so the column
+	// is scannable at a glance.
+	agentKindDaemonStyle = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	agentKindTaskStyle   = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
+
+	// Detail-screen tab styling.
+	tabActiveStyle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true).
+			Underline(true).
+			Padding(0, 1)
+	tabInactiveStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Padding(0, 1)
+	tabStripStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(colorBorder).
+			Padding(0, 1)
 )
 
 // statusStyle picks the lipgloss style for a given status. Centralizes the

@@ -1,7 +1,7 @@
-// Package devtui renders the live status of `clrk dev` (k3s,
+// Package devtui renders the live status of `clrk dev` (agents, k3s,
 // controller-manager, workers) and their per-component logs in a Bubble Tea
 // TUI. Orchestration code stays in pkg/cmd; this package is a passive
-// renderer driven by Send* helpers.
+// renderer driven by Send* helpers and the devagents.Store.
 package devtui
 
 import (
@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/apoxy-dev/clrk/internal/cmd/devagents"
 )
 
 // preRunQueueSize bounds the number of messages buffered before Run()
@@ -31,10 +33,13 @@ type Program struct {
 	queue chan tea.Msg
 }
 
-// New constructs a TUI program for the given component names. The clrk
-// pseudo-source is added implicitly as the first sidebar entry.
-func New(componentNames []string) *Program {
-	m := newModel(componentNames)
+// New constructs a TUI program for the given component names backed
+// by the supplied agents store. The clrk pseudo-source is added
+// implicitly as the first sidebar entry on the system screen. Pass
+// nil for store to start with an empty agents view (the store will
+// be created internally) — useful for tests.
+func New(componentNames []string, store *devagents.Store) *Program {
+	m := newRootModel(componentNames, store)
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),

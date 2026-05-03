@@ -27,7 +27,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 )
 
@@ -548,7 +550,7 @@ func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {
 	}
 	fields := s.GetFields()
 	if v := fields[MetaAgentKind]; v != nil {
-		rec.AgentKind = v.GetStringValue()
+		rec.AgentKind = decodeAgentKind(v.GetStringValue())
 	}
 	if v := fields[MetaAgentNamespace]; v != nil {
 		rec.AgentNamespace = v.GetStringValue()
@@ -565,6 +567,28 @@ func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {
 	if v := fields[MetaInvocationID]; v != nil {
 		rec.InvocationID = v.GetStringValue()
 	}
+}
+
+// decodeAgentKind translates the raw byte value the proxy_protocol
+// listener filter wrote into dynamic metadata back into the human-
+// readable kind string OTel consumers expect. The TLV encoding (see
+// internal/egress/proxyproto/tlv.go) is one byte: 0 = DaemonAgent,
+// 1 = TaskAgent. Without this translation `agent.kind` reaches OTel
+// as a NUL or 0x01 byte and downstream attribution silently drops the
+// record (the dev TUI's per-agent detail view, ClickHouse views, etc.).
+// Pass-through any value that isn't a recognised single byte so a
+// future producer that sets the string directly still works.
+func decodeAgentKind(raw string) string {
+	if len(raw) != 1 {
+		return raw
+	}
+	switch raw[0] {
+	case byte(proxyproto.AgentKindDaemon):
+		return clrkv1alpha1.AgentKindDaemon
+	case byte(proxyproto.AgentKindTask):
+		return clrkv1alpha1.AgentKindTask
+	}
+	return raw
 }
 
 // authorityPortRE matches a trailing :NN port suffix on a host. We don't

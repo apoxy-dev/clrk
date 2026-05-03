@@ -1,15 +1,13 @@
 package devtui
 
 import (
-	"fmt"
-	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/apoxy-dev/clrk/internal/cmd/devagents"
 )
 
 const (
@@ -17,30 +15,24 @@ const (
 	tickInterval = time.Second
 )
 
-// tickMsg fires once per second to refresh uptime counters.
+// tickMsg fires once per second to refresh uptime counters and re-pull
+// store snapshots. Both the agents and detail screens render directly
+// from the store, so the tick is also the pace at which their numbers
+// update.
 type tickMsg time.Time
 
-// model is the root tea.Model. It owns the per-component state and the
-// viewport that renders the selected component's log buffer.
-type model struct {
-	width, height int
+// screen identifies which view rootModel is currently rendering.
+type screen int
 
-	components []*component
-	byName     map[string]*component
-	selected   int
+const (
+	screenAgents screen = iota
+	screenAgentDetail
+	screenSystem
+)
 
-	viewport viewport.Model
-	keys     keyMap
-	help     help.Model
-	showHelp bool
-	quitting bool
-
-	watcher watcherState
-}
-
-// watcherState consolidates the sidebar's rebuild-status block. seen is true
-// once the watcher has emitted at least one event; until then the block is
-// hidden entirely (no point displaying "idle" before --watch ever fires).
+// watcherState is shared between the systemView and the orchestrator's
+// SendWatcher push. Kept at package scope so messages.go's WatcherMsg
+// can populate it without round-tripping through systemView.
 type watcherState struct {
 	event  WatcherEvent
 	prefix string
@@ -49,40 +41,40 @@ type watcherState struct {
 	seen   bool
 }
 
-func newModel(componentNames []string) *model {
-	names := append([]string{ClrkSource}, componentNames...)
-	comps := make([]*component, 0, len(names))
-	byName := make(map[string]*component, len(names))
-	for _, n := range names {
-		c := newComponent(n)
-		comps = append(comps, c)
-		byName[n] = c
+// rootModel is the screen router. It owns shared chrome (header) and
+// dispatches input to the active view.
+type rootModel struct {
+	width, height int
+
+	current  screen
+	keys     keyMap
+	quitting bool
+
+	store *devagents.Store
+
+	agents *agentsView
+	detail *agentDetailView
+	system *systemView
+}
+
+func newRootModel(componentNames []string, store *devagents.Store) *rootModel {
+	if store == nil {
+		store = devagents.New()
 	}
-	// The clrk pseudo-component is always "ready" — it represents the dev
-	// command itself, which is by definition running while the TUI is up.
-	comps[0].status = StatusReady
-	comps[0].startedAt = time.Now()
-
-	h := help.New()
-	h.ShowAll = false
-
-	vp := viewport.New(0, 0)
-	vp.MouseWheelEnabled = true
-
-	return &model{
-		components: comps,
-		byName:     byName,
-		viewport:   vp,
-		keys:       defaultKeys,
-		help:       h,
+	return &rootModel{
+		current: screenAgents,
+		keys:    defaultKeys,
+		store:   store,
+		agents:  newAgentsView(store),
+		system:  newSystemView(componentNames),
 	}
 }
 
-func (m *model) Init() tea.Cmd {
+func (m *rootModel) Init() tea.Cmd {
 	return tickCmd()
 }
 
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -93,78 +85,128 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case ComponentStatusMsg:
-		if c, ok := m.byName[msg.Name]; ok {
-			c.status = msg.Status
-			if msg.Status != StatusPending && c.startedAt.IsZero() {
-				c.startedAt = time.Now()
-			}
-		}
+		m.system.applyStatus(msg.Name, msg.Status)
 		return m, nil
 
 	case LogLineMsg:
-		c, ok := m.byName[msg.Source]
-		if !ok {
-			return m, nil
-		}
-		styled := styleLine(msg.Line, msg.Stream)
-		c.append(styled)
-		if c == m.current() {
-			m.refreshViewport(true)
-		}
+		// Only refresh the viewport when the system screen is active
+		// AND the message targets the visible component — saves redraw
+		// work while the user is on the agents screen.
+		focused := m.current == screenSystem
+		m.system.applyLog(msg.Source, msg.Line, msg.Stream, focused)
 		return m, nil
 
 	case WatcherMsg:
-		m.watcher = watcherState{
-			event:  msg.Event,
-			prefix: msg.Prefix,
-			dur:    msg.Duration,
-			err:    msg.Err,
-			seen:   true,
-		}
+		m.system.applyWatcher(msg)
 		return m, nil
 
 	case tickMsg:
 		return m, tickCmd()
 	}
 
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	if m.current == screenSystem {
+		cmd := m.system.updateViewport(msg)
+		return m, cmd
+	}
+	if m.current == screenAgentDetail && m.detail != nil {
+		cmd := m.detail.updateViewport(msg)
+		return m, cmd
+	}
+	return m, nil
 }
 
-func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *rootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		m.quitting = true
 		return m, tea.Quit
-	case key.Matches(msg, m.keys.Help):
-		m.showHelp = !m.showHelp
-		m.help.ShowAll = m.showHelp
-		m.relayout()
+	case key.Matches(msg, m.keys.AgentsScreen):
+		m.current = screenAgents
 		return m, nil
-	case key.Matches(msg, m.keys.Up):
-		m.selectDelta(-1)
+	case key.Matches(msg, m.keys.SystemScreen):
+		m.current = screenSystem
 		return m, nil
-	case key.Matches(msg, m.keys.Down), key.Matches(msg, m.keys.Tab):
-		m.selectDelta(+1)
-		return m, nil
-	case key.Matches(msg, m.keys.Clear):
-		m.current().clear()
-		m.refreshViewport(true)
-		return m, nil
-	case key.Matches(msg, m.keys.Top):
-		m.viewport.GotoTop()
-		return m, nil
-	case key.Matches(msg, m.keys.Bottom):
-		m.viewport.GotoBottom()
+	case key.Matches(msg, m.keys.Back):
+		if m.current == screenAgentDetail {
+			if m.detail != nil && m.detail.showSpec {
+				m.detail.showSpec = false
+				return m, nil
+			}
+			m.current = screenAgents
+		}
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+
+	switch m.current {
+	case screenAgents:
+		return m.handleAgentsKey(msg)
+	case screenAgentDetail:
+		return m.handleDetailKey(msg)
+	case screenSystem:
+		return m.handleSystemKey(msg)
+	}
+	return m, nil
 }
 
-func (m *model) View() string {
+func (m *rootModel) handleAgentsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		m.agents.selectDelta(-1)
+	case key.Matches(msg, m.keys.Down), key.Matches(msg, m.keys.Tab):
+		m.agents.selectDelta(+1)
+	case key.Matches(msg, m.keys.Open):
+		if id, ok := m.agents.selectedID(); ok {
+			m.detail = newAgentDetailView(m.store, id)
+			m.detail.relayout(m.width, m.bodyHeight())
+			m.current = screenAgentDetail
+		}
+	}
+	return m, nil
+}
+
+func (m *rootModel) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detail == nil {
+		m.current = screenAgents
+		return m, nil
+	}
+	switch {
+	case key.Matches(msg, m.keys.Spec):
+		m.detail.toggleSpec()
+	case key.Matches(msg, m.keys.Tab):
+		if !m.detail.showSpec {
+			m.detail.cycleTab()
+		}
+	case key.Matches(msg, m.keys.Top):
+		m.detail.gotoTop()
+	case key.Matches(msg, m.keys.Bottom):
+		m.detail.gotoBottom()
+	default:
+		cmd := m.detail.updateViewport(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *rootModel) handleSystemKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		m.system.selectDelta(-1)
+	case key.Matches(msg, m.keys.Down), key.Matches(msg, m.keys.Tab):
+		m.system.selectDelta(+1)
+	case key.Matches(msg, m.keys.Clear):
+		m.system.clearCurrent()
+	case key.Matches(msg, m.keys.Top):
+		m.system.gotoTop()
+	case key.Matches(msg, m.keys.Bottom):
+		m.system.gotoBottom()
+	default:
+		cmd := m.system.updateViewport(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *rootModel) View() string {
 	if m.quitting {
 		return ""
 	}
@@ -172,168 +214,125 @@ func (m *model) View() string {
 		return "Initializing..."
 	}
 
-	footer := footerStyle.Width(m.width - 2).Render(m.help.View(m.keys))
-	footerHeight := lipgloss.Height(footer)
+	header := m.renderHeader()
+	footer := m.renderFooter()
+	headerH := lipgloss.Height(header)
+	footerH := lipgloss.Height(footer)
 
-	bodyHeight := m.height - footerHeight - 1
+	bodyHeight := m.height - headerH - footerH
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}
 
-	sidebar := sidebarStyle.
-		Width(sidebarWidth).
-		Height(bodyHeight).
-		Render(m.renderSidebar(bodyHeight - 2))
-
-	logTitle := titleStyle.Render("Logs: " + m.current().display)
-	logBody := m.viewport.View()
-	logPane := logPaneStyle.
-		Width(m.width - sidebarWidth - 2).
-		Height(bodyHeight).
-		Render(logTitle + "\n" + logBody)
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, logPane)
-	header := titleStyle.Render("clrk dev")
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-}
-
-// renderSidebar paints the component list and the watcher status block. The
-// budget is the available height in lines so the watcher block can be padded
-// to the bottom.
-func (m *model) renderSidebar(budget int) string {
-	now := time.Now()
-	var rows []string
-	for i, c := range m.components {
-		row := m.renderComponentRow(c, now)
-		if i == m.selected {
-			row = sidebarSelectedStyle.Render("▌ " + row)
+	var body string
+	switch m.current {
+	case screenAgents:
+		body = m.agents.render(m.width, bodyHeight)
+	case screenAgentDetail:
+		if m.detail == nil {
+			m.current = screenAgents
+			body = m.agents.render(m.width, bodyHeight)
 		} else {
-			row = "  " + row
+			body = m.detail.render(m.width, bodyHeight)
 		}
-		rows = append(rows, row)
+	case screenSystem:
+		body = m.system.render(m.width, bodyHeight)
 	}
 
-	listBlock := strings.Join(rows, "\n")
-
-	watcher := m.renderWatcherBlock()
-	if watcher == "" {
-		return listBlock
-	}
-
-	used := lipgloss.Height(listBlock) + lipgloss.Height(watcher)
-	pad := budget - used - 1
-	if pad < 1 {
-		pad = 1
-	}
-	return listBlock + strings.Repeat("\n", pad) + watcher
+	// Pad body to bodyHeight so the footer stays glued to the
+	// terminal's bottom edge regardless of the screen's rendered
+	// content height.
+	bodyBlock := lipgloss.NewStyle().Height(bodyHeight).Width(m.width).Render(body)
+	return lipgloss.JoinVertical(lipgloss.Left, header, bodyBlock, footer)
 }
 
-func (m *model) renderComponentRow(c *component, now time.Time) string {
-	st := statusStyle(c.status)
-	glyph := st.Render(c.glyph())
-	name := c.display
-	uptime := mutedStyle.Render(c.uptime(now))
+func (m *rootModel) renderHeader() string {
+	stats := m.collectStats()
+	title := m.screenTitle()
+	return renderHeader(m.width, title, stats)
+}
 
-	avail := sidebarWidth - 2 - 2 - lipgloss.Width(glyph) - lipgloss.Width(uptime) - 2
-	if avail < 0 {
-		avail = 0
-	}
-	if lipgloss.Width(name) > avail {
-		if avail > 1 {
-			name = name[:avail-1] + "…"
-		} else {
-			name = ""
+func (m *rootModel) renderFooter() string {
+	return renderFooter(m.width, m.screenNav())
+}
+
+// screenTitle returns the per-screen subtitle that pairs with the
+// brand mark on header line 1.
+func (m *rootModel) screenTitle() string {
+	switch m.current {
+	case screenAgents:
+		return "agents"
+	case screenAgentDetail:
+		if m.detail != nil {
+			if m.detail.showSpec {
+				return string(m.detail.id.Kind) + "/" + m.detail.id.Namespace + "/" + m.detail.id.Name + " · spec"
+			}
+			return string(m.detail.id.Kind) + "/" + m.detail.id.Namespace + "/" + m.detail.id.Name
 		}
+		return "agent"
+	case screenSystem:
+		return "system view"
 	}
-	pad := avail - lipgloss.Width(name)
-	if pad < 0 {
-		pad = 0
-	}
-	return glyph + " " + name + strings.Repeat(" ", pad) + " " + uptime
+	return ""
 }
 
-func (m *model) renderWatcherBlock() string {
-	if !m.watcher.seen {
-		return ""
-	}
-	header := mutedStyle.Render("─ watcher ─")
-	switch m.watcher.event {
-	case WatcherBuilding:
-		return header + "\n" + statusStartingStyle.Render("building…")
-	case WatcherReloaded:
-		line := fmt.Sprintf("idle · %s @%s", m.watcher.prefix, m.watcher.dur.Round(time.Millisecond))
-		return header + "\n" + statusReadyStyle.Render(line)
-	case WatcherFailed:
-		line := "error"
-		if m.watcher.prefix != "" {
-			line = "error · " + m.watcher.prefix
+// screenNav returns the keybinding strip rendered in the bottom
+// footer. Keys are screen-specific so the strip never shows bindings
+// the user can't act on.
+func (m *rootModel) screenNav() string {
+	switch m.current {
+	case screenAgents:
+		return "↑↓ select   ⏎ open   s system   q quit"
+	case screenAgentDetail:
+		if m.detail != nil && m.detail.showSpec {
+			return "esc back   y close spec   a agents   s system   q quit"
 		}
-		return header + "\n" + statusErrorStyle.Render(line)
-	default:
-		return header + "\n" + mutedStyle.Render("idle")
+		return "tab logs/traces   y spec   esc back   a agents   s system   q quit"
+	case screenSystem:
+		return "↑↓ select   c clear   g/G top/bottom   a agents   q quit"
 	}
+	return ""
 }
 
-func (m *model) current() *component {
-	return m.components[m.selected]
+// collectStats sweeps the current snapshot for the header counters. We
+// don't cache — Snapshot() under RLock is cheap and the tick rate is
+// 1Hz, so a per-tick recount is fine.
+func (m *rootModel) collectStats() headerStats {
+	snaps := m.store.Snapshot()
+	pools := map[string]struct{}{}
+	stats := headerStats{Agents: len(snaps)}
+	for _, s := range snaps {
+		if s.Pool != "" {
+			pools[s.Pool] = struct{}{}
+		}
+		stats.ReqsPerM += s.Reqs1m
+		stats.InTokPM += s.TokensIn1m
+		stats.OutTokPM += s.TokensOut1m
+	}
+	stats.Pools = len(pools)
+	return stats
 }
 
-func (m *model) selectDelta(d int) {
-	n := len(m.components)
-	m.selected = (m.selected + d + n) % n
-	m.refreshViewport(true)
+func (m *rootModel) bodyHeight() int {
+	header := m.renderHeader()
+	footer := m.renderFooter()
+	h := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	if h < 1 {
+		h = 1
+	}
+	return h
 }
 
-// refreshViewport rebuilds the viewport contents from the current component's
-// ring buffer. If autoFollow is true and the user was already pinned to the
-// bottom (or just selected this component), auto-scroll to the tail.
-func (m *model) refreshViewport(autoFollow bool) {
-	c := m.current()
-	follow := autoFollow && m.viewport.AtBottom()
-	m.viewport.SetContent(c.joined())
-	if follow {
-		m.viewport.GotoBottom()
+func (m *rootModel) relayout() {
+	bodyHeight := m.bodyHeight()
+	m.system.relayout(m.width, bodyHeight)
+	if m.detail != nil {
+		m.detail.relayout(m.width, bodyHeight)
 	}
-}
-
-func (m *model) relayout() {
-	footerHeight := lipgloss.Height(footerStyle.Render(m.help.View(m.keys)))
-	bodyHeight := m.height - footerHeight - 1
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
-	logWidth := m.width - sidebarWidth - 4
-	if logWidth < 10 {
-		logWidth = 10
-	}
-	logHeight := bodyHeight - 2
-	if logHeight < 1 {
-		logHeight = 1
-	}
-	if m.viewport.Width == logWidth && m.viewport.Height == logHeight {
-		return
-	}
-	m.viewport.Width = logWidth
-	m.viewport.Height = logHeight
-	m.refreshViewport(true)
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
-}
-
-// styleLine applies stream-specific coloring. We render once on append so the
-// viewport can stay zero-allocation on every redraw.
-func styleLine(line string, stream LogStream) string {
-	switch stream {
-	case StreamStderr:
-		return streamStderrStyle.Render(line)
-	case StreamClrk:
-		return streamClrkStyle.Render(line)
-	default:
-		return line
-	}
 }

@@ -97,14 +97,30 @@ func SignalContainer(ctx context.Context, name, signal string) error {
 // backend IP — Endpoints.addresses must be IPs, not hostnames.
 func IPOnNetwork(ctx context.Context, name, network string) (string, error) {
 	format := fmt.Sprintf(`{{(index .NetworkSettings.Networks %q).IPAddress}}`, network)
-	out, err := exec.CommandContext(ctx, "docker", "inspect",
-		"--format", format, name).Output()
-	if err != nil {
-		return "", fmt.Errorf("docker inspect %s on %s: %w", name, network, err)
+	// Docker Desktop occasionally reports a container "running" before
+	// the per-network IP populates; back-to-back `clrk dev` cycles can
+	// hit a 1-2s window where inspect returns "". Poll briefly so a
+	// transient race doesn't fail bring-up.
+	const ipDeadline = 10 * time.Second
+	deadline := time.Now().Add(ipDeadline)
+	for {
+		out, err := exec.CommandContext(ctx, "docker", "inspect",
+			"--format", format, name).Output()
+		if err == nil {
+			if ip := strings.TrimSpace(string(out)); ip != "" {
+				return ip, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return "", fmt.Errorf("docker inspect %s on %s: %w", name, network, err)
+			}
+			return "", fmt.Errorf("container %s has no IP on network %s after %s", name, network, ipDeadline)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
 	}
-	ip := strings.TrimSpace(string(out))
-	if ip == "" {
-		return "", fmt.Errorf("container %s has no IP on network %s", name, network)
-	}
-	return ip, nil
 }

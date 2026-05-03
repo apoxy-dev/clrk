@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/apoxy-dev/clrk/internal/cmd/devagents"
 	"github.com/apoxy-dev/clrk/internal/cmd/devotel"
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
 	"github.com/apoxy-dev/clrk/internal/drivers"
@@ -163,7 +164,7 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 		streamLogs(ctx, w.Name())
 	}
 
-	go forwardOtel(ctx, receiver, func(name, line string) {
+	go forwardOtel(ctx, receiver, nil, func(name, line string) {
 		fmt.Fprintf(os.Stdout, "[%s] %s\n", name, line)
 	})
 
@@ -182,15 +183,23 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 
 // forwardOtel pumps decoded OTLP records into sink, tagged with the
 // pane / prefix name. Caller picks the sink (TUI or stdout); the
-// select loop is identical regardless.
-func forwardOtel(ctx context.Context, receiver *devotel.Receiver, sink func(name, line string)) {
+// select loop is identical regardless. When store is non-nil, every
+// record is also folded into the per-agent rolling stats so the
+// agents screen has data to render.
+func forwardOtel(ctx context.Context, receiver *devotel.Receiver, store *devagents.Store, sink func(name, line string)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case rec := <-receiver.Logs():
+			if store != nil {
+				store.AddLog(rec)
+			}
 			sink(devtui.OtelLogsSource, devotel.FormatLog(rec))
 		case sp := <-receiver.Traces():
+			if store != nil {
+				store.AddSpan(sp)
+			}
 			sink(devtui.OtelTracesSource, devotel.FormatSpan(sp))
 		}
 	}
@@ -223,7 +232,8 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 	}
 	componentNames = append(componentNames, devtui.OtelLogsSource, devtui.OtelTracesSource)
 
-	prog := devtui.New(componentNames)
+	store := devagents.New()
+	prog := devtui.New(componentNames, store)
 	devtui.MarkSyntheticReady(prog, devtui.OtelLogsSource)
 	devtui.MarkSyntheticReady(prog, devtui.OtelTracesSource)
 
@@ -249,9 +259,18 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 		for _, w := range state.workers {
 			go streamLogsTo(orchestrateCtx, prog, w.Name())
 		}
-		go forwardOtel(orchestrateCtx, receiver, func(name, line string) {
+		go forwardOtel(orchestrateCtx, receiver, store, func(name, line string) {
 			prog.SendLog(name, line, devtui.StreamStdout)
 		})
+		// Begin watching TaskAgent + DaemonAgent now that the apiserver
+		// is reachable. Failures back off internally; we don't surface
+		// them to the user — the agents pane simply stays empty until
+		// the watcher reconnects.
+		go func() {
+			if err := store.Run(orchestrateCtx, state.k3s.HostKubeconfigPath()); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("Agent watcher exited", "err", err)
+			}
+		}()
 		if o.watch {
 			state.startWatcher(orchestrateCtx, o, prog)
 		}
