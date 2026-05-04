@@ -209,6 +209,12 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 
 	reqBytesLeft := maxCaptureBytes
 	respBytesLeft := maxCaptureBytes
+	// respKeepLast switches the response body capture from
+	// keep-first-N (appendBounded) to keep-last-N (appendRing) once we
+	// see a streamed content-type on ResponseHeaders. Streamed
+	// providers report cumulative token usage in the terminal event,
+	// so first-N truncation drops exactly the data we need.
+	respKeepLast := false
 
 	for {
 		req, err := stream.Recv()
@@ -302,6 +308,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
 				respBytesLeft = 0
 			}
+			respKeepLast = isStreamingContentType(rec.ResponseHeaders["content-type"])
 		case *extprocv3.ProcessingRequest_RequestBody:
 			body, trunc := appendBounded(rec.RequestBody, m.RequestBody.GetBody(), &reqBytesLeft)
 			if rec.RequestBodyAt.IsZero() {
@@ -311,7 +318,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			rec.RequestTruncated = rec.RequestTruncated || trunc
 			resp = bodyContinue(true)
 		case *extprocv3.ProcessingRequest_ResponseBody:
-			body, trunc := appendBounded(rec.ResponseBody, m.ResponseBody.GetBody(), &respBytesLeft)
+			var (
+				body  []byte
+				trunc bool
+			)
+			if respKeepLast {
+				body, trunc = appendRing(rec.ResponseBody, m.ResponseBody.GetBody(), maxCaptureBytes)
+			} else {
+				body, trunc = appendBounded(rec.ResponseBody, m.ResponseBody.GetBody(), &respBytesLeft)
+			}
 			if rec.ResponseBodyAt.IsZero() {
 				rec.ResponseBodyAt = now
 			}
@@ -541,6 +556,49 @@ func appendBounded(dst, src []byte, left *int) ([]byte, bool) {
 	dst = append(dst, src[:*left]...)
 	*left = 0
 	return dst, true
+}
+
+// appendRing appends src to dst and trims from the head when the
+// total exceeds capBytes, keeping the last capBytes bytes. trunc is
+// true when bytes were dropped (either from this call or any prior
+// one — once we trim, every subsequent call inherits trunc=true via
+// dst already being at capacity). Used for streaming response bodies
+// where the terminal usage event lives at the tail.
+func appendRing(dst, src []byte, capBytes int) ([]byte, bool) {
+	if capBytes <= 0 {
+		return dst, len(src) > 0
+	}
+	if len(src) >= capBytes {
+		// New chunk alone exceeds the cap; keep only its tail.
+		out := make([]byte, capBytes)
+		copy(out, src[len(src)-capBytes:])
+		return out, true
+	}
+	dst = append(dst, src...)
+	if len(dst) > capBytes {
+		drop := len(dst) - capBytes
+		dst = dst[drop:]
+		return dst, true
+	}
+	return dst, false
+}
+
+// isStreamingContentType reports whether ct names a streamed response
+// shape we capture keep-last-N. Match is case-insensitive and ignores
+// parameters (charset, boundary).
+func isStreamingContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	ct = strings.ToLower(ct)
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	switch ct {
+	case "text/event-stream", "application/x-ndjson":
+		return true
+	}
+	return false
 }
 
 func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {

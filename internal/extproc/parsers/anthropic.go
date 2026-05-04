@@ -17,8 +17,13 @@ import (
 //	  "usage": { "input_tokens": 12, "output_tokens": 34 }, ... }
 //
 // SSE responses (`stream: true` request, content-type:
-// text/event-stream) report usage in the terminal `message_delta`
-// event; we don't reassemble SSE in MVP.
+// text/event-stream) emit `input_tokens` once on the leading
+// `message_start` event and `output_tokens` cumulatively on the
+// terminal `message_delta` event. We scan all `data:` events in the
+// captured tail and pick the last successful decode of each shape.
+// Under aggressive keep-last-N truncation `message_start` may be
+// evicted — in that case we report only `output_tokens` and rely on
+// `UsageVisible` to indicate partial visibility.
 type anthropicParser struct{}
 
 // anthropicUsage is the slim subset we read off response bodies.
@@ -48,6 +53,7 @@ func (anthropicParser) Parse(in Input) *ProviderInfo {
 
 	if hasContentTypePrefix(in.RespHeaders, "text/event-stream") {
 		info.StreamResponse = true
+		extractAnthropicSSEUsage(in.RespBody, info)
 		return info
 	}
 
@@ -70,6 +76,57 @@ func (anthropicParser) Parse(in Input) *ProviderInfo {
 	// echo as proof the relevant region of the body was visible.
 	info.UsageVisible = resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 || resp.Model != ""
 	return info
+}
+
+// anthropicSSEMessageStart is the shape of a `message_start` event
+// payload — only the fields we read.
+type anthropicSSEMessageStart struct {
+	Type    string `json:"type"`
+	Message struct {
+		Model string         `json:"model"`
+		Usage anthropicUsage `json:"usage"`
+	} `json:"message"`
+}
+
+// anthropicSSEMessageDelta is the shape of a `message_delta` event
+// payload. Anthropic emits the cumulative output_tokens here; the
+// inner usage block has no input_tokens echo.
+type anthropicSSEMessageDelta struct {
+	Type  string         `json:"type"`
+	Usage anthropicUsage `json:"usage"`
+}
+
+func extractAnthropicSSEUsage(body []byte, info *ProviderInfo) {
+	if len(body) == 0 {
+		return
+	}
+	scanSSEData(body, func(payload []byte) {
+		// Try the two event shapes that carry usage. Decode failures
+		// are expected on partial leading fragments under keep-last-N.
+		var ms anthropicSSEMessageStart
+		if err := json.Unmarshal(payload, &ms); err == nil && ms.Type == "message_start" {
+			if ms.Message.Model != "" {
+				info.ResponseModel = ms.Message.Model
+			}
+			if ms.Message.Usage.InputTokens > 0 {
+				info.InputTokens = ms.Message.Usage.InputTokens
+				info.UsageVisible = true
+			}
+			// message_start may also seed output_tokens=1 (the leading
+			// role token); message_delta will overwrite cumulatively.
+			if ms.Message.Usage.OutputTokens > 0 && info.OutputTokens == 0 {
+				info.OutputTokens = ms.Message.Usage.OutputTokens
+			}
+			return
+		}
+		var md anthropicSSEMessageDelta
+		if err := json.Unmarshal(payload, &md); err == nil && md.Type == "message_delta" {
+			if md.Usage.OutputTokens > 0 {
+				info.OutputTokens = md.Usage.OutputTokens
+				info.UsageVisible = true
+			}
+		}
+	})
 }
 
 func anthropicOperation(path string) string {

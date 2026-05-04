@@ -40,8 +40,10 @@ import (
 //
 // Streaming endpoint :streamGenerateContent ships either SSE
 // (text/event-stream) or NDJSON (application/x-ndjson) depending on
-// the ?alt= query param. Usage lands in the final chunk; cross-chunk
-// reassembly is out of scope for MVP, same call as Anthropic/OpenAI.
+// the ?alt= query param. usageMetadata in the final chunk is the
+// cumulative count; we walk all chunks and use the last successful
+// decode. Capture is keep-last-N for both shapes so the terminal
+// chunk survives even when the stream is larger than the cap.
 type googleParser struct{}
 
 type googleUsageMetadata struct {
@@ -71,9 +73,14 @@ func (googleParser) Parse(in Input) *ProviderInfo {
 		RequestModel: model,
 	}
 
-	if hasContentTypePrefix(in.RespHeaders, "text/event-stream") ||
-		hasContentTypePrefix(in.RespHeaders, "application/x-ndjson") {
+	if hasContentTypePrefix(in.RespHeaders, "text/event-stream") {
 		info.StreamResponse = true
+		extractGoogleSSEUsage(in.RespBody, info)
+		return info
+	}
+	if hasContentTypePrefix(in.RespHeaders, "application/x-ndjson") {
+		info.StreamResponse = true
+		extractGoogleNDJSONUsage(in.RespBody, info)
 		return info
 	}
 
@@ -92,6 +99,43 @@ func (googleParser) Parse(in Input) *ProviderInfo {
 		resp.UsageMetadata.CandidatesTokenCount > 0 ||
 		resp.ModelVersion != ""
 	return info
+}
+
+func extractGoogleSSEUsage(body []byte, info *ProviderInfo) {
+	if len(body) == 0 {
+		return
+	}
+	scanSSEData(body, func(payload []byte) {
+		var resp googleResponse
+		if err := json.Unmarshal(payload, &resp); err != nil {
+			return
+		}
+		applyGoogleResponse(resp, info)
+	})
+}
+
+func extractGoogleNDJSONUsage(body []byte, info *ProviderInfo) {
+	line := lastJSONLine(body)
+	if line == nil {
+		return
+	}
+	var resp googleResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return
+	}
+	applyGoogleResponse(resp, info)
+}
+
+func applyGoogleResponse(resp googleResponse, info *ProviderInfo) {
+	if resp.ModelVersion != "" {
+		info.ResponseModel = resp.ModelVersion
+	}
+	if resp.UsageMetadata.PromptTokenCount > 0 ||
+		resp.UsageMetadata.CandidatesTokenCount > 0 {
+		info.InputTokens = resp.UsageMetadata.PromptTokenCount
+		info.OutputTokens = resp.UsageMetadata.CandidatesTokenCount
+		info.UsageVisible = true
+	}
 }
 
 // isGoogleOpenAICompatPath reports whether path targets Gemini's

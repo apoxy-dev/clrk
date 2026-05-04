@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -23,8 +24,12 @@ import (
 //
 // SSE responses (`stream: true`, content-type: text/event-stream) ship
 // usage in the terminal chunk only when the client opts in via
-// `stream_options.include_usage=true` — too dependent on caller config
-// for MVP, so we just flag StreamResponse and skip.
+// `stream_options.include_usage=true`. We scan all `data:` events in
+// the captured tail and use the LAST decode that carries a non-zero
+// usage block — older events with `usage: null` (the default for
+// non-terminal chunks) are ignored. Capture-side keeps the last N
+// bytes for SSE so the terminal event survives even when the stream
+// is larger than the cap.
 type openaiParser struct{}
 
 type openaiRequest struct {
@@ -61,6 +66,7 @@ func parseOpenAIShape(in Input, info *ProviderInfo) {
 	}
 	if hasContentTypePrefix(in.RespHeaders, "text/event-stream") {
 		info.StreamResponse = true
+		extractOpenAISSEUsage(in.RespBody, info)
 		return
 	}
 	if len(in.RespBody) == 0 {
@@ -74,6 +80,36 @@ func parseOpenAIShape(in Input, info *ProviderInfo) {
 	info.InputTokens = resp.Usage.PromptTokens
 	info.OutputTokens = resp.Usage.CompletionTokens
 	info.UsageVisible = resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 || resp.Model != ""
+}
+
+// extractOpenAISSEUsage walks `data:` events in body and fills the
+// last successfully-decoded chunk's model + usage onto info. OpenAI
+// streaming emits `usage: null` on every non-terminal chunk and the
+// real numbers only when the caller passed
+// stream_options.include_usage=true; ResponseModel is echoed on every
+// chunk, so the loop tracks "last seen model" separately from "last
+// seen non-empty usage."
+func extractOpenAISSEUsage(body []byte, info *ProviderInfo) {
+	if len(body) == 0 {
+		return
+	}
+	scanSSEData(body, func(payload []byte) {
+		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+			return
+		}
+		var resp openaiResponse
+		if err := json.Unmarshal(payload, &resp); err != nil {
+			return
+		}
+		if resp.Model != "" {
+			info.ResponseModel = resp.Model
+		}
+		if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
+			info.InputTokens = resp.Usage.PromptTokens
+			info.OutputTokens = resp.Usage.CompletionTokens
+			info.UsageVisible = true
+		}
+	})
 }
 
 func openaiOperation(path string) string {
