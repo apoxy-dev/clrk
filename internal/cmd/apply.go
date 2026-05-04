@@ -47,8 +47,12 @@ func newApplyCmd() *cobra.Command {
 	return cmd
 }
 
-// resolveKubeconfig picks a kubeconfig in this order: explicit --kubeconfig,
-// --local (clrk dev's host kubeconfig under --clrk-dir), then $KUBECONFIG.
+// resolveKubeconfig picks a kubeconfig in this order: explicit
+// --kubeconfig, --local (clrk dev's host kubeconfig under --clrk-dir),
+// $KUBECONFIG, then the current context's kubeconfig from
+// ~/.clrk/config. The config fall-through is what makes plain
+// `clrk apply` / `clrk agents` work after `clrk dev` has set the
+// `dev` context current.
 func resolveKubeconfig(explicit string, local bool) (string, error) {
 	if explicit != "" {
 		return explicit, nil
@@ -63,5 +67,16 @@ func resolveKubeconfig(explicit string, local bool) (string, error) {
 	if env := os.Getenv("KUBECONFIG"); env != "" {
 		return env, nil
 	}
-	return "", fmt.Errorf("no kubeconfig: pass --kubeconfig, set KUBECONFIG, or use --local")
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", err
+	}
+	kc, err := cfg.currentKubeconfig()
+	if err != nil {
+		return "", err
+	}
+	if kc != "" {
+		return kc, nil
+	}
+	return "", fmt.Errorf("no kubeconfig: pass --kubeconfig, set KUBECONFIG, run `clrk config set-context`, or use --local")
 }

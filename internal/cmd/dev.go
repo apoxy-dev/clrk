@@ -353,6 +353,14 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 	slog.Info("k3s API is ready", "kubeconfig", state.k3s.KubeconfigPath())
 
+	// Promote the dev cluster to the current context so subsequent
+	// `clrk apply` / `clrk agents` invocations from any shell target
+	// the live dev cluster without --local. Best-effort — the user
+	// can still pass --local or --kubeconfig if this fails.
+	if err := writeDevContext(state.k3s.HostKubeconfigPath()); err != nil {
+		slog.Warn("Failed to register dev context in ~/.clrk/config", "err", err)
+	}
+
 	state.cm = drivers.NewControllerManagerDriver()
 	cmOpts, err := controllerManagerOpts(o)
 	if err != nil {
