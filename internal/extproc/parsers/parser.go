@@ -94,6 +94,32 @@ type providerEntry struct {
 var hostProviders = []providerEntry{
 	{match: equalsAny("api.anthropic.com"), system: "anthropic", parser: anthropicParser{}},
 	{match: equalsAny("api.openai.com"), system: "openai", parser: openaiParser{}},
+	{match: equalsAny("generativelanguage.googleapis.com"), system: "google_genai", parser: googleParser{}},
+}
+
+// crdProviderAliases maps the short CRD enum names from
+// AIProviderRouteMatch.Provider to the canonical OTel gen_ai.system
+// values the parsers emit. Keeping the mapping here lets users write
+// terse YAML (`provider: google`) while route-table matching still
+// uses the same string the parsers stamp on captured records, so a
+// future Vertex parser (`vertex_ai`) won't accidentally collide with
+// Gemini routes.
+var crdProviderAliases = map[string]string{
+	"google":       "google_genai",
+	"azure-openai": "azure_openai",
+	"bedrock":      "aws_bedrock",
+}
+
+// Canonical normalizes a CRD-supplied provider name to the canonical
+// gen_ai.system value used everywhere downstream (route matching,
+// span attributes). Unknown names pass through verbatim — `custom`
+// has special semantics in the route matcher and a typo is better
+// surfaced as a non-matching rule than silently rewritten.
+func Canonical(name string) string {
+	if alias, ok := crdProviderAliases[name]; ok {
+		return alias
+	}
+	return name
 }
 
 // For returns the parser for host (the request's :authority host

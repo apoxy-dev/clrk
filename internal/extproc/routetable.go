@@ -7,6 +7,7 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 )
 
 // clrkAPIGroup is the apiGroup name AIProviderRoute parentRefs must
@@ -72,7 +73,7 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 				t.rules = append(t.rules, routeRule{
 					routeNamespace: r.Namespace,
 					routeName:      r.Name,
-					provider:       strings.ToLower(m.Provider),
+					provider:       parsers.Canonical(strings.ToLower(m.Provider)),
 					endpoints:      append([]string(nil), m.Endpoints...),
 					models:         append([]string(nil), m.Models...),
 					tokenBudget:    budget,

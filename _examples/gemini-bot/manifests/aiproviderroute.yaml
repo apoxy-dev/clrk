@@ -1,0 +1,23 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: AIProviderRoute
+metadata:
+  name: google
+spec:
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: EgressGateway
+      name: gemini-bot
+  rules:
+    - matches:
+        # `provider: google` is the CRD short form; clrk normalizes it
+        # to the OTel canonical `google_genai` (the gen_ai.system value
+        # the parser stamps on captured records). A future Vertex AI
+        # parser will register under `vertex_ai`, so the short/canonical
+        # split keeps the namespaces clean.
+        - provider: google
+          # Gemini puts the model in the URL: /v1beta/models/{model}:method.
+          # The parser extracts the model from the path; this glob just
+          # scopes the route to the generation endpoints.
+          endpoints:
+            - /v1beta/models/*
+            - /v1/models/*

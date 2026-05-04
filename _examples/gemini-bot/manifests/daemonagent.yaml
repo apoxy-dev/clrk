@@ -1,0 +1,38 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: gemini-bot
+spec:
+  workerPoolRef: default
+  # Always: even after a successful Gemini call the daemon supervisor
+  # respawns the agent so the demo keeps producing new ext_proc records
+  # in the otel-logs / otel-traces panes. RestartPolicy: OnFailure would
+  # stop after one clean call (k8s-style semantic).
+  restartPolicy: Always
+  egressRefs:
+    - gatewayRef: gemini-bot
+  template:
+    spec:
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # The agent loops `call → sleep` so `RestartPolicy: Always`
+          # doesn't churn libcontainer + netstack on every iteration.
+          # Each call issues ONE Gemini POST without an `x-goog-api-key`
+          # header — the proxy injects it via the attached
+          # CredentialInjectionPolicy. The agent never sees the key.
+          while :; do
+            curl -sS -o /tmp/resp.json -w 'http %{http_code} %{url_effective}\n' \
+              -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent" \
+              -H 'content-type: application/json' \
+              -d '{
+                "contents": [
+                  {"role": "user", "parts": [{"text": "Say hi in three words."}]}
+                ],
+                "generationConfig": {"maxOutputTokens": 64}
+              }'
+            cat /tmp/resp.json
+            echo
+            sleep 5
+          done
