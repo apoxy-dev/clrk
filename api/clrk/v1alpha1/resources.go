@@ -7,6 +7,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 
 	"github.com/apoxy-dev/apoxy/api/resource"
+	"github.com/apoxy-dev/apoxy/api/resource/resourcestrategy"
 )
 
 // Compile-time assertions that each kind implements the interfaces required
@@ -18,12 +19,16 @@ var (
 	_ resource.ObjectWithStatusSubResource = &TaskAgent{}
 	_ rest.SingularNameProvider            = &TaskAgent{}
 	_ resource.StatusSubResource           = &TaskAgentStatus{}
+	_ resourcestrategy.Validater           = &TaskAgent{}
+	_ resourcestrategy.ValidateUpdater     = &TaskAgent{}
 
 	_ runtime.Object                       = &DaemonAgent{}
 	_ resource.Object                      = &DaemonAgent{}
 	_ resource.ObjectWithStatusSubResource = &DaemonAgent{}
 	_ rest.SingularNameProvider            = &DaemonAgent{}
 	_ resource.StatusSubResource           = &DaemonAgentStatus{}
+	_ resourcestrategy.Validater           = &DaemonAgent{}
+	_ resourcestrategy.ValidateUpdater     = &DaemonAgent{}
 
 	_ runtime.Object                       = &WorkerPool{}
 	_ resource.Object                      = &WorkerPool{}
