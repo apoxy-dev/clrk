@@ -89,6 +89,14 @@ type Record struct {
 	ResponseBody      []byte
 	ResponseTruncated bool
 
+	// RequestBodyRewritten is true when ext_proc replaced the request
+	// body before forwarding (e.g. forcing OpenAI
+	// stream_options.include_usage=true so streamed responses always
+	// emit terminal usage). Surfaced on the OTLP record as
+	// clrk.body.request_rewritten so operators can correlate
+	// upstream-observed bodies with what the agent actually sent.
+	RequestBodyRewritten bool
+
 	// Provider holds parsed AI-provider facts (gen_ai.* shape) when the
 	// request's :authority host matched a known provider. Nil for any
 	// other host.
@@ -310,12 +318,31 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			}
 			respKeepLast = isStreamingContentType(rec.ResponseHeaders["content-type"])
 		case *extprocv3.ProcessingRequest_RequestBody:
-			body, trunc := appendBounded(rec.RequestBody, m.RequestBody.GetBody(), &reqBytesLeft)
+			chunk := m.RequestBody.GetBody()
+			body, trunc := appendBounded(rec.RequestBody, chunk, &reqBytesLeft)
 			if rec.RequestBodyAt.IsZero() {
 				rec.RequestBodyAt = now
 			}
 			rec.RequestBody = body
 			rec.RequestTruncated = rec.RequestTruncated || trunc
+			// On the terminal body chunk (BUFFERED_PARTIAL delivers the
+			// whole body in one ProcessingRequest under the buffer
+			// limit; multi-chunk only happens when the body exceeds
+			// it), try the OpenAI/OAI-compat include_usage rewrite.
+			// Skip when truncation already kicked in — partial JSON
+			// can't be safely re-serialized.
+			if m.RequestBody.GetEndOfStream() && !rec.RequestTruncated {
+				host, _ := splitHostPort(rec.RequestHeaders[":authority"])
+				if newBody, mut := parsers.EnsureIncludeUsage(host, rec.RequestHeaders[":path"], rec.RequestBody); mut {
+					// Update the captured copy so OTLP shows what the
+					// upstream actually received, not what the agent
+					// originally sent.
+					rec.RequestBody = newBody
+					rec.RequestBodyRewritten = true
+					resp = bodyMutation(true, newBody)
+					break
+				}
+			}
 			resp = bodyContinue(true)
 		case *extprocv3.ProcessingRequest_ResponseBody:
 			var (
@@ -686,6 +713,22 @@ func headersContinue(isRequest bool) *extprocv3.ProcessingResponse {
 func bodyContinue(isRequest bool) *extprocv3.ProcessingResponse {
 	r := &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{
 		Status: extprocv3.CommonResponse_CONTINUE,
+	}}
+	if isRequest {
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{ResponseBody: r}}
+}
+
+// bodyMutation returns a CONTINUE_AND_REPLACE body response carrying
+// the new body bytes. Envoy strips the original Content-Length and
+// recomputes from the mutated body before forwarding upstream.
+func bodyMutation(isRequest bool, newBody []byte) *extprocv3.ProcessingResponse {
+	r := &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{
+		Status: extprocv3.CommonResponse_CONTINUE_AND_REPLACE,
+		BodyMutation: &extprocv3.BodyMutation{
+			Mutation: &extprocv3.BodyMutation_Body{Body: newBody},
+		},
 	}}
 	if isRequest {
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}

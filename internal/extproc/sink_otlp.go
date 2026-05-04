@@ -63,6 +63,7 @@ const (
 	attrAPRRouteName      = "clrk.aiproviderroute.name"
 	attrAPRRouteNamespace = "clrk.aiproviderroute.namespace"
 	attrBodyUsageVisible  = "clrk.body.usage_visible"
+	attrBodyReqRewritten  = "clrk.body.request_rewritten"
 
 	attrBudgetDenied    = "clrk.budget.denied"
 	attrBudgetDailyUsed = "clrk.budget.daily_used"
@@ -248,6 +249,9 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 		attribute.Bool(attrReqTruncated, r.RequestTruncated),
 		attribute.Bool(attrRespTruncated, r.ResponseTruncated),
 	)
+	if r.RequestBodyRewritten {
+		attrs = append(attrs, attribute.Bool(attrBodyReqRewritten, true))
+	}
 	attrs = appendGenAIAttrs(attrs, r)
 	attrs = appendAPRAttrs(attrs, r)
 
@@ -309,6 +313,9 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 	)
 	if dur := durationMillis(r); dur >= 0 {
 		attrs = append(attrs, otellog.Int(attrDurationMs, dur))
+	}
+	if r.RequestBodyRewritten {
+		attrs = append(attrs, otellog.Bool(attrBodyReqRewritten, true))
 	}
 	if sc.HasTraceID() {
 		attrs = append(attrs,
