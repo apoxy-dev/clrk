@@ -8,19 +8,28 @@ import (
 // googleParser implements Parser for generativelanguage.googleapis.com
 // (Google's consumer Gemini API; "google_genai" in OTel gen_ai semconv).
 //
+// Two wire formats share this host:
+//
+//  1. Native Gemini under /v1beta/models/{model}:generateContent —
+//     model encoded in path, response carries usageMetadata with
+//     promptTokenCount / candidatesTokenCount.
+//  2. OpenAI-compatibility layer under /v1beta/openai/* (e.g.
+//     /v1beta/openai/chat/completions) — request/response are pure
+//     OpenAI shape (model in body, usage with prompt_tokens /
+//     completion_tokens). We delegate body parsing to the same
+//     openaiResponse decoder openaiParser uses but stamp
+//     gen_ai.system=google_genai because the upstream is still Google;
+//     dashboards should group by upstream, not by wire format.
+//
 // Vertex AI (regional `*-aiplatform.googleapis.com`, `vertex_ai`) is a
 // separate API surface — when we add a Vertex parser it ships under a
 // different host matcher and a different gen_ai.system value.
 //
-// Request shape (POST /v1beta/models/{model}:generateContent):
+// Native request shape (POST /v1beta/models/{model}:generateContent):
 //
 //	{ "contents": [...], "generationConfig": {...} }
 //
-// The model name is in the URL path, not the body — Gemini differs
-// from Anthropic/OpenAI here and we extract it from the path instead
-// of decoding the request body.
-//
-// Response shape (200, non-stream):
+// Native response shape (200, non-stream):
 //
 //	{ "candidates": [...],
 //	  "modelVersion": "gemini-1.5-pro-002",
@@ -46,6 +55,15 @@ type googleResponse struct {
 }
 
 func (googleParser) Parse(in Input) *ProviderInfo {
+	if isGoogleOpenAICompatPath(in.Path) {
+		info := &ProviderInfo{
+			System:    "google_genai",
+			Operation: googleOpenAICompatOperation(in.Path),
+		}
+		parseOpenAIShape(in, info)
+		return info
+	}
+
 	model, op := googlePathInfo(in.Path)
 	info := &ProviderInfo{
 		System:       "google_genai",
@@ -74,6 +92,39 @@ func (googleParser) Parse(in Input) *ProviderInfo {
 		resp.UsageMetadata.CandidatesTokenCount > 0 ||
 		resp.ModelVersion != ""
 	return info
+}
+
+// isGoogleOpenAICompatPath reports whether path targets Gemini's
+// OpenAI-compatibility layer (/v1beta/openai/* or /v1/openai/*). The
+// guard at the top of Parse uses this rather than relying on
+// googleOpenAICompatOperation returning "" — an unclassified compat
+// path (e.g. /v1beta/openai/models) must NOT fall through to native
+// Gemini extraction, which would try to read a Gemini-shaped body
+// and stamp a meaningless model from the URL.
+func isGoogleOpenAICompatPath(path string) bool {
+	return strings.Contains(path, "/openai/")
+}
+
+// googleOpenAICompatOperation classifies a Gemini OpenAI-compat path
+// into a gen_ai.operation.name. Returns "" for unclassified compat
+// endpoints (e.g. /openai/models — listing, not a generation op);
+// the caller still treats the request as compat-shape based on
+// isGoogleOpenAICompatPath, just without an Operation tag.
+func googleOpenAICompatOperation(path string) string {
+	_, after, ok := strings.Cut(path, "/openai/")
+	if !ok {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(after, "chat/completions"):
+		return "chat"
+	case strings.HasPrefix(after, "embeddings"):
+		return "embeddings"
+	case strings.HasPrefix(after, "completions"):
+		return "text_completion"
+	default:
+		return ""
+	}
 }
 
 // googlePathInfo extracts (model, operation) from a Gemini API path.

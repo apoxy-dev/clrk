@@ -46,29 +46,34 @@ func (openaiParser) Parse(in Input) *ProviderInfo {
 		System:    "openai",
 		Operation: openaiOperation(in.Path),
 	}
+	parseOpenAIShape(in, info)
+	return info
+}
 
+// parseOpenAIShape fills RequestModel + response fields from an
+// OpenAI-shaped HTTP transaction. Used by openaiParser and by
+// googleParser when the request hit Google's /v1beta/openai/*
+// OAI-compat endpoint (same wire format, different upstream).
+// Caller pre-sets info.System and info.Operation.
+func parseOpenAIShape(in Input, info *ProviderInfo) {
 	if model := decodeOpenAIModel(in.ReqBody); model != "" {
 		info.RequestModel = model
 	}
-
 	if hasContentTypePrefix(in.RespHeaders, "text/event-stream") {
 		info.StreamResponse = true
-		return info
+		return
 	}
-
 	if len(in.RespBody) == 0 {
-		return info
+		return
 	}
-
 	var resp openaiResponse
 	if err := json.Unmarshal(in.RespBody, &resp); err != nil {
-		return info
+		return
 	}
 	info.ResponseModel = resp.Model
 	info.InputTokens = resp.Usage.PromptTokens
 	info.OutputTokens = resp.Usage.CompletionTokens
 	info.UsageVisible = resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 || resp.Model != ""
-	return info
 }
 
 func openaiOperation(path string) string {
