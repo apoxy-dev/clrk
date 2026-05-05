@@ -301,6 +301,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 			Identity:     sb.Identity,
 			Backend:      sb.EgressBackend,
 			DNSResolvers: m.workerResolvers,
+			DNSCache:     stack.DNSCache(),
 		})
 		go func() {
 			if err := stack.Start(context.Background(), dialer); err != nil {

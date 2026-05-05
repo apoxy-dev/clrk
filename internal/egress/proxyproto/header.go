@@ -23,10 +23,15 @@ const (
 // EncodeHeader builds a PROXY v2 header for a TCP connection from src → dst,
 // tagged with the given agent identity as custom TLVs.
 //
+// dstName is the DNS-bound destination name for this connection (the
+// hostname the agent's resolver answered for dst.Addr). Empty when no
+// binding existed — direct-IP dial, DNS bypass, or expired entry —
+// and the dst-name TLV is then omitted.
+//
 // src and dst must be the same address family (both IPv4 or both IPv6).
 // Callers typically pass the sandbox's gateway-assigned src and the original
 // upstream dst observed by the netstack TCP forwarder.
-func EncodeHeader(src, dst netip.AddrPort, id AgentIdentity) ([]byte, error) {
+func EncodeHeader(src, dst netip.AddrPort, id AgentIdentity, dstName string) ([]byte, error) {
 	if src.Addr().Is4In6() {
 		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
 	}
@@ -59,7 +64,7 @@ func EncodeHeader(src, dst netip.AddrPort, id AgentIdentity) ([]byte, error) {
 		addrBlock = binary.BigEndian.AppendUint16(addrBlock, dst.Port())
 	}
 
-	tlvs := encodeTLVs(id)
+	tlvs := encodeTLVs(id, dstName)
 
 	payloadLen := len(addrBlock) + len(tlvs)
 	if payloadLen > 0xFFFF {
@@ -75,7 +80,7 @@ func EncodeHeader(src, dst netip.AddrPort, id AgentIdentity) ([]byte, error) {
 	return hdr, nil
 }
 
-func encodeTLVs(id AgentIdentity) []byte {
+func encodeTLVs(id AgentIdentity, dstName string) []byte {
 	out := make([]byte, 0, 128)
 	out = appendTLV(out, TLVAgentKind, []byte{byte(id.Kind)})
 	if id.Namespace != "" {
@@ -92,6 +97,9 @@ func encodeTLVs(id AgentIdentity) []byte {
 	}
 	if id.InvocationID != "" {
 		out = appendTLV(out, TLVInvocationID, []byte(id.InvocationID))
+	}
+	if dstName != "" {
+		out = appendTLV(out, TLVDstName, []byte(dstName))
 	}
 	return out
 }

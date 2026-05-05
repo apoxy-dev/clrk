@@ -27,6 +27,14 @@ type L4Record struct {
 	AgentRevision  string
 	InvocationID   string
 
+	// DstName is the DNS-bound destination hostname the sandbox's
+	// resolver answered for the connection's destination IP. Carried
+	// from the worker via PROXY v2 TLVDstName and forwarded by Envoy
+	// as MetaDstName under the clrk.apoxy.dev namespace. Empty when
+	// no binding existed at dial time (direct-IP, DNS bypass,
+	// expired entry, or DoT/DoH bypass).
+	DstName string
+
 	// BytesUpstream is the count of agent → server bytes observed on
 	// this connection. Server → agent bytes are unobserved by design.
 	BytesUpstream int64

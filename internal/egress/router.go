@@ -51,10 +51,13 @@ func NewRouter(defaultPolicy clrkv1alpha1.EgressPolicy) *Router {
 	return r
 }
 
-// Route returns the routing decision for the given connection parameters.
-func (r *Router) Route(_ context.Context, dst netip.AddrPort, proto clrkv1alpha1.L4Protocol) *RouteResult {
+// Route returns the routing decision for the given connection
+// parameters. dstName is the DNS-bound destination hostname (see
+// DNSCache); empty when nothing was bound, in which case
+// destinationHostnames rules cannot match.
+func (r *Router) Route(_ context.Context, dst netip.AddrPort, proto clrkv1alpha1.L4Protocol, dstName string) *RouteResult {
 	tbl := r.table.Load()
-	if result := tbl.match(dst, proto); result != nil {
+	if result := tbl.match(dst, proto, dstName); result != nil {
 		return result
 	}
 	// No route matched — apply default policy.
@@ -80,7 +83,7 @@ func (r *Router) DialContext(ctx context.Context, network, addr string) (net.Con
 		proto = clrkv1alpha1.L4ProtocolUDP
 	}
 
-	result := r.Route(ctx, dst, proto)
+	result := r.Route(ctx, dst, proto, dstNameFromContext(ctx))
 	switch result.Action {
 	case ActionDeny:
 		return nil, fmt.Errorf("connection to %s denied by egress policy", addr)

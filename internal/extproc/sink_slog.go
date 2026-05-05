@@ -69,7 +69,8 @@ func (slogSink) EmitL4(r L4Record) {
 	if r.Timestamp.IsZero() || r.EndAt.IsZero() {
 		dur = 0
 	}
-	slog.Info("clrk egress L4 connection",
+	attrs := make([]any, 0, 18) // 8 KV pairs (16) + optional DstName KV (2).
+	attrs = append(attrs,
 		"agent.kind", r.AgentKind,
 		"agent.namespace", r.AgentNamespace,
 		"agent.name", r.AgentName,
@@ -79,4 +80,8 @@ func (slogSink) EmitL4(r L4Record) {
 		"clrk.l4.bytes_upstream", r.BytesUpstream,
 		"clrk.duration_ms", int(dur/1e6),
 	)
+	if r.DstName != "" {
+		attrs = append(attrs, "clrk.dst.name", r.DstName)
+	}
+	slog.Info("clrk egress L4 connection", attrs...)
 }

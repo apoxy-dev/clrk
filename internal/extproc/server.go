@@ -46,6 +46,13 @@ const (
 	MetaAgentUID       = "agent_uid"
 	MetaAgentRevision  = "agent_revision"
 	MetaInvocationID   = "invocation_id"
+
+	// MetaDstName carries the DNS-bound destination hostname for the
+	// connection — the name the sandbox's resolver answered for the
+	// dst IP. Worker emits it via PROXY v2 TLVDstName; the listener
+	// filter publishes it under this key. Empty when no binding
+	// existed at dial time (direct-IP, DNS bypass, expired entry).
+	MetaDstName = "dst_name"
 )
 
 // captureMaxBytesDefault bounds buffered request+response body bytes per

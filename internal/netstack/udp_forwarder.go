@@ -29,15 +29,22 @@ var udpBuffPool = sync.Pool{
 
 // UDPForwarder intercepts all UDP packets and forwards them to the upstream
 // via the provided Dialer. DNS queries (port 53) use single-packet mode.
-func UDPForwarder(ctx context.Context, ipstack *stack.Stack, dialer Dialer) ProtocolHandler {
+//
+// When dnsCache is non-nil, upstream → sandbox traffic on UDP/53 is
+// snooped: responses are parsed and any A/AAAA answers are bound to
+// their qname/CNAME-aliases in the cache, so subsequent TCP dials can
+// surface the agent's stated intent (the resolved hostname) on the
+// PROXY v2 frame and to L4 telemetry. Snoop is observe-only — bytes
+// reach the sandbox unchanged regardless of parse success.
+func UDPForwarder(ctx context.Context, ipstack *stack.Stack, dialer Dialer, dnsCache *DNSCache) ProtocolHandler {
 	udpForwarder := udp.NewForwarder(
 		ipstack,
-		udpHandler(ctx, dialer),
+		udpHandler(ctx, dialer, dnsCache),
 	)
 	return udpForwarder.HandlePacket
 }
 
-func copyPackets(ctx context.Context, src, dst net.Conn, once bool, extend func()) error {
+func copyPackets(ctx context.Context, src, dst net.Conn, once bool, extend func(), tap func([]byte)) error {
 	buf := udpBuffPool.Get().(*[]byte)
 	pkt := (*buf)[:cap(*buf)]
 	defer udpBuffPool.Put(buf)
@@ -54,6 +61,9 @@ func copyPackets(ctx context.Context, src, dst net.Conn, once bool, extend func(
 				}
 				return err
 			}
+			if tap != nil && n > 0 {
+				tap(pkt[:n])
+			}
 			if _, err := dst.Write(pkt[:n]); err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -68,7 +78,7 @@ func copyPackets(ctx context.Context, src, dst net.Conn, once bool, extend func(
 	}
 }
 
-func udpHandler(ctx context.Context, dialer Dialer) udp.ForwarderHandler {
+func udpHandler(ctx context.Context, dialer Dialer, dnsCache *DNSCache) udp.ForwarderHandler {
 	return func(req *udp.ForwarderRequest) bool {
 		reqDetails := req.ID()
 
@@ -134,14 +144,22 @@ func udpHandler(ctx context.Context, dialer Dialer) udp.ForwarderHandler {
 				timer.Reset(idleTimeout)
 			}
 			// For DNS sessions, send one packet each way and then close immediately.
-			once := dstAddrPort.Port() == dnsPort
+			isDNS := dstAddrPort.Port() == dnsPort
+			once := isDNS
+
+			// Tap DNS responses (upstream → sandbox direction) into the
+			// cache so TCP connect lookups can surface the resolved name.
+			var responseTap func([]byte)
+			if isDNS && dnsCache != nil {
+				responseTap = dnsCache.IngestResponse
+			}
 
 			g, copyCtx := errgroup.WithContext(sCtx)
 			g.Go(func() error {
-				return copyPackets(copyCtx, downConn, upConn, once, extend)
+				return copyPackets(copyCtx, downConn, upConn, once, extend, nil)
 			})
 			g.Go(func() error {
-				return copyPackets(copyCtx, upConn, downConn, once, extend)
+				return copyPackets(copyCtx, upConn, downConn, once, extend, responseTap)
 			})
 
 			if err := g.Wait(); err != nil {

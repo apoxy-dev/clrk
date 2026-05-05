@@ -97,6 +97,7 @@ var agentTLVRules = []*proxyprotov3.ProxyProtocol_Rule{
 	tlvRule(proxyproto.TLVAgentUID, extproc.MetaAgentUID),
 	tlvRule(proxyproto.TLVAgentRevision, extproc.MetaAgentRevision),
 	tlvRule(proxyproto.TLVInvocationID, extproc.MetaInvocationID),
+	tlvRule(proxyproto.TLVDstName, extproc.MetaDstName),
 }
 
 func tlvRule(t byte, key string) *proxyprotov3.ProxyProtocol_Rule {

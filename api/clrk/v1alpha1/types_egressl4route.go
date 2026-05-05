@@ -45,14 +45,25 @@ type L4RouteMatch struct {
 	// +kubebuilder:validation:items:Format=cidr
 	DestinationCIDRs []string `json:"destinationCIDRs,omitempty"`
 
-	// DestinationHostnames matches by hostname. On TLS-terminated
-	// listeners (protocol=TLS or HTTPS with mode=Terminate) the match
-	// runs against the SNI value the tls_inspector recorded on the
-	// connection. Exact (`api.openai.com`) and wildcard (`*.openai.com`)
-	// forms are accepted. On plain TCP listeners hostnames are silently
-	// ignored — there is no SNI to match against; APO-573 lifts this
-	// limitation by binding the agent's resolved DNS name into a
-	// PROXY v2 TLV.
+	// DestinationHostnames matches by hostname. Exact
+	// (`api.openai.com`) and wildcard (`*.openai.com`) forms are
+	// accepted (gwapiv1.Hostname semantics — wildcard matches exactly
+	// one prefix label).
+	//
+	// On TLS-terminated listeners (protocol=TLS or HTTPS with
+	// mode=Terminate) the match runs against the SNI value the
+	// tls_inspector recorded on the connection. On plain TCP
+	// listeners the match runs against the DNS-bound destination
+	// name: the worker snoops UDP/53 responses, caches each
+	// `(resolved IP) → name` binding, and emits the hostname for the
+	// connection's destination IP via PROXY v2 TLVDstName so Envoy
+	// and L4 ext_proc records pick it up.
+	//
+	// Limitation: encrypted resolvers (DoT on TCP/853, DoH on
+	// TCP/443) bypass the snoop. Connections from agents that use
+	// those resolvers fall back to CIDR-only matching — no error,
+	// just no name binding. Use the kernel resolver (default) to
+	// guarantee hostname rules apply.
 	// +optional
 	// +listType=set
 	DestinationHostnames []gwapiv1.Hostname `json:"destinationHostnames,omitempty"`

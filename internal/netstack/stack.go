@@ -35,13 +35,14 @@ const (
 // reads raw packets from a TAP fd and forwards intercepted connections via
 // the provided Dialer.
 type SandboxStack struct {
-	ipstack *stack.Stack
-	ep      *channel.Endpoint
-	ipt     *IPTables
-	nicID   tcpip.NICID
-	tapFD   *os.File
-	pump    *PacketPump
-	closed  atomic.Bool
+	ipstack  *stack.Stack
+	ep       *channel.Endpoint
+	ipt      *IPTables
+	nicID    tcpip.NICID
+	tapFD    *os.File
+	pump     *PacketPump
+	dnsCache *DNSCache
+	closed   atomic.Bool
 }
 
 // NewSandboxStack creates a gVisor network stack for a single sandbox.
@@ -100,13 +101,21 @@ func NewSandboxStack(tapFD *os.File, gwAddr netip.Addr) (*SandboxStack, error) {
 	pump := NewPacketPump(tapFD, linkEP, sandboxMTU)
 
 	return &SandboxStack{
-		ipstack: ipstack,
-		ep:      linkEP,
-		ipt:     ipt,
-		nicID:   nicID,
-		tapFD:   tapFD,
-		pump:    pump,
+		ipstack:  ipstack,
+		ep:       linkEP,
+		ipt:      ipt,
+		nicID:    nicID,
+		tapFD:    tapFD,
+		pump:     pump,
+		dnsCache: NewDNSCache(),
 	}, nil
+}
+
+// DNSCache returns the per-sandbox DNS-answer cache populated by the
+// UDP/53 response snoop. Nil-safe — callers may pass it through to
+// downstream consumers (IdentityDialer, route table) as-is.
+func (s *SandboxStack) DNSCache() *DNSCache {
+	return s.dnsCache
 }
 
 // Start enables packet forwarding and begins the TAP pump. It blocks until
@@ -125,7 +134,7 @@ func (s *SandboxStack) Start(ctx context.Context, dialer Dialer) error {
 	tcpFwd := TCPForwarder(ctx, s.ipstack, dialer)
 	s.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd)
 
-	udpFwd := UDPForwarder(ctx, s.ipstack, dialer)
+	udpFwd := UDPForwarder(ctx, s.ipstack, dialer, s.dnsCache)
 	s.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd)
 
 	// Run the TAP packet pump (blocks).

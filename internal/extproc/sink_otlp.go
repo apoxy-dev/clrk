@@ -70,6 +70,7 @@ const (
 	attrBudgetDailyMax  = "clrk.budget.daily_max"
 
 	attrL4BytesUpstream = "clrk.l4.bytes_upstream"
+	attrL4DstName       = "clrk.dst.name"
 )
 
 // otlpSink fans out each captured Record to two OTLP signals:
@@ -247,7 +248,8 @@ func (s *otlpSink) EmitL4(r L4Record) {
 		end = start
 	}
 
-	attrs := []attribute.KeyValue{
+	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs = append(attrs,
 		attribute.String(attrAgentKind, r.AgentKind),
 		attribute.String(attrAgentNamespace, r.AgentNamespace),
 		attribute.String(attrAgentName, r.AgentName),
@@ -256,6 +258,9 @@ func (s *otlpSink) EmitL4(r L4Record) {
 		attribute.String(attrInvocationID, r.InvocationID),
 		attribute.Int64(attrL4BytesUpstream, r.BytesUpstream),
 		attribute.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+	)
+	if r.DstName != "" {
+		attrs = append(attrs, attribute.String(attrL4DstName, r.DstName))
 	}
 	_, span := s.tracer.Start(context.Background(), "egress.tcp",
 		oteltrace.WithTimestamp(start),
@@ -267,9 +272,15 @@ func (s *otlpSink) EmitL4(r L4Record) {
 	var rec otellog.Record
 	rec.SetTimestamp(start)
 	rec.SetSeverity(otellog.SeverityInfo)
-	rec.SetBody(otellog.StringValue(fmt.Sprintf("egress.tcp agent=%s/%s bytes_up=%dB dur=%dms",
-		r.AgentNamespace, r.AgentName, r.BytesUpstream, int(end.Sub(start)/time.Millisecond))))
-	logAttrs := []otellog.KeyValue{
+	dst := r.DstName
+	if dst == "" {
+		dst = "-"
+	}
+	rec.SetBody(otellog.StringValue(fmt.Sprintf("egress.tcp agent=%s/%s dst=%s bytes_up=%dB dur=%dms",
+		r.AgentNamespace, r.AgentName, dst, r.BytesUpstream, int(end.Sub(start)/time.Millisecond))))
+	// 9 base attrs + DstName + 2 trace IDs = up to 12.
+	logAttrs := make([]otellog.KeyValue, 0, 12)
+	logAttrs = append(logAttrs,
 		otellog.String(attrAgentKind, r.AgentKind),
 		otellog.String(attrAgentNamespace, r.AgentNamespace),
 		otellog.String(attrAgentName, r.AgentName),
@@ -278,6 +289,9 @@ func (s *otlpSink) EmitL4(r L4Record) {
 		otellog.String(attrInvocationID, r.InvocationID),
 		otellog.Int64(attrL4BytesUpstream, r.BytesUpstream),
 		otellog.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+	)
+	if r.DstName != "" {
+		logAttrs = append(logAttrs, otellog.String(attrL4DstName, r.DstName))
 	}
 	sc := span.SpanContext()
 	if sc.HasTraceID() {

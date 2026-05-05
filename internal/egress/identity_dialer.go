@@ -35,6 +35,12 @@ type IdentityDialer struct {
 	// netns, so loopback nameservers like Docker's embedded resolver at
 	// 127.0.0.11 are reachable here.
 	DNSResolvers []netip.AddrPort
+
+	// DNSCache supplies the DNS-bound destination name per dial:
+	// emitted as PROXY v2 TLVDstName (Backend mode) and threaded
+	// into ctx for Router hostname matching (passthrough mode).
+	// Nil-safe; direct-IP / expired lookups return "".
+	DNSCache *netstack.DNSCache
 }
 
 var _ netstack.Dialer = (*IdentityDialer)(nil)
@@ -45,23 +51,36 @@ var _ netstack.Dialer = (*IdentityDialer)(nil)
 // an attributable record per outbound connection.
 func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	origAddr := addr
-	rewritten, dnsRewrite := d.rewriteDNS(addr)
-	if dnsRewrite {
-		addr = rewritten
+	// Parse once. Every code path below — DNS rewrite, cache
+	// lookup, EG-backend PROXY v2 framing — wants the dst as
+	// netip.AddrPort. Tests pass non-host:port forms (unix sockets);
+	// fall back to the string for those.
+	origDst, parseErr := netip.ParseAddrPort(addr)
+
+	var dnsRewrite bool
+	if parseErr == nil {
+		if rewritten, ok := d.rewriteDNS(origDst); ok {
+			addr = rewritten
+			dnsRewrite = true
+		}
 	}
 	d.logDial(network, origAddr, addr, dnsRewrite)
+
+	var dstName string
+	if !dnsRewrite && parseErr == nil && d.DNSCache != nil {
+		dstName = d.DNSCache.Lookup(origDst.Addr())
+	}
 
 	// DNS dials must bypass the egress-gateway path — the EG listener is
 	// HTTPS-only and would silently drop UDP/53 packets wrapped in PROXY
 	// v2. The destination has already been rewritten to the worker's real
 	// resolver; just hand off to the base dialer.
 	if d.Backend == "" || dnsRewrite {
-		return d.Base.DialContext(ctx, network, addr)
+		return d.Base.DialContext(withDstName(ctx, dstName), network, addr)
 	}
 
-	dst, err := netip.ParseAddrPort(addr)
-	if err != nil {
-		return nil, fmt.Errorf("parsing original destination %q: %w", addr, err)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parsing original destination %q: %w", origAddr, parseErr)
 	}
 
 	var dialer net.Dialer
@@ -70,8 +89,8 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 		return nil, fmt.Errorf("dialing egress backend %s: %w", d.Backend, err)
 	}
 
-	src := sanitizedSrc(conn.LocalAddr(), dst)
-	hdr, err := proxyproto.EncodeHeader(src, dst, d.Identity)
+	src := sanitizedSrc(conn.LocalAddr(), origDst)
+	hdr, err := proxyproto.EncodeHeader(src, origDst, d.Identity, dstName)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("encoding PROXY v2: %w", err)
@@ -112,14 +131,9 @@ func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite boo
 
 // rewriteDNS swaps a :53 destination for the first configured worker
 // resolver. Returns (rewritten, true) if it triggered, ("", false)
-// otherwise. Failures (unparseable addr, no resolvers configured) leave
-// the dial untouched.
-func (d *IdentityDialer) rewriteDNS(addr string) (string, bool) {
-	if len(d.DNSResolvers) == 0 {
-		return "", false
-	}
-	ap, err := netip.ParseAddrPort(addr)
-	if err != nil || ap.Port() != 53 {
+// otherwise.
+func (d *IdentityDialer) rewriteDNS(dst netip.AddrPort) (string, bool) {
+	if len(d.DNSResolvers) == 0 || dst.Port() != 53 {
 		return "", false
 	}
 	return d.DNSResolvers[0].String(), true

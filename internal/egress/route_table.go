@@ -5,6 +5,7 @@ package egress
 import (
 	"net"
 	"net/netip"
+	"strings"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -12,9 +13,10 @@ import (
 // routeEntry is a single compiled routing rule.
 type routeEntry struct {
 	// Match criteria.
-	cidrs    []netip.Prefix
-	ports    []portRange
-	protocol *clrkv1alpha1.L4Protocol
+	cidrs     []netip.Prefix
+	hostnames []string // exact ("api.openai.com") or wildcard ("*.openai.com")
+	ports     []portRange
+	protocol  *clrkv1alpha1.L4Protocol
 
 	// Result to return on match.
 	result RouteResult
@@ -31,11 +33,15 @@ type routeTable struct {
 	entries []routeEntry
 }
 
-// match finds the first matching route for the given destination and protocol.
+// match finds the first matching route for the given destination,
+// protocol, and DNS-bound destination name. dstName is the hostname
+// the agent's resolver answered for dst.Addr (see DNSCache); empty
+// when nothing was bound (direct-IP dial, DNS bypass, or expired
+// entry), in which case hostname-only rules cannot match.
 // Returns nil if no route matches.
-func (t *routeTable) match(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol) *RouteResult {
+func (t *routeTable) match(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol, dstName string) *RouteResult {
 	for i := range t.entries {
-		if t.entries[i].matches(dst, proto) {
+		if t.entries[i].matches(dst, proto, dstName) {
 			r := t.entries[i].result
 			return &r
 		}
@@ -43,23 +49,33 @@ func (t *routeTable) match(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol) *R
 	return nil
 }
 
-// matches checks whether the given destination and protocol match this entry.
-func (e *routeEntry) matches(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol) bool {
+// matches checks whether the given destination, protocol, and bound
+// DNS name match this entry. CIDR and hostname criteria are OR'd
+// within a single match block: either CIDR or hostname is enough.
+func (e *routeEntry) matches(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol, dstName string) bool {
 	// Protocol filter.
 	if e.protocol != nil && *e.protocol != proto {
 		return false
 	}
 
-	// CIDR filter.
-	if len(e.cidrs) > 0 {
-		matched := false
+	// Either CIDR or hostname must match within the block.
+	if len(e.cidrs) > 0 || len(e.hostnames) > 0 {
+		dstMatch := false
 		for _, cidr := range e.cidrs {
 			if cidr.Contains(dst.Addr()) {
-				matched = true
+				dstMatch = true
 				break
 			}
 		}
-		if !matched {
+		if !dstMatch && dstName != "" {
+			for _, h := range e.hostnames {
+				if hostnameMatches(h, dstName) {
+					dstMatch = true
+					break
+				}
+			}
+		}
+		if !dstMatch {
 			return false
 		}
 	}
@@ -80,6 +96,22 @@ func (e *routeEntry) matches(dst netip.AddrPort, proto clrkv1alpha1.L4Protocol) 
 	}
 
 	return true
+}
+
+// hostnameMatches reports whether candidate satisfies the rule.
+// Exact form ("api.openai.com") requires equality; leading-star
+// wildcard ("*.openai.com") matches exactly one extra label per
+// RFC 4592 / gwapiv1.Hostname — `*.openai.com` matches
+// `api.openai.com` but not `openai.com` and not `foo.bar.openai.com`.
+func hostnameMatches(rule, candidate string) bool {
+	if strings.HasPrefix(rule, "*.") {
+		suffix := rule[1:]
+		if !strings.HasSuffix(candidate, suffix) {
+			return false
+		}
+		return strings.Count(candidate, ".") == strings.Count(rule, ".")
+	}
+	return rule == candidate
 }
 
 // compileRouteTable builds a routeTable from CRD objects.
@@ -108,6 +140,14 @@ func compileRouteTable(
 					}
 					ones, _ := ipNet.Mask.Size()
 					entry.cidrs = append(entry.cidrs, netip.PrefixFrom(prefix.Unmap(), ones))
+				}
+
+				// Hostnames — exact + leading-wildcard, matched against
+				// the DNS-bound destination name on TCP connect (see
+				// DNSCache). On TLS listeners SNI matching takes over;
+				// see internal/egextension for that path.
+				for _, h := range m.DestinationHostnames {
+					entry.hostnames = append(entry.hostnames, string(h))
 				}
 
 				// Parse ports.

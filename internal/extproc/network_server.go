@@ -131,4 +131,7 @@ func applyClrkMetadataL4(rec *L4Record, filterMeta map[string]*structpb.Struct) 
 	if v := fields[MetaInvocationID]; v != nil {
 		rec.InvocationID = v.GetStringValue()
 	}
+	if v := fields[MetaDstName]; v != nil {
+		rec.DstName = v.GetStringValue()
+	}
 }

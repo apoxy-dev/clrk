@@ -17,7 +17,7 @@ func TestEncodeHeader_IPv4(t *testing.T) {
 		UID:       "abc-123",
 	}
 
-	hdr, err := EncodeHeader(src, dst, id)
+	hdr, err := EncodeHeader(src, dst, id, "api.example.com")
 	if err != nil {
 		t.Fatalf("EncodeHeader: %v", err)
 	}
@@ -57,6 +57,7 @@ func TestEncodeHeader_IPv4(t *testing.T) {
 	assertTLV(t, tlvs, TLVAgentNamespace, []byte("default"))
 	assertTLV(t, tlvs, TLVAgentName, []byte("flapper"))
 	assertTLV(t, tlvs, TLVAgentUID, []byte("abc-123"))
+	assertTLV(t, tlvs, TLVDstName, []byte("api.example.com"))
 	if bytes.IndexByte(tlvs, TLVAgentRevision) >= 0 {
 		t.Fatalf("empty Revision should not produce a TLV")
 	}
@@ -70,7 +71,7 @@ func TestEncodeHeader_IPv6(t *testing.T) {
 	dst := netip.MustParseAddrPort("[2001:db8::1]:443")
 	id := AgentIdentity{Kind: AgentKindTask, InvocationID: "task-xyz"}
 
-	hdr, err := EncodeHeader(src, dst, id)
+	hdr, err := EncodeHeader(src, dst, id, "")
 	if err != nil {
 		t.Fatalf("EncodeHeader: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestEncodeHeader_IPv6(t *testing.T) {
 func TestEncodeHeader_FamilyMismatch(t *testing.T) {
 	src := netip.MustParseAddrPort("10.0.0.5:1")
 	dst := netip.MustParseAddrPort("[2001:db8::1]:1")
-	if _, err := EncodeHeader(src, dst, AgentIdentity{}); err == nil {
+	if _, err := EncodeHeader(src, dst, AgentIdentity{}, ""); err == nil {
 		t.Fatalf("expected family-mismatch error")
 	}
 }

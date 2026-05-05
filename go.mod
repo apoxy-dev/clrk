@@ -200,7 +200,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
-	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/net v0.52.0
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.41.0

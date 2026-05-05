@@ -12,6 +12,7 @@ const (
 	TLVAgentUID       byte = 0xE3 // UTF-8 (k8s UID string)
 	TLVAgentRevision  byte = 0xE4 // UTF-8 (AgentSandboxRevision name)
 	TLVInvocationID   byte = 0xE5 // UTF-8 (TaskAgent UID; empty for DaemonAgent)
+	TLVDstName        byte = 0xE6 // UTF-8 (DNS-bound destination name; empty when nothing was bound)
 )
 
 // AgentKind encodes the agent type carried in TLVAgentKind.
