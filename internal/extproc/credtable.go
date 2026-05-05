@@ -244,18 +244,31 @@ func refGroupKind(ref gwapiv1.ParentReference) (group, kind string) {
 	return
 }
 
-// credPoliciesVersion fingerprints the CIPs that attach to the given
+// CredPoliciesVersion fingerprints the CIPs that attach to the given
 // EG (directly or via an APR). Mirrors aiproviderRoutesVersion in
-// shape: sorted ns/name@resourceVersion list. Used by sinkRegistry to
-// decide whether to rebuild the cached egSink.
+// shape: sorted parts list, one per matched CIP, encoding the CIP's
+// own ResourceVersion AND the ResourceVersion of its referenced
+// Secret. Used by sinkRegistry to decide whether to rebuild the
+// cached egSink.
 //
-// Note: this fingerprint does NOT incorporate referenced Secret
-// resourceVersions. Operators rotating the underlying Secret without
-// touching the CIP must `kubectl annotate cip ... rotated-at=...` (or
-// similar) to bump the CIP's resourceVersion and force a rebuild. This
-// is a documented MVP limitation; APO-561 follow-up tracks proper
-// Secret-watch invalidation.
-func credPoliciesVersion(
+// Including the Secret's RV is what makes credential rotation
+// propagate without operator intervention: a Secret rotation bumps
+// the underlying RV, the next ext_proc stream computes a different
+// fingerprint, the sink rebuilds, and resolveCIP reads the fresh
+// value. Secrets that don't exist yet (or vanished) get a `none`
+// sentinel so the fingerprint changes again when the Secret
+// (re)appears.
+//
+// Per-stream cost: one cached-client Get per matched CIP. The client
+// is informer-backed so Gets are in-memory cache hits — no extra
+// apiserver traffic.
+//
+// Exported for cross-module unit testing under
+// apoxy-cloud//clrk/extproc; package-internal callers should still
+// route through sinkRegistry rather than calling this directly.
+func CredPoliciesVersion(
+	ctx context.Context,
+	c client.Client,
 	cips []clrkv1alpha1.CredentialInjectionPolicy,
 	aprs []clrkv1alpha1.AIProviderRoute,
 	eg types.NamespacedName,
@@ -295,9 +308,29 @@ func credPoliciesVersion(
 			}
 		}
 		if matched {
-			parts = append(parts, fmt.Sprintf("%s/%s@%s", cip.Namespace, cip.Name, cip.ResourceVersion))
+			parts = append(parts, fmt.Sprintf("%s/%s@%s+%s",
+				cip.Namespace, cip.Name, cip.ResourceVersion,
+				secretVersion(ctx, c, cip)))
 		}
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
+}
+
+// secretVersion returns the ResourceVersion of the Secret that cip
+// references, or `none` when the Secret doesn't exist (yet). Errors
+// other than NotFound also return `none` rather than failing the
+// fingerprint — a transient apiserver hiccup shouldn't keep the cache
+// stale forever; the next stream will retry.
+func secretVersion(ctx context.Context, c client.Client, cip *clrkv1alpha1.CredentialInjectionPolicy) string {
+	secretNS := cip.Namespace
+	if cip.Spec.SecretRef.Namespace != nil && *cip.Spec.SecretRef.Namespace != "" {
+		secretNS = string(*cip.Spec.SecretRef.Namespace)
+	}
+	key := types.NamespacedName{Namespace: secretNS, Name: string(cip.Spec.SecretRef.Name)}
+	var s corev1.Secret
+	if err := c.Get(ctx, key, &s); err != nil {
+		return "none"
+	}
+	return s.ResourceVersion
 }

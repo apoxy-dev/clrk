@@ -124,7 +124,7 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if err := r.client.List(ctx, &cips); err != nil {
 		return nil, fmt.Errorf("list CredentialInjectionPolicies: %w", err)
 	}
-	credVersion := credPoliciesVersion(cips.Items, aprs.Items, key)
+	credVersion := CredPoliciesVersion(ctx, r.client, cips.Items, aprs.Items, key)
 
 	r.mu.Lock()
 	if hit, ok := r.by[key]; ok &&
