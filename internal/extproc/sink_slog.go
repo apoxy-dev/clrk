@@ -63,3 +63,20 @@ func (slogSink) Emit(r Record) {
 	}
 	slog.Info("clrk egress HTTP transaction", attrs...)
 }
+
+func (slogSink) EmitL4(r L4Record) {
+	dur := r.EndAt.Sub(r.Timestamp)
+	if r.Timestamp.IsZero() || r.EndAt.IsZero() {
+		dur = 0
+	}
+	slog.Info("clrk egress L4 connection",
+		"agent.kind", r.AgentKind,
+		"agent.namespace", r.AgentNamespace,
+		"agent.name", r.AgentName,
+		"agent.uid", r.AgentUID,
+		"agent.revision", r.AgentRevision,
+		"invocation.id", r.InvocationID,
+		"clrk.l4.bytes_upstream", r.BytesUpstream,
+		"clrk.duration_ms", int(dur/1e6),
+	)
+}

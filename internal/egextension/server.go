@@ -32,7 +32,10 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	proxyprotov3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/proxy_protocol/v3"
 	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
+	netextprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/ext_proc/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	snidfpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3"
+	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	pb "github.com/envoyproxy/gateway/proto/extension"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -59,6 +62,16 @@ const (
 	tlsInspectorListenerFilterName  = "envoy.filters.listener.tls_inspector"
 	dfpHTTPFilterName               = "envoy.filters.http.dynamic_forward_proxy"
 
+	networkExtProcFilterName = "envoy.filters.network.ext_proc"
+	sniDFPFilterName         = "envoy.filters.network.sni_dynamic_forward_proxy"
+	tcpProxyFilterName       = "envoy.filters.network.tcp_proxy"
+
+	// tcpFallbackChainName identifies the synthesized TCP-fallback
+	// filter chain (non-HTTP TLS protocols) on each egress listener.
+	// Doubles as an idempotency marker so repeat
+	// PostHTTPListenerModify calls don't duplicate the chain.
+	tcpFallbackChainName = "clrk-egress-tcp-fallback"
+
 	// DFPClusterName is the synthetic dynamic_forward_proxy cluster name
 	// PostHTTPListenerModify routes to and PostTranslateModify creates.
 	DFPClusterName = "clrk-egress-dfp"
@@ -67,6 +80,12 @@ const (
 	// to the same DNS cache instance.
 	dnsCacheName = "clrk-egress-dns-cache"
 )
+
+// httpALPNs are the application protocol names the existing HTTP
+// chain narrows to once the TCP-fallback chain lands. Connections
+// that advertise either ALPN claim the HTTP chain; everything else
+// falls through to the default (no-FCM) TCP-fallback chain.
+var httpALPNs = []string{"h2", "http/1.1"}
 
 // agentTLVRules maps each clrk PROXY v2 TLV type into a dynamic-metadata
 // entry the proxy_protocol listener filter publishes. ext_proc reads them
@@ -191,8 +210,31 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		if err := s.injectHandshaker(fc, egKey); err != nil {
 			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
 		}
+		if fc.GetName() == tcpFallbackChainName {
+			// The TCP-fallback chain doesn't carry an HCM; rewriteHCM
+			// would no-op on it but skipping is cheaper and explicit.
+			continue
+		}
 		if err := s.rewriteHCM(fc, egKey); err != nil {
 			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
+		}
+	}
+
+	// Narrow each existing chain to advertise HTTP ALPNs only and append
+	// a single default TCP-fallback chain. tls_inspector reads ALPN from
+	// the ClientHello before chain matching, so HTTP-ALPN connections
+	// claim the HTTP chain and everything else (no ALPN, postgresql,
+	// mongodb, grpc-exp, etc.) falls through. Idempotent: repeat
+	// PostHTTPListenerModify calls leave the listener unchanged.
+	if !hasTCPFallbackChain(listener) {
+		for _, fc := range listener.GetFilterChains() {
+			narrowChainToHTTPALPNs(fc)
+		}
+		fallback, err := s.buildTCPFallbackChain(listener.GetFilterChains(), egKey)
+		if err != nil {
+			logger.Error(err, "Build TCP-fallback chain failed", "listener", listener.GetName())
+		} else if fallback != nil {
+			listener.FilterChains = append(listener.FilterChains, fallback)
 		}
 	}
 
@@ -449,6 +491,175 @@ func ensureListenerFilters(l *listenerv3.Listener) error {
 		l.ListenerFilters = append(prepend, l.GetListenerFilters()...)
 	}
 	return nil
+}
+
+// hasTCPFallbackChain reports whether listener already carries the
+// synthesized TCP-fallback chain. Match by chain name so the marker
+// survives controller restarts that re-translate the same Gateway.
+func hasTCPFallbackChain(l *listenerv3.Listener) bool {
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetName() == tcpFallbackChainName {
+			return true
+		}
+	}
+	return false
+}
+
+// narrowChainToHTTPALPNs adds httpALPNs to fc.FilterChainMatch.
+// Idempotent — leaves the slice alone when both ALPNs are already
+// present. Other ApplicationProtocols entries are preserved (in case
+// EG ever populates them itself).
+func narrowChainToHTTPALPNs(fc *listenerv3.FilterChain) {
+	if fc.FilterChainMatch == nil {
+		fc.FilterChainMatch = &listenerv3.FilterChainMatch{}
+	}
+	have := make(map[string]bool, len(fc.FilterChainMatch.ApplicationProtocols))
+	for _, p := range fc.FilterChainMatch.ApplicationProtocols {
+		have[p] = true
+	}
+	for _, p := range httpALPNs {
+		if !have[p] {
+			fc.FilterChainMatch.ApplicationProtocols = append(fc.FilterChainMatch.ApplicationProtocols, p)
+			have[p] = true
+		}
+	}
+}
+
+// buildTCPFallbackChain assembles the catch-all chain that handles
+// non-HTTP TLS connections (Postgres direct SSL, MongoDB direct TLS,
+// gRPC-TLS, etc.). The chain shares downstream TLS termination with
+// the HTTP chain — same per-EG CA, same gRPC handshaker — but
+// substitutes a network-level filter list:
+//
+//  1. network_ext_proc: streams agent-direction bytes to the L4
+//     ext_proc server with PV2 agent identity attached as
+//     dynamic_metadata. Observe-only at MVP (handler returns
+//     UNMODIFIED + CONTINUE on every chunk).
+//  2. sni_dynamic_forward_proxy: stamps the ClientHello SNI as the
+//     upstream host the DFP cluster resolves.
+//  3. tcp_proxy: forwards to the shared DFPClusterName cluster.
+//
+// Returns nil when the listener has no chain to clone the
+// transport_socket from (would mean a non-TLS listener — clrk
+// listeners are always TLS).
+func (s *Server) buildTCPFallbackChain(httpChains []*listenerv3.FilterChain, key egKey) (*listenerv3.FilterChain, error) {
+	var template *listenerv3.FilterChain
+	for _, fc := range httpChains {
+		if fc.GetTransportSocket() != nil {
+			template = fc
+			break
+		}
+	}
+	if template == nil {
+		return nil, nil
+	}
+
+	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
+		Namespace: key.namespace,
+		Name:      key.name,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("build network_ext_proc filter: %w", err)
+	}
+	sniDFP, err := buildSNIDFPFilter()
+	if err != nil {
+		return nil, fmt.Errorf("build sni_dynamic_forward_proxy filter: %w", err)
+	}
+	tcpProxy, err := buildTCPProxyFilter()
+	if err != nil {
+		return nil, fmt.Errorf("build tcp_proxy filter: %w", err)
+	}
+
+	return &listenerv3.FilterChain{
+		Name:            tcpFallbackChainName,
+		TransportSocket: template.GetTransportSocket(),
+		Filters:         []*listenerv3.Filter{netExtProc, sniDFP, tcpProxy},
+	}, nil
+}
+
+// buildNetworkExtProcFilter builds the L4 ext_proc filter. Mirrors
+// buildExtProcFilter (HTTP) on the gRPC + authority + metadata-
+// forwarding wiring; the ProcessingMode differs (no header / body
+// modes — those are HTTP-only fields). ProcessRead = STREAMED and
+// ProcessWrite = SKIP: the filter rejects SKIP/SKIP, and observing
+// the agent-direction (read) path is the audit-relevant direction.
+func buildNetworkExtProcFilter(targetURI, authority string) (*listenerv3.Filter, error) {
+	any, err := anypb.New(&netextprocv3.NetworkExternalProcessor{
+		GrpcService: &corev3.GrpcService{
+			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
+				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
+					TargetUri:  targetURI,
+					StatPrefix: "clrk_l4_ext_proc",
+					ChannelArgs: &corev3.GrpcService_GoogleGrpc_ChannelArgs{
+						Args: map[string]*corev3.GrpcService_GoogleGrpc_ChannelArgs_Value{
+							"grpc.default_authority": {
+								ValueSpecifier: &corev3.GrpcService_GoogleGrpc_ChannelArgs_Value_StringValue{
+									StringValue: authority,
+								},
+							},
+						},
+					},
+				},
+			},
+			Timeout: durationpb.New(defaultExtProcTimeout),
+		},
+		FailureModeAllow: true,
+		ProcessingMode: &netextprocv3.ProcessingMode{
+			ProcessRead:  netextprocv3.ProcessingMode_STREAMED,
+			ProcessWrite: netextprocv3.ProcessingMode_SKIP,
+		},
+		MessageTimeout: durationpb.New(5 * time.Second),
+		StatPrefix:     "clrk_l4_ext_proc",
+		MetadataOptions: &netextprocv3.MetadataOptions{
+			ForwardingNamespaces: &netextprocv3.MetadataOptions_MetadataNamespaces{
+				Untyped: []string{extproc.MetadataNamespace},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal network_ext_proc: %w", err)
+	}
+	return &listenerv3.Filter{
+		Name:       networkExtProcFilterName,
+		ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: any},
+	}, nil
+}
+
+// buildSNIDFPFilter builds the sni_dynamic_forward_proxy network
+// filter. Reads SNI off the connection and stamps it as the
+// upstream host the DFP cluster resolves; uses the same DNS cache
+// as the HTTP path so dual-protocol upstreams (HTTPS + native TLS)
+// share resolution.
+func buildSNIDFPFilter() (*listenerv3.Filter, error) {
+	any, err := anypb.New(&snidfpv3.FilterConfig{
+		PortSpecifier: &snidfpv3.FilterConfig_PortValue{PortValue: 443},
+		DnsCacheConfig: dnsCacheConfig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sni_dynamic_forward_proxy: %w", err)
+	}
+	return &listenerv3.Filter{
+		Name:       sniDFPFilterName,
+		ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: any},
+	}, nil
+}
+
+// buildTCPProxyFilter builds the terminal tcp_proxy filter pointing
+// at the shared DFPClusterName cluster.
+func buildTCPProxyFilter() (*listenerv3.Filter, error) {
+	any, err := anypb.New(&tcpproxyv3.TcpProxy{
+		StatPrefix: "clrk_egress_tcp",
+		ClusterSpecifier: &tcpproxyv3.TcpProxy_Cluster{
+			Cluster: DFPClusterName,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal tcp_proxy: %w", err)
+	}
+	return &listenerv3.Filter{
+		Name:       tcpProxyFilterName,
+		ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: any},
+	}, nil
 }
 
 // buildDFPHTTPFilter returns the dynamic_forward_proxy HTTP filter that

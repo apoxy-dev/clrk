@@ -2648,8 +2648,33 @@ func schema_clrk_api_clrk_v1alpha1_L4RouteMatch(ref common.ReferenceCallback) co
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"destinationCIDRs": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
-							Description: "DestinationCIDRs matches by IP range. Single IPs as /32 or /128.",
+							Description: "DestinationCIDRs matches by IP range. Single IPs as /32 or /128. IPv4 and IPv6 CIDRs are both honored.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"destinationHostnames": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "DestinationHostnames matches by hostname. On TLS-terminated listeners (protocol=TLS or HTTPS with mode=Terminate) the match runs against the SNI value the tls_inspector recorded on the connection. Exact (`api.openai.com`) and wildcard (`*.openai.com`) forms are accepted. On plain TCP listeners hostnames are silently ignored — there is no SNI to match against; APO-573 lifts this limitation by binding the agent's resolved DNS name into a PROXY v2 TLV.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

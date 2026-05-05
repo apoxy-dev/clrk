@@ -39,8 +39,23 @@ type L4PortMatch struct {
 // L4RouteMatch defines match criteria for L4 traffic.
 type L4RouteMatch struct {
 	// DestinationCIDRs matches by IP range. Single IPs as /32 or /128.
+	// IPv4 and IPv6 CIDRs are both honored.
 	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:Format=cidr
 	DestinationCIDRs []string `json:"destinationCIDRs,omitempty"`
+
+	// DestinationHostnames matches by hostname. On TLS-terminated
+	// listeners (protocol=TLS or HTTPS with mode=Terminate) the match
+	// runs against the SNI value the tls_inspector recorded on the
+	// connection. Exact (`api.openai.com`) and wildcard (`*.openai.com`)
+	// forms are accepted. On plain TCP listeners hostnames are silently
+	// ignored — there is no SNI to match against; APO-573 lifts this
+	// limitation by binding the agent's resolved DNS name into a
+	// PROXY v2 TLV.
+	// +optional
+	// +listType=set
+	DestinationHostnames []gwapiv1.Hostname `json:"destinationHostnames,omitempty"`
 
 	// Ports restricts to specific destination ports or port ranges.
 	// +optional

@@ -1367,6 +1367,11 @@ func (in *L4RouteMatch) DeepCopyInto(out *L4RouteMatch) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.DestinationHostnames != nil {
+		in, out := &in.DestinationHostnames, &out.DestinationHostnames
+		*out = make([]v1.Hostname, len(*in))
+		copy(*out, *in)
+	}
 	if in.Ports != nil {
 		in, out := &in.Ports, &out.Ports
 		*out = make([]L4PortMatch, len(*in))

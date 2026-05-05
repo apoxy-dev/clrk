@@ -52,10 +52,12 @@ const (
 // stream when the resolved EgressGateway didn't pin a specific cap.
 const captureMaxBytesDefault = 64 * 1024
 
-// Sink receives one captured record per HTTP transaction. Implementations
-// might push to OTLP, Axiom, stdout, etc. Errors are logged and dropped.
+// Sink receives one captured record per HTTP transaction or L4
+// connection. Implementations might push to OTLP, Axiom, stdout, etc.
+// Errors are logged and dropped.
 type Sink interface {
 	Emit(record Record)
+	EmitL4(record L4Record)
 }
 
 // Record is the structured representation of one HTTP request/response

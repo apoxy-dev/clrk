@@ -209,6 +209,11 @@ func main() {
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
 	extprocSrv := extproc.New(cm.GetClient())
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extprocSrv)
+	// L4 ext_proc service shares the same gRPC endpoint, EG identity
+	// resolution, and per-EG sink registry as the HTTP path. Records
+	// emitted on this service represent TCP/TLS connections handled
+	// by the egress listener's TCP-fallback chain.
+	extproc.RegisterNetworkServer(grpcSrv, extprocSrv)
 	egExt, err := egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI)
 	if err != nil {
 		log.Error(err, "Unable to construct EG extension server")

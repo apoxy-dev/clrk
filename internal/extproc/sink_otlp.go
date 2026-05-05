@@ -68,6 +68,8 @@ const (
 	attrBudgetDenied    = "clrk.budget.denied"
 	attrBudgetDailyUsed = "clrk.budget.daily_used"
 	attrBudgetDailyMax  = "clrk.budget.daily_max"
+
+	attrL4BytesUpstream = "clrk.l4.bytes_upstream"
 )
 
 // otlpSink fans out each captured Record to two OTLP signals:
@@ -228,6 +230,64 @@ func (s *otlpSink) Emit(r Record) {
 	span := s.emitSpan(r, d)
 	s.emitLog(r, d, span.SpanContext())
 	span.End(oteltrace.WithTimestamp(spanEnd(r)))
+}
+
+// EmitL4 emits one log + one span for a single TCP/TLS connection
+// observed through the L4 ext_proc filter. Span name is "egress.tcp"
+// — there's no HTTP method, no GenAI operation; the connection itself
+// is the unit. Agent identity attributes are shared with the HTTP
+// path so dashboards filtering by agent.* see both transports.
+func (s *otlpSink) EmitL4(r L4Record) {
+	start := r.Timestamp
+	if start.IsZero() {
+		start = time.Now()
+	}
+	end := r.EndAt
+	if end.IsZero() || end.Before(start) {
+		end = start
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String(attrAgentKind, r.AgentKind),
+		attribute.String(attrAgentNamespace, r.AgentNamespace),
+		attribute.String(attrAgentName, r.AgentName),
+		attribute.String(attrAgentUID, r.AgentUID),
+		attribute.String(attrAgentRevision, r.AgentRevision),
+		attribute.String(attrInvocationID, r.InvocationID),
+		attribute.Int64(attrL4BytesUpstream, r.BytesUpstream),
+		attribute.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+	}
+	_, span := s.tracer.Start(context.Background(), "egress.tcp",
+		oteltrace.WithTimestamp(start),
+		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
+		oteltrace.WithAttributes(attrs...),
+	)
+	span.End(oteltrace.WithTimestamp(end))
+
+	var rec otellog.Record
+	rec.SetTimestamp(start)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetBody(otellog.StringValue(fmt.Sprintf("egress.tcp agent=%s/%s bytes_up=%dB dur=%dms",
+		r.AgentNamespace, r.AgentName, r.BytesUpstream, int(end.Sub(start)/time.Millisecond))))
+	logAttrs := []otellog.KeyValue{
+		otellog.String(attrAgentKind, r.AgentKind),
+		otellog.String(attrAgentNamespace, r.AgentNamespace),
+		otellog.String(attrAgentName, r.AgentName),
+		otellog.String(attrAgentUID, r.AgentUID),
+		otellog.String(attrAgentRevision, r.AgentRevision),
+		otellog.String(attrInvocationID, r.InvocationID),
+		otellog.Int64(attrL4BytesUpstream, r.BytesUpstream),
+		otellog.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+	}
+	sc := span.SpanContext()
+	if sc.HasTraceID() {
+		logAttrs = append(logAttrs,
+			otellog.String(attrTraceID, sc.TraceID().String()),
+			otellog.String(attrSpanID, sc.SpanID().String()),
+		)
+	}
+	rec.AddAttributes(logAttrs...)
+	s.logger.Emit(context.Background(), rec)
 }
 
 // emitSpan returns the un-Ended span; caller stamps end after emitLog
