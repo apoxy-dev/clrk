@@ -262,10 +262,6 @@ func refGroupKind(ref gwapiv1.ParentReference) (group, kind string) {
 // Per-stream cost: one cached-client Get per matched CIP. The client
 // is informer-backed so Gets are in-memory cache hits — no extra
 // apiserver traffic.
-//
-// Exported for cross-module unit testing under
-// apoxy-cloud//clrk/extproc; package-internal callers should still
-// route through sinkRegistry rather than calling this directly.
 func CredPoliciesVersion(
 	ctx context.Context,
 	c client.Client,

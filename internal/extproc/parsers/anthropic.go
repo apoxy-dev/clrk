@@ -100,11 +100,24 @@ func extractAnthropicSSEUsage(body []byte, info *ProviderInfo) {
 	if len(body) == 0 {
 		return
 	}
+	// Each SSE event carries a {"type": ...} discriminator; decode
+	// once into that and dispatch. Avoids 2× json.Unmarshal per event
+	// (one per shape) when streams have many non-usage events
+	// (content_block_delta etc.).
+	type anthropicSSEEnvelope struct {
+		Type string `json:"type"`
+	}
 	scanSSEData(body, func(payload []byte) {
-		// Try the two event shapes that carry usage. Decode failures
-		// are expected on partial leading fragments under keep-last-N.
-		var ms anthropicSSEMessageStart
-		if err := json.Unmarshal(payload, &ms); err == nil && ms.Type == "message_start" {
+		var env anthropicSSEEnvelope
+		if err := json.Unmarshal(payload, &env); err != nil {
+			return
+		}
+		switch env.Type {
+		case "message_start":
+			var ms anthropicSSEMessageStart
+			if err := json.Unmarshal(payload, &ms); err != nil {
+				return
+			}
 			if ms.Message.Model != "" {
 				info.ResponseModel = ms.Message.Model
 			}
@@ -112,15 +125,16 @@ func extractAnthropicSSEUsage(body []byte, info *ProviderInfo) {
 				info.InputTokens = ms.Message.Usage.InputTokens
 				info.UsageVisible = true
 			}
-			// message_start may also seed output_tokens=1 (the leading
-			// role token); message_delta will overwrite cumulatively.
+			// message_start seeds output_tokens=1 (leading role token);
+			// message_delta will overwrite cumulatively.
 			if ms.Message.Usage.OutputTokens > 0 && info.OutputTokens == 0 {
 				info.OutputTokens = ms.Message.Usage.OutputTokens
 			}
-			return
-		}
-		var md anthropicSSEMessageDelta
-		if err := json.Unmarshal(payload, &md); err == nil && md.Type == "message_delta" {
+		case "message_delta":
+			var md anthropicSSEMessageDelta
+			if err := json.Unmarshal(payload, &md); err != nil {
+				return
+			}
 			if md.Usage.OutputTokens > 0 {
 				info.OutputTokens = md.Usage.OutputTokens
 				info.UsageVisible = true

@@ -611,8 +611,8 @@ func appendRing(dst, src []byte, capBytes int) ([]byte, bool) {
 }
 
 // isStreamingContentType reports whether ct names a streamed response
-// shape we capture keep-last-N. Match is case-insensitive and ignores
-// parameters (charset, boundary).
+// shape that needs keep-last-N capture (terminal usage event lives at
+// the tail).
 func isStreamingContentType(ct string) bool {
 	if ct == "" {
 		return false

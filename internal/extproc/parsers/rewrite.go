@@ -1,9 +1,30 @@
 package parsers
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
+
+// streamColonTrue is a cheap byte-scan probe for `"stream":true` (or
+// the same with whitespace around the colon) in a request body. It's
+// not a JSON parser — false positives are possible inside string
+// values that contain that literal — but it's good enough as a
+// pre-check to avoid the dominant non-streamed code path doing a
+// full JSON decode + map allocation just to bail.
+var streamColonTrueProbes = [][]byte{
+	[]byte(`"stream":true`),
+	[]byte(`"stream": true`),
+}
+
+func bodyAdvertisesStream(body []byte) bool {
+	for _, p := range streamColonTrueProbes {
+		if bytes.Contains(body, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // EnsureIncludeUsage rewrites an OpenAI-shape chat-completion request
 // body so that streaming responses always emit terminal usage. Returns
@@ -36,18 +57,20 @@ func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
 	if !shouldRewriteIncludeUsage(host, path) {
 		return nil, false
 	}
+	if !bodyAdvertisesStream(body) {
+		return nil, false
+	}
 	return rewriteIncludeUsage(body)
 }
 
+// shouldRewriteIncludeUsage routes via the same provider table the
+// parsers use, so adding a new OpenAI-shape upstream (e.g. Azure
+// OpenAI) only needs to register in `hostProviders` once.
 func shouldRewriteIncludeUsage(host, path string) bool {
-	host = strings.ToLower(host)
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	switch host {
-	case "api.openai.com":
+	switch SystemFor(host) {
+	case "openai":
 		return strings.HasPrefix(path, "/v1/chat/completions")
-	case "generativelanguage.googleapis.com":
+	case "google_genai":
 		// Gemini's OpenAI-compat surface: /v1[beta]/openai/chat/completions.
 		// Native /v1beta/models/...:streamGenerateContent never carries
 		// stream_options — emits usageMetadata cumulatively.
@@ -85,30 +108,18 @@ func rewriteIncludeUsage(body []byte) ([]byte, bool) {
 	if !streamOn {
 		return nil, false
 	}
-	// stream_options either missing, or set to a non-object (caller
-	// bug we don't try to fix), or an object that may or may not opt
-	// in. We only mutate when we can produce a syntactically clean
+	// stream_options either missing, set to a non-object (caller bug
+	// we don't try to fix — replace), or an object that may or may
+	// not opt in. We only need to leave the call site with a clean
 	// stream_options.include_usage=true.
-	soRaw, hasSO := obj["stream_options"]
-	if hasSO {
-		so, ok := soRaw.(map[string]any)
-		if !ok {
-			// Caller passed a non-object (e.g. null, array). Replace
-			// rather than try to coerce — upstream would reject the
-			// malformed shape regardless.
-			obj["stream_options"] = map[string]any{"include_usage": true}
-		} else {
-			if v, present := so["include_usage"]; present {
-				if b, isBool := v.(bool); isBool && b {
-					// Already opted in; nothing to do.
-					return nil, false
-				}
-			}
-			so["include_usage"] = true
-			obj["stream_options"] = so
-		}
-	} else {
+	so, ok := obj["stream_options"].(map[string]any)
+	if !ok {
 		obj["stream_options"] = map[string]any{"include_usage": true}
+	} else {
+		if b, _ := so["include_usage"].(bool); b {
+			return nil, false
+		}
+		so["include_usage"] = true
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
