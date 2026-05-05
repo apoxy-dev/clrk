@@ -48,6 +48,10 @@ type daemonLifecycleManager struct {
 	sandboxMgr *SandboxManager
 	client     client.Client
 	podName    string
+	// router is the worker-wide egress router. Used to register the
+	// per-EG SandboxPolicy handle so the ConfigWatcher can refresh it
+	// in place when EgressGateway / EgressL4Route CRDs change.
+	router *egress.Router
 	// baseCtx outlives any single reconcile call; loops are derived from
 	// it so they don't get torn down when the reconcile that started them
 	// returns.
@@ -63,10 +67,11 @@ type daemonLoop struct {
 	done    chan struct{}
 }
 
-func newDaemonLifecycleManager(baseCtx context.Context, sandboxMgr *SandboxManager, c client.Client, podName string) *daemonLifecycleManager {
+func newDaemonLifecycleManager(baseCtx context.Context, sandboxMgr *SandboxManager, c client.Client, router *egress.Router, podName string) *daemonLifecycleManager {
 	return &daemonLifecycleManager{
 		sandboxMgr: sandboxMgr,
 		client:     c,
+		router:     router,
 		podName:    podName,
 		baseCtx:    baseCtx,
 		loops:      make(map[types.NamespacedName]*daemonLoop),
@@ -186,7 +191,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		// gate we'd Create + Delete libcontainer state on every retry
 		// and burn the per-attempt backoff multiple times before the
 		// EG is even reachable.
-		caPEM, backends, err := m.waitForEgressReady(ctx, da, log)
+		caPEM, backends, policy, err := m.waitForEgressReady(ctx, da, log)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -215,6 +220,11 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		if len(backends) > 0 {
 			if err := m.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
 				log.Error(err, "Set egress backends failed")
+			}
+		}
+		if policy != nil {
+			if err := m.sandboxMgr.SetEgressPolicy(sandboxID, policy); err != nil {
+				log.Error(err, "Set egress policy failed")
 			}
 		}
 		startedAt := time.Now()
@@ -406,22 +416,29 @@ func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alph
 	}
 }
 
-// resolveEgressBackends returns the per-listener EG backends the
-// IdentityDialer steers to for this DaemonAgent's first EgressGateway
-// ref. Sourced from EgressGateway.Status.Listeners (published by the
-// EgressGateway controller once the Envoy-Gateway-managed Service is
-// provisioned). Empty return + nil error means "no MITM, direct
-// dial". A non-nil error means we should back off and retry —
-// typically the EgressGateway exists but its data plane isn't up yet.
-func (m *daemonLifecycleManager) resolveEgressBackends(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]egress.BackendListener, error) {
+// resolveEgressConfig returns the per-listener EG backends and the
+// SandboxPolicy handle for this DaemonAgent's first EgressGateway ref.
+// Backends are sourced from EgressGateway.Status.Listeners (published
+// by the EgressGateway controller once the Envoy-Gateway-managed
+// Service is provisioned). Policy is compiled from the EG's
+// DefaultPolicy plus the EgressL4Routes targeting it, then registered
+// on the worker router so the ConfigWatcher can refresh it in place
+// on subsequent CRD edits.
+//
+// Empty backends + nil policy + nil error means "agent has no
+// EgressRefs": no MITM, no enforced policy, direct dial. A non-nil
+// error means we should back off and retry — typically the EG exists
+// but its data plane isn't up yet.
+func (m *daemonLifecycleManager) resolveEgressConfig(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]egress.BackendListener, *egress.SandboxPolicy, error) {
 	if len(da.Spec.EgressRefs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	egName := da.Spec.EgressRefs[0].GatewayRef
 	var eg clrkv1alpha1.EgressGateway
 	if err := m.client.Get(ctx, types.NamespacedName{Namespace: da.Namespace, Name: egName}, &eg); err != nil {
-		return nil, fmt.Errorf("get EgressGateway %s/%s: %w", da.Namespace, egName, err)
+		return nil, nil, fmt.Errorf("get EgressGateway %s/%s: %w", da.Namespace, egName, err)
 	}
+
 	specByName := make(map[string]clrkv1alpha1.EgressListener, len(eg.Spec.Listeners))
 	for _, el := range eg.Spec.Listeners {
 		specByName[el.Name] = el
@@ -452,9 +469,23 @@ func (m *daemonLifecycleManager) resolveEgressBackends(ctx context.Context, da *
 		})
 	}
 	if len(backends) == 0 {
-		return nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready yet", da.Namespace, egName)
+		return nil, nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready yet", da.Namespace, egName)
 	}
-	return backends, nil
+
+	// Compile policy from the EG + every L4Route in the namespace
+	// whose ParentRef points at it. Listing in the EG's namespace is
+	// safe because EgressL4Route can only target EGs in the same
+	// namespace (routesForEG enforces this). The handle returned by
+	// SyncPolicy is stable: ConfigWatcher hot-swaps its underlying
+	// state on later CRD changes, so existing sandboxes pick up
+	// route/policy edits without restart.
+	var l4Routes clrkv1alpha1.EgressL4RouteList
+	if err := m.client.List(ctx, &l4Routes, client.InNamespace(da.Namespace)); err != nil {
+		return nil, nil, fmt.Errorf("list EgressL4Routes in %s: %w", da.Namespace, err)
+	}
+	policy := m.router.SyncPolicy(eg, l4Routes.Items)
+
+	return backends, policy, nil
 }
 
 // loadEgressCA fetches the MITM CA cert PEM for the DaemonAgent's first
@@ -486,14 +517,14 @@ func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alp
 // waitForEgressReady polls until all of the DaemonAgent's EG
 // dependencies are usable: the CA Secret exists, the EG status
 // carries at least one listener BackendAddress, and at least one of
-// those addresses is TCP-dialable. Returns (caPEM, backends, nil) on
-// success. Designed to be called BEFORE libcontainer Create so the
-// cold-start window doesn't churn netstack state on every retry.
+// those addresses is TCP-dialable. Returns (caPEM, backends, policy,
+// nil) on success. Designed to be called BEFORE libcontainer Create so
+// the cold-start window doesn't churn netstack state on every retry.
 func (m *daemonLifecycleManager) waitForEgressReady(
 	ctx context.Context,
 	da *clrkv1alpha1.DaemonAgent,
 	log logr.Logger,
-) ([]byte, []egress.BackendListener, error) {
+) ([]byte, []egress.BackendListener, *egress.SandboxPolicy, error) {
 	const (
 		warmupTimeout = 5 * time.Minute
 		pollInterval  = 1 * time.Second
@@ -502,10 +533,10 @@ func (m *daemonLifecycleManager) waitForEgressReady(
 	logged := false
 	for {
 		caPEM, caErr := m.loadEgressCA(ctx, da)
-		backends, backendErr := m.resolveEgressBackends(ctx, da)
-		if caErr == nil && backendErr == nil {
+		backends, policy, cfgErr := m.resolveEgressConfig(ctx, da)
+		if caErr == nil && cfgErr == nil {
 			if len(backends) == 0 {
-				return caPEM, nil, nil
+				return caPEM, nil, nil, nil
 			}
 			// Probe the first backend; if it dials we assume the
 			// EG-managed pod is fully up and the rest of the
@@ -514,7 +545,7 @@ func (m *daemonLifecycleManager) waitForEgressReady(
 			// would just multiply latency in the cold-start path.
 			probe := backends[0].Addr
 			if err := waitTCPDialable(ctx, probe, 30*time.Second); err == nil {
-				return caPEM, backends, nil
+				return caPEM, backends, policy, nil
 			} else if !logged {
 				log.Info("Egress backend not yet dialable; will keep polling", "backend", probe, "err", err)
 				logged = true
@@ -522,7 +553,7 @@ func (m *daemonLifecycleManager) waitForEgressReady(
 		} else if !logged {
 			err := caErr
 			if err == nil {
-				err = backendErr
+				err = cfgErr
 			}
 			log.Info("Egress prerequisites not ready; will keep polling", "err", err)
 			logged = true
@@ -530,16 +561,16 @@ func (m *daemonLifecycleManager) waitForEgressReady(
 		if time.Now().After(deadline) {
 			err := caErr
 			if err == nil {
-				err = backendErr
+				err = cfgErr
 			}
 			if err == nil {
 				err = fmt.Errorf("EgressGateway warmup timed out after %s", warmupTimeout)
 			}
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+			return nil, nil, nil, ctx.Err()
 		case <-time.After(pollInterval):
 		}
 	}

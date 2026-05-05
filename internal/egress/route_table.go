@@ -1,5 +1,3 @@
-//go:build linux
-
 package egress
 
 import (
@@ -112,6 +110,30 @@ func hostnameMatches(rule, candidate string) bool {
 		return strings.Count(candidate, ".") == strings.Count(rule, ".")
 	}
 	return rule == candidate
+}
+
+// routesForEG returns the EgressL4Routes whose ParentRefs target the
+// given EG. A route's ParentRef.Namespace defaults to the route's own
+// namespace (gwapiv1 semantics).
+func routesForEG(routes []clrkv1alpha1.EgressL4Route, egNamespace, egName string) []clrkv1alpha1.EgressL4Route {
+	var out []clrkv1alpha1.EgressL4Route
+	for _, r := range routes {
+		for _, ref := range r.Spec.ParentRefs {
+			if string(ref.Name) != egName {
+				continue
+			}
+			ns := r.Namespace
+			if ref.Namespace != nil {
+				ns = string(*ref.Namespace)
+			}
+			if ns != egNamespace {
+				continue
+			}
+			out = append(out, r)
+			break
+		}
+	}
+	return out
 }
 
 // compileRouteTable builds a routeTable from CRD objects.

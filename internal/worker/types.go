@@ -78,5 +78,12 @@ type SandboxInstance struct {
 	// destination port. Empty slice means direct dial.
 	EgressBackends []egress.BackendListener
 
+	// EgressPolicy is the per-sandbox authorization plane built from
+	// the bound EgressGateway's DefaultPolicy and the EgressL4Routes
+	// targeting it. Nil means no enforcement (sandboxes with no
+	// EgressRefs). The handle is stable across CRD edits — the
+	// router updates its underlying state in place.
+	EgressPolicy *egress.SandboxPolicy
+
 	CreatedAt time.Time
 }

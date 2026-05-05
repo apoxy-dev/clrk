@@ -302,6 +302,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 			Backends:     sb.EgressBackends,
 			DNSResolvers: m.workerResolvers,
 			DNSCache:     stack.DNSCache(),
+			Policy:       sb.EgressPolicy,
 		})
 		go func() {
 			if err := stack.Start(context.Background(), dialer); err != nil {
@@ -336,6 +337,22 @@ func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.Backe
 		return ErrNotFound
 	}
 	sb.EgressBackends = backends
+	return nil
+}
+
+// SetEgressPolicy attaches the per-sandbox SandboxPolicy handle for a
+// sandbox between Create and Start. The handle is consulted by the
+// IdentityDialer before backend selection, so DefaultPolicy=DenyAll
+// denies even traffic that would otherwise match a backend listener.
+// Nil disables enforcement (used for agents with no EgressRefs).
+func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		return ErrNotFound
+	}
+	sb.EgressPolicy = policy
 	return nil
 }
 

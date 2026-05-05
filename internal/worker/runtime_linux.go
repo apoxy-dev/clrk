@@ -50,7 +50,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 
 	// Daemon supervisor — owns one goroutine per elected DaemonAgent.
-	daemonMgr := newDaemonLifecycleManager(ctx, sandboxMgr, r.Client, r.PodName)
+	daemonMgr := newDaemonLifecycleManager(ctx, sandboxMgr, r.Client, router, r.PodName)
 
 	// Set up SandboxState watcher.
 	watcher := &sandboxWatcher{

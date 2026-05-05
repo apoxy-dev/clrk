@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/netstack"
 )
@@ -42,6 +43,14 @@ type IdentityDialer struct {
 	// into ctx for Router hostname matching (passthrough mode).
 	// Nil-safe; direct-IP / expired lookups return "".
 	DNSCache *netstack.DNSCache
+
+	// Policy is the per-sandbox authorization decision plane,
+	// compiled from the bound EgressGateway's DefaultPolicy and the
+	// EgressL4Routes that target it. Consulted before backend
+	// selection so default-deny denies even traffic that would
+	// otherwise have matched a backend listener. Nil means no
+	// enforcement (e.g. agents with no EgressRefs).
+	Policy *SandboxPolicy
 }
 
 // pickBackend selects the best-matching configured listener for the
@@ -97,16 +106,30 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 		}
 	}
 
+	var dstName string
+	if !dnsRewrite && parseErr == nil && d.DNSCache != nil {
+		dstName = d.DNSCache.Lookup(origDst.Addr())
+	}
+
+	// Policy check before backend selection. Applies to both the EG
+	// backend path and the direct-dial fall-through, so default-deny
+	// denies even traffic that would otherwise match a listener.
+	// DNS rewrites bypass: the rewrite target is a worker-internal
+	// resolver, not the agent's intended destination — denying it
+	// would break name resolution for permitted destinations.
+	if !dnsRewrite && parseErr == nil && d.Policy != nil {
+		proto := l4ProtocolFromNetwork(network)
+		if !d.Policy.Allow(origDst, proto, dstName) {
+			d.logDeny(network, origAddr, dstName)
+			return nil, fmt.Errorf("connection to %s denied by egress policy", origAddr)
+		}
+	}
+
 	var backend *BackendListener
 	if !dnsRewrite && parseErr == nil {
 		backend = d.pickBackend(origDst.Port())
 	}
 	d.logDial(network, origAddr, addr, dnsRewrite, backend)
-
-	var dstName string
-	if !dnsRewrite && parseErr == nil && d.DNSCache != nil {
-		dstName = d.DNSCache.Lookup(origDst.Addr())
-	}
 
 	// DNS dials must bypass the egress-gateway path — the EG listener is
 	// HTTPS-only and would silently drop UDP/53 packets wrapped in PROXY
@@ -172,6 +195,42 @@ func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite boo
 		"backend.name", backendName,
 		"backend.shape", backendShape,
 	)
+}
+
+// logDeny emits a structured slog line on a policy-denied dial. Same
+// shape as logDial so log consumers can join allow/deny on the agent
+// identity tuple.
+func (d *IdentityDialer) logDeny(network, origDst, dstName string) {
+	defaultPolicy := ""
+	if d.Policy != nil {
+		defaultPolicy = string(d.Policy.DefaultPolicy())
+	}
+	slog.Info("egress dial denied",
+		"agent.kind", d.Identity.Kind,
+		"agent.namespace", d.Identity.Namespace,
+		"agent.name", d.Identity.Name,
+		"agent.uid", d.Identity.UID,
+		"agent.revision", d.Identity.Revision,
+		"invocation.id", d.Identity.InvocationID,
+		"network", network,
+		"dst", origDst,
+		"dst.name", dstName,
+		"default_policy", defaultPolicy,
+	)
+}
+
+// l4ProtocolFromNetwork maps a Go net package network string to the
+// CRD-level L4Protocol used for route matching. Unknown networks
+// (unix, etc.) return "" — which never matches a Protocol-pinned
+// route, so policy enforcement falls through to the default.
+func l4ProtocolFromNetwork(network string) clrkv1alpha1.L4Protocol {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		return clrkv1alpha1.L4ProtocolTCP
+	case "udp", "udp4", "udp6":
+		return clrkv1alpha1.L4ProtocolUDP
+	}
+	return ""
 }
 
 // rewriteDNS swaps a :53 destination for the first configured worker
