@@ -435,50 +435,26 @@ func (m *daemonLifecycleManager) resolveEgressBackends(ctx context.Context, da *
 		if !ok {
 			continue
 		}
-		shape, err := shapeForListener(spec)
+		shape, err := clrkv1alpha1.ShapeForListener(spec)
 		if err != nil {
 			continue
 		}
+		var matchPort int32
+		if spec.Port != nil {
+			matchPort = *spec.Port
+		}
 		backends = append(backends, egress.BackendListener{
-			Name:  ls.Name,
-			Addr:  ls.BackendAddress,
-			Shape: string(shape),
-			Port:  spec.Port,
+			Name:      ls.Name,
+			Addr:      ls.BackendAddress,
+			Shape:     string(shape),
+			MatchPort: matchPort,
+			Priority:  clrkv1alpha1.ShapePriority(shape),
 		})
 	}
 	if len(backends) == 0 {
 		return nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready yet", da.Namespace, egName)
 	}
 	return backends, nil
-}
-
-// shapeForListener mirrors internal/controller.shapeForListener but
-// duplicated locally so the worker package doesn't depend on the
-// controller package. Keep in sync.
-func shapeForListener(l clrkv1alpha1.EgressListener) (string, error) {
-	switch l.Protocol {
-	case clrkv1alpha1.EgressProtocolHTTP:
-		return "http", nil
-	case clrkv1alpha1.EgressProtocolHTTPS:
-		return "https", nil
-	case clrkv1alpha1.EgressProtocolTLS:
-		mode := clrkv1alpha1.EgressTLSPassthrough
-		if l.TLS != nil && l.TLS.Mode != "" {
-			mode = l.TLS.Mode
-		}
-		switch mode {
-		case clrkv1alpha1.EgressTLSTerminate:
-			return "tls-terminate", nil
-		case clrkv1alpha1.EgressTLSPassthrough:
-			return "tls-passthrough", nil
-		default:
-			return "", fmt.Errorf("invalid TLS mode %q on listener %q", mode, l.Name)
-		}
-	case clrkv1alpha1.EgressProtocolTCP:
-		return "tcp", nil
-	default:
-		return "", fmt.Errorf("listener %q: unsupported protocol %q", l.Name, l.Protocol)
-	}
 }
 
 // loadEgressCA fetches the MITM CA cert PEM for the DaemonAgent's first

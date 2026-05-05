@@ -44,6 +44,7 @@ import (
 
 	tlsv3 "github.com/apoxy-dev/envoy-go/envoy/extensions/transport_sockets/tls/v3"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc"
@@ -89,22 +90,6 @@ const (
 	// dnsCacheName ties the dynamic_forward_proxy HTTP filter and cluster
 	// to the same DNS cache instance.
 	dnsCacheName = "clrk-egress-dns-cache"
-)
-
-// EgressListenerShape mirrors
-// internal/controller.EgressListenerShape — duplicated to keep the
-// extension package free of a controller-package dependency. The
-// reconciler stamps the shape into the Gateway listener name as a
-// "<egListenerName>--<shape>" suffix; the extension reads it back to
-// decide how to reshape the listener.
-type EgressListenerShape string
-
-const (
-	ShapeHTTP           EgressListenerShape = "http"
-	ShapeHTTPS          EgressListenerShape = "https"
-	ShapeTLSTerminate   EgressListenerShape = "tls-terminate"
-	ShapeTLSPassthrough EgressListenerShape = "tls-passthrough"
-	ShapeTCP            EgressListenerShape = "tcp"
 )
 
 // agentTLVRules maps each clrk PROXY v2 TLV type into a dynamic-metadata
@@ -252,11 +237,11 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		"shape", string(shape))
 
 	switch shape {
-	case ShapeTLSTerminate, ShapeHTTPS, ShapeHTTP:
+	case clrkv1alpha1.EgressShapeTLSTerminate, clrkv1alpha1.EgressShapeHTTPS, clrkv1alpha1.EgressShapeHTTP:
 		s.applyHTTPShape(ctx, listener, egKey, shape)
-	case ShapeTLSPassthrough:
+	case clrkv1alpha1.EgressShapeTLSPassthrough:
 		s.applyTLSPassthroughShape(ctx, listener, egKey)
-	case ShapeTCP:
+	case clrkv1alpha1.EgressShapeTCP:
 		s.applyTCPShape(ctx, listener, egKey)
 	}
 
@@ -269,7 +254,7 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 // to add ext_proc + DFP filters with a catch-all route. Used by
 // tls-terminate / https / http shapes. For plain http we strip the
 // per-chain TLS TransportSocket since the listener is non-TLS.
-func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape EgressListenerShape) {
+func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape clrkv1alpha1.EgressListenerShape) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	if err := ensureProxyProtocolFilter(listener); err != nil {
 		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
@@ -284,7 +269,7 @@ func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listen
 	}
 
 	for _, fc := range allChains {
-		if shape == ShapeHTTP {
+		if shape == clrkv1alpha1.EgressShapeHTTP {
 			// Plain HTTP: there's no TLS handshake to terminate.
 			fc.TransportSocket = nil
 		} else if err := s.injectHandshaker(fc, egKey); err != nil {
@@ -614,26 +599,14 @@ func removeTLSInspectorFilter(l *listenerv3.Listener) {
 
 // shapeFromListener parses the EgressListener shape suffix off the
 // listener's section name. EG names listeners as
-// "<namespace>/<gatewayName>/<sectionName>", and the controller stamps
-// "<egListenerName>--<shape>" into the section name. Returns ("", false)
-// if the suffix is missing or unrecognized.
-func shapeFromListener(l *listenerv3.Listener) (EgressListenerShape, bool) {
+// "<namespace>/<gatewayName>/<sectionName>".
+func shapeFromListener(l *listenerv3.Listener) (clrkv1alpha1.EgressListenerShape, bool) {
 	parts := strings.Split(l.GetName(), "/")
 	if len(parts) < 3 {
 		return "", false
 	}
-	section := parts[len(parts)-1]
-	idx := strings.LastIndex(section, "--")
-	if idx < 0 {
-		return "", false
-	}
-	suffix := EgressListenerShape(section[idx+2:])
-	switch suffix {
-	case ShapeHTTP, ShapeHTTPS, ShapeTLSTerminate, ShapeTLSPassthrough, ShapeTCP:
-		return suffix, true
-	default:
-		return "", false
-	}
+	_, shape, ok := clrkv1alpha1.ParseListenerSectionName(parts[len(parts)-1])
+	return shape, ok
 }
 
 // buildTLSPassthroughChain assembles the SNI-only TCP chain.

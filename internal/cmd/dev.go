@@ -488,9 +488,10 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
 			// Workers in clrk dev run on the docker network and can't
 			// route to k3s ClusterIPs, so the EgressGateway controller
-			// publishes EgressBackendAddress as <k3s-container>:<NodePort>
-			// instead of the in-cluster Service DNS name. The k3s
-			// container is reachable from workers by docker DNS.
+			// publishes Status.Listeners[*].BackendAddress as
+			// <k3s-container>:<NodePort> instead of the in-cluster
+			// Service DNS name. The k3s container is reachable from
+			// workers by docker DNS.
 			"--dev-egress-backend-host=" + drivers.K3sContainerName,
 		),
 	}

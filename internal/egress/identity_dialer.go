@@ -44,32 +44,10 @@ type IdentityDialer struct {
 	DNSCache *netstack.DNSCache
 }
 
-// shapePriority orders backend shapes for tie-breaking when multiple
-// listeners catch the same destination port. Higher value wins.
-// TLS-terminate / HTTPS go first because they sniff and can carry any
-// byte stream including agent-malformed bytes; plain TCP is a
-// last-resort because it hard-commits the connection to passthrough.
-func shapePriority(shape string) int {
-	switch shape {
-	case "tls-terminate":
-		return 5
-	case "https":
-		return 4
-	case "http":
-		return 3
-	case "tls-passthrough":
-		return 2
-	case "tcp":
-		return 1
-	default:
-		return 0
-	}
-}
-
 // pickBackend selects the best-matching configured listener for the
-// sandbox's destination port. Most-specific wins (Port-constrained
-// before catch-all); within a tie, shape priority decides. Returns
-// nil when no listener matches or all matches have empty Addr.
+// sandbox's destination port. Most-specific wins (MatchPort-constrained
+// before catch-all); within a tie, BackendListener.Priority decides.
+// Returns nil when no listener matches or all matches have empty Addr.
 func (d *IdentityDialer) pickBackend(dstPort uint16) *BackendListener {
 	var best *BackendListener
 	bestSpecific := false
@@ -78,20 +56,19 @@ func (d *IdentityDialer) pickBackend(dstPort uint16) *BackendListener {
 		if b.Addr == "" {
 			continue
 		}
-		specific := b.Port != nil && uint16(*b.Port) == dstPort
-		if b.Port != nil && !specific {
+		specific := b.MatchPort != 0 && uint16(b.MatchPort) == dstPort
+		if b.MatchPort != 0 && !specific {
 			continue
 		}
 		if best == nil {
 			best, bestSpecific = b, specific
 			continue
 		}
-		// Specific beats catch-all.
 		if specific && !bestSpecific {
 			best, bestSpecific = b, specific
 			continue
 		}
-		if specific == bestSpecific && shapePriority(b.Shape) > shapePriority(best.Shape) {
+		if specific == bestSpecific && b.Priority > best.Priority {
 			best = b
 		}
 	}

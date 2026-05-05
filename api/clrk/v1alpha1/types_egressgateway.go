@@ -205,14 +205,6 @@ type EgressGatewayStatus struct {
 	Conditions    []metav1.Condition     `json:"conditions,omitempty"`
 	Listeners     []EgressListenerStatus `json:"listeners,omitempty"`
 	ListenerCount int32                  `json:"listenerCount,omitempty"`
-
-	// EgressBackendAddress mirrors Status.Listeners[0].BackendAddress
-	// for backward compatibility with worker code that pre-dates the
-	// per-listener split. New callers should iterate Listeners
-	// instead — this field will be removed once no in-flight worker
-	// reads it.
-	// +optional
-	EgressBackendAddress string `json:"egressBackendAddress,omitempty"`
 }
 
 // EgressGateway defines a transparent egress proxy that intercepts outbound

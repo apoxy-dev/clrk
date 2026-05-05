@@ -3,7 +3,7 @@ package egress
 // BackendListener describes one EgressGateway listener the worker can
 // dial. Each EgressListener in a CRD becomes one entry; the dialer
 // picks at connect time based on the sandbox's destination port and
-// the per-listener shape.
+// the per-listener priority.
 //
 // Lives in a non-build-tagged file so callers compiled for darwin (the
 // CLI, helpers in internal/worker that mix with linux-only sandbox
@@ -20,11 +20,19 @@ type BackendListener struct {
 
 	// Shape is the on-the-wire protocol selector
 	// ("tls-terminate", "tls-passthrough", "tcp", "http", "https").
-	// Used as a tiebreaker when multiple listeners match the dst
-	// port and as the EgressL4Route resolution key.
+	// Carried for log/diagnostic surface; the dialer uses Priority
+	// for tie-breaking, not Shape.
 	Shape string
 
-	// Port, when non-nil, narrows this listener to the sandbox's
-	// destination port. Nil = catch-all for this shape.
-	Port *int32
+	// MatchPort, when non-zero, narrows this listener to the
+	// sandbox's destination port. Zero = catch-all for this shape.
+	// (Distinct from EgressListenerStatus.Port, which is the *bind*
+	// port the EG-managed Envoy listens on.)
+	MatchPort int32
+
+	// Priority is the precomputed shape rank used as a tiebreaker
+	// when multiple listeners match the same sandbox dst port.
+	// Higher wins. Set from clrkv1alpha1.ShapePriority at config time
+	// so the dial path doesn't pay a string-switch per connection.
+	Priority int
 }
