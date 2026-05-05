@@ -14,18 +14,19 @@ import (
 )
 
 // IdentityDialer wraps a base netstack Dialer. When an EgressGateway
-// backend is configured it redirects every dial to that backend and
-// prepends a PROXY v2 frame so Envoy can attribute the connection to this
-// sandbox's agent. With no backend it delegates directly to the wrapped
-// dialer.
+// backend is configured it redirects every dial to one of the
+// configured backend listeners and prepends a PROXY v2 frame so Envoy
+// can attribute the connection to this sandbox's agent. With no
+// backends it delegates directly to the wrapped dialer.
 type IdentityDialer struct {
 	Base     netstack.Dialer
 	Identity proxyproto.AgentIdentity
 
-	// Backend, when non-empty, is the "host:port" address of the Envoy
-	// Gateway egress listener. Dials are re-pointed there + PROXY v2
-	// framed.
-	Backend string
+	// Backends are the EG listeners this sandbox can be steered to.
+	// Multiple entries cover the protocol-split listener model:
+	// e.g. one tls-terminate listener + one tcp listener on
+	// distinct ports. Empty slice = direct-dial only (no MITM).
+	Backends []BackendListener
 
 	// DNSResolvers, when non-empty, redirects every :53 dial to the
 	// first entry. Required because the sandbox's resolv.conf points at
@@ -41,6 +42,60 @@ type IdentityDialer struct {
 	// into ctx for Router hostname matching (passthrough mode).
 	// Nil-safe; direct-IP / expired lookups return "".
 	DNSCache *netstack.DNSCache
+}
+
+// shapePriority orders backend shapes for tie-breaking when multiple
+// listeners catch the same destination port. Higher value wins.
+// TLS-terminate / HTTPS go first because they sniff and can carry any
+// byte stream including agent-malformed bytes; plain TCP is a
+// last-resort because it hard-commits the connection to passthrough.
+func shapePriority(shape string) int {
+	switch shape {
+	case "tls-terminate":
+		return 5
+	case "https":
+		return 4
+	case "http":
+		return 3
+	case "tls-passthrough":
+		return 2
+	case "tcp":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// pickBackend selects the best-matching configured listener for the
+// sandbox's destination port. Most-specific wins (Port-constrained
+// before catch-all); within a tie, shape priority decides. Returns
+// nil when no listener matches or all matches have empty Addr.
+func (d *IdentityDialer) pickBackend(dstPort uint16) *BackendListener {
+	var best *BackendListener
+	bestSpecific := false
+	for i := range d.Backends {
+		b := &d.Backends[i]
+		if b.Addr == "" {
+			continue
+		}
+		specific := b.Port != nil && uint16(*b.Port) == dstPort
+		if b.Port != nil && !specific {
+			continue
+		}
+		if best == nil {
+			best, bestSpecific = b, specific
+			continue
+		}
+		// Specific beats catch-all.
+		if specific && !bestSpecific {
+			best, bestSpecific = b, specific
+			continue
+		}
+		if specific == bestSpecific && shapePriority(b.Shape) > shapePriority(best.Shape) {
+			best = b
+		}
+	}
+	return best
 }
 
 var _ netstack.Dialer = (*IdentityDialer)(nil)
@@ -64,7 +119,12 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 			dnsRewrite = true
 		}
 	}
-	d.logDial(network, origAddr, addr, dnsRewrite)
+
+	var backend *BackendListener
+	if !dnsRewrite && parseErr == nil {
+		backend = d.pickBackend(origDst.Port())
+	}
+	d.logDial(network, origAddr, addr, dnsRewrite, backend)
 
 	var dstName string
 	if !dnsRewrite && parseErr == nil && d.DNSCache != nil {
@@ -75,7 +135,7 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 	// HTTPS-only and would silently drop UDP/53 packets wrapped in PROXY
 	// v2. The destination has already been rewritten to the worker's real
 	// resolver; just hand off to the base dialer.
-	if d.Backend == "" || dnsRewrite {
+	if backend == nil || dnsRewrite {
 		return d.Base.DialContext(withDstName(ctx, dstName), network, addr)
 	}
 
@@ -84,9 +144,9 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 	}
 
 	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, network, d.Backend)
+	conn, err := dialer.DialContext(ctx, network, backend.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("dialing egress backend %s: %w", d.Backend, err)
+		return nil, fmt.Errorf("dialing egress backend %s (%s): %w", backend.Addr, backend.Name, err)
 	}
 
 	src := sanitizedSrc(conn.LocalAddr(), origDst)
@@ -109,10 +169,16 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 //
 // origDst is what the sandbox addressed; effDst is what we actually
 // dial out (differs only when DNS rewrite kicks in).
-func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite bool) {
+func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite bool, backend *BackendListener) {
 	mode := "direct"
-	if d.Backend != "" && !dnsRewrite {
+	backendAddr := ""
+	backendName := ""
+	backendShape := ""
+	if backend != nil && !dnsRewrite {
 		mode = "egress-gateway"
+		backendAddr = backend.Addr
+		backendName = backend.Name
+		backendShape = backend.Shape
 	}
 	slog.Info("egress dial",
 		"agent.kind", d.Identity.Kind,
@@ -125,7 +191,9 @@ func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite boo
 		"dst", origDst,
 		"effective_dst", effDst,
 		"mode", mode,
-		"backend", d.Backend,
+		"backend", backendAddr,
+		"backend.name", backendName,
+		"backend.shape", backendShape,
 	)
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
@@ -57,10 +58,10 @@ type SandboxInstance struct {
 	AgentRef  string
 	Namespace string
 	Phase     SandboxPhase
-	NetNS     string   // /run/netns/run-<id>
-	TAPName   string   // TAP device name in the netns.
-	TAPFD     *os.File // Host-side TAP fd for netstack (APO-536).
-	RootFS    string   // Extracted rootfs path.
+	NetNS     string    // /run/netns/run-<id>
+	TAPName   string    // TAP device name in the netns.
+	TAPFD     *os.File  // Host-side TAP fd for netstack (APO-536).
+	RootFS    string    // Extracted rootfs path.
 	Stack     io.Closer // Per-sandbox netstack (*netstack.SandboxStack on linux).
 
 	Sandbox   clrkv1alpha1.AgentSandbox
@@ -71,10 +72,11 @@ type SandboxInstance struct {
 	// attribute traffic back to its parent agent.
 	Identity proxyproto.AgentIdentity
 
-	// EgressBackend, when non-empty, is the "host:port" of the Envoy
-	// Gateway egress listener that every outbound sandbox TCP conn is
-	// routed to (PROXY v2 framed). Empty means direct dial.
-	EgressBackend string
+	// EgressBackends are the EG listener entries this sandbox can be
+	// steered to (one per EgressListener in the gateway's spec). The
+	// IdentityDialer picks one per outbound dial based on shape +
+	// destination port. Empty slice means direct dial.
+	EgressBackends []egress.BackendListener
 
 	CreatedAt time.Time
 }

@@ -33,11 +33,87 @@ const (
 	// the reconciler layer.
 	GatewayNamePrefix = "clrk-eg-"
 
-	// EgressListenerPort is the fixed TCP port that each clrk egress
-	// listener binds. Workers dial this port on the EG Service with a
-	// PROXY v2 header for every outbound sandbox connection.
-	EgressListenerPort int32 = 18080
+	// EgressListenerBasePort is the first TCP port the EG-managed Envoy
+	// binds. Each EgressListener in spec.listeners is assigned
+	// EgressListenerBasePort+index — protocol shapes (TLS-Terminate,
+	// plain TCP, etc.) cannot share a port, so each materializes as a
+	// distinct Envoy listener and Service ServicePort.
+	EgressListenerBasePort int32 = 18080
+
+	// EgressListenerPort is the legacy single-listener port. Retained
+	// only as the base for the per-EgressListener allocation above and
+	// for code that still reads the singular Status.EgressBackendAddress
+	// during the rollout.
+	//
+	// Deprecated: use EgressListenerBasePort.
+	EgressListenerPort = EgressListenerBasePort
+
+	// MaxEgressListeners caps spec.listeners to keep the assigned port
+	// range narrow and reviewable. Bump if a real workload needs more.
+	MaxEgressListeners = 8
 )
+
+// EgressListenerShape encodes how the egextension server should rewrite
+// each Envoy listener generated for an EgressListener entry. The shape
+// travels from the controller to the extension via the Gateway listener
+// name (the only stable channel — the extension does not read the
+// EgressGateway CR), as a "<egListenerName>--<shape>" suffix.
+type EgressListenerShape string
+
+const (
+	EgressShapeHTTP           EgressListenerShape = "http"
+	EgressShapeHTTPS          EgressListenerShape = "https"
+	EgressShapeTLSTerminate   EgressListenerShape = "tls-terminate"
+	EgressShapeTLSPassthrough EgressListenerShape = "tls-passthrough"
+	EgressShapeTCP            EgressListenerShape = "tcp"
+)
+
+// shapeForListener resolves a CRD EgressListener to its on-the-wire shape.
+// Returns ("", error) for unsupported combinations — the reconciler
+// surfaces the error on Status.Conditions[Ready] and skips Gateway
+// materialization. UDP is the only currently-rejected protocol.
+func shapeForListener(l clrkv1alpha1.EgressListener) (EgressListenerShape, error) {
+	switch l.Protocol {
+	case clrkv1alpha1.EgressProtocolHTTP:
+		return EgressShapeHTTP, nil
+	case clrkv1alpha1.EgressProtocolHTTPS:
+		return EgressShapeHTTPS, nil
+	case clrkv1alpha1.EgressProtocolTLS:
+		mode := clrkv1alpha1.EgressTLSPassthrough
+		if l.TLS != nil && l.TLS.Mode != "" {
+			mode = l.TLS.Mode
+		}
+		switch mode {
+		case clrkv1alpha1.EgressTLSTerminate:
+			return EgressShapeTLSTerminate, nil
+		case clrkv1alpha1.EgressTLSPassthrough:
+			return EgressShapeTLSPassthrough, nil
+		default:
+			return "", fmt.Errorf("listener %q: invalid TLS mode %q", l.Name, mode)
+		}
+	case clrkv1alpha1.EgressProtocolTCP:
+		return EgressShapeTCP, nil
+	case clrkv1alpha1.EgressProtocolUDP:
+		return "", fmt.Errorf("listener %q: protocol UDP is not yet supported", l.Name)
+	default:
+		return "", fmt.Errorf("listener %q: unknown protocol %q", l.Name, l.Protocol)
+	}
+}
+
+// gatewayListenerName encodes the EgressListener name + shape into the
+// Gateway-API listener section name. Must remain in sync with the
+// parser in internal/egextension. The "--" delimiter is permitted in
+// RFC1123 labels and unlikely to clash with operator-chosen names.
+func gatewayListenerName(egListenerName string, shape EgressListenerShape) string {
+	return fmt.Sprintf("%s--%s", egListenerName, shape)
+}
+
+// listenerPort assigns a deterministic port per EgressListener index.
+// Operators can override per-listener with EgressListener.Port (the
+// downstream sandbox-side port-match), but the upstream Envoy-listener
+// port is always controlled by the controller to keep Service ports
+// predictable.
+func listenerPort(idx int) int32 { return EgressListenerBasePort + int32(idx) }
 
 // EgressGatewayReconciler provisions Envoy Gateway infrastructure for each
 // clrk EgressGateway: a shared GatewayClass, an EnvoyProxy referencing our
@@ -76,6 +152,13 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if err := validateEgressGatewaySpec(&eg); err != nil {
+		// Surface the validation error on Status.Ready and stop —
+		// Gateway / EnvoyProxy materialization would either fail
+		// downstream or expose a half-configured data plane.
+		return ctrl.Result{}, r.markInvalid(ctx, &eg, err)
 	}
 
 	if err := r.ensureCASecret(ctx, &eg); err != nil {
@@ -139,7 +222,6 @@ func (r *EgressGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("egressgateway").
 		Complete(r)
 }
-
 
 // ensureCASecret mints the per-EgressGateway MITM CA if one doesn't exist.
 // The Secret is owned by the EgressGateway so deletion cascades cleanly.
@@ -430,19 +512,66 @@ func (r *EgressGatewayReconciler) ensureGatewayClass(ctx context.Context) error 
 	})
 }
 
-// ensureGateway creates or updates the Gateway referencing our class with a
-// single HTTPS listener. We use HTTPS (not raw TCP) so EG generates an
-// HCM-shaped listener that PostHTTPListenerModify can mutate — TCP
-// listeners get no filter chains and no extension hook fires for them.
+// validateEgressGatewaySpec enforces invariants the CRD schema can't
+// express on its own: distinct listener names, supported protocols
+// only, and an upper bound on listener count so port allocation stays
+// in a narrow reviewable range. Returns nil on success; the caller
+// surfaces the returned error on Status.
+func validateEgressGatewaySpec(eg *clrkv1alpha1.EgressGateway) error {
+	if len(eg.Spec.Listeners) == 0 {
+		return fmt.Errorf("spec.listeners must not be empty")
+	}
+	if len(eg.Spec.Listeners) > MaxEgressListeners {
+		return fmt.Errorf("spec.listeners has %d entries; maximum is %d",
+			len(eg.Spec.Listeners), MaxEgressListeners)
+	}
+	seen := make(map[string]struct{}, len(eg.Spec.Listeners))
+	for _, l := range eg.Spec.Listeners {
+		if _, dup := seen[l.Name]; dup {
+			return fmt.Errorf("spec.listeners[%q]: duplicate name", l.Name)
+		}
+		seen[l.Name] = struct{}{}
+		if _, err := shapeForListener(l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// markInvalid patches Status.Ready=False with the validation error and
+// returns the reconcile error to retry on the next CRD update. We don't
+// surface the validation failure as a reconcile error directly because
+// invalid specs should not requeue indefinitely — the user has to fix
+// the spec.
+func (r *EgressGatewayReconciler) markInvalid(ctx context.Context, eg *clrkv1alpha1.EgressGateway, validationErr error) error {
+	statusBase := eg.DeepCopy()
+	cond := metav1.Condition{
+		Type:               clrkv1alpha1.EgressGatewayConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "InvalidSpec",
+		Message:            validationErr.Error(),
+		ObservedGeneration: eg.Generation,
+	}
+	if !meta.SetStatusCondition(&eg.Status.Conditions, cond) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, eg, client.MergeFrom(statusBase)); err != nil {
+		return fmt.Errorf("patching invalid-spec status: %w", err)
+	}
+	return nil
+}
+
+// ensureGateway materializes one Envoy-Gateway Listener per
+// EgressListener, on a deterministic port per index. Every Gateway
+// listener uses HTTPSProtocolType regardless of the EgressListener's
+// declared protocol — this is the only way to make EG generate the
+// HCM scaffolding that PostHTTPListenerModify can mutate. The
+// extension reads the per-listener shape off the listener name and
+// reshapes the chain (stripping TLS, swapping filters) accordingly.
 //
-// The TLS certificateRef points at the per-EG CA Secret as a placeholder;
-// the extension swaps DownstreamTlsContext.CommonTlsContext.CustomHandshaker
-// in for the gRPC certificate provider so leaves are minted on the fly per
-// SNI and the placeholder cert is never actually presented.
-//
-// The Gateway carries an infrastructure parametersRef so EG provisions
-// Envoy with the per-EG EnvoyProxy spec (which pins our private image
-// containing the grpc_certificate_provider handshaker extension).
+// TLS placeholder cert (per-EG CA) is the same on every listener; the
+// extension overwrites the handshaker on shapes that terminate TLS
+// and strips the TransportSocket entirely on plain-TCP shapes.
 func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
 	gw := &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -455,10 +584,21 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 		tlsMode := gwapiv1.TLSModeTerminate
 		allRoutes := gwapiv1.NamespacesFromAll
 		gw.Spec.GatewayClassName = gwapiv1.ObjectName(EgressGatewayClassName)
-		gw.Spec.Listeners = []gwapiv1.Listener{
-			{
-				Name:     "egress",
-				Port:     gwapiv1.PortNumber(EgressListenerPort),
+		listeners := make([]gwapiv1.Listener, 0, len(eg.Spec.Listeners))
+		for i, el := range eg.Spec.Listeners {
+			shape, err := shapeForListener(el)
+			if err != nil {
+				// validateEgressGatewaySpec ran above; an error
+				// here means a programmer slipped a new protocol
+				// into shapeForListener without updating the
+				// validator. Surface to logs and skip the
+				// listener rather than blow up the whole Gateway.
+				log.FromContext(ctx).Error(err, "Skipping listener with unresolvable shape", "listener", el.Name)
+				continue
+			}
+			listeners = append(listeners, gwapiv1.Listener{
+				Name:     gwapiv1.SectionName(gatewayListenerName(el.Name, shape)),
+				Port:     gwapiv1.PortNumber(listenerPort(i)),
 				Protocol: gwapiv1.HTTPSProtocolType,
 				TLS: &gwapiv1.GatewayTLSConfig{
 					Mode: &tlsMode,
@@ -469,8 +609,9 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 				AllowedRoutes: &gwapiv1.AllowedRoutes{
 					Namespaces: &gwapiv1.RouteNamespaces{From: &allRoutes},
 				},
-			},
+			})
 		}
+		gw.Spec.Listeners = listeners
 		gw.Spec.Infrastructure = &gwapiv1.GatewayInfrastructure{
 			ParametersRef: &gwapiv1.LocalParametersReference{
 				Group: gwapiv1.Group(egv1alpha1.GroupVersion.Group),
@@ -485,11 +626,16 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 	return r.ensureCatchAllRoute(ctx, eg)
 }
 
-// ensureCatchAllRoute creates a placeholder HTTPRoute on the Gateway so EG
-// has at least one accepted route and produces an HCM filter chain for our
-// extension to rewrite. The route's backendRef points at a synthetic
-// service that our PostTranslateModify replaces with a
-// dynamic_forward_proxy cluster — the backend is never actually dialed.
+// ensureCatchAllRoute creates a placeholder HTTPRoute attached to every
+// listener so EG generates the HCM scaffolding the extension needs to
+// rewrite. The route's backendRef points at a synthetic service that
+// PostTranslateModify replaces with a dynamic_forward_proxy cluster —
+// the backend is never actually dialed.
+//
+// One ParentRef per listener (sectionName-scoped). For TCP /
+// TLS-Passthrough listeners the extension nukes the HCM and substitutes
+// network filters; the HTTPRoute is purely the trigger that gets EG to
+// emit a listener at all.
 func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
 	rt := &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -499,9 +645,20 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 	}
 	port := gwapiv1.PortNumber(80)
 	return createOrUpdateWithRetry(ctx, r.Client, rt, func() error {
-		rt.Spec.ParentRefs = []gwapiv1.ParentReference{{
-			Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name),
-		}}
+		gwName := gwapiv1.ObjectName(GatewayNamePrefix + eg.Name)
+		parents := make([]gwapiv1.ParentReference, 0, len(eg.Spec.Listeners))
+		for _, el := range eg.Spec.Listeners {
+			shape, err := shapeForListener(el)
+			if err != nil {
+				continue
+			}
+			section := gwapiv1.SectionName(gatewayListenerName(el.Name, shape))
+			parents = append(parents, gwapiv1.ParentReference{
+				Name:        gwName,
+				SectionName: &section,
+			})
+		}
+		rt.Spec.ParentRefs = parents
 		rt.Spec.Rules = []gwapiv1.HTTPRouteRule{{
 			BackendRefs: []gwapiv1.HTTPBackendRef{{
 				BackendRef: gwapiv1.BackendRef{
@@ -521,10 +678,10 @@ func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egNam
 const envoyGatewayNamespace = "envoy-gateway-system"
 
 // updateStatus refreshes Status.Conditions[Ready] from the EG-managed
-// Gateway's Programmed condition and Status.EgressBackendAddress from the
-// EG-managed Service. Returns requeue=true while the data plane is still
-// provisioning (Gateway not Programmed or Service absent) so the next
-// reconcile picks it up without waiting for an unrelated event.
+// Gateway's Programmed condition and Status.Listeners[*].BackendAddress
+// from the EG-managed Service. Returns requeue=true while the data plane
+// is still provisioning so the next reconcile picks it up without
+// waiting for an unrelated event.
 func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (bool, error) {
 	gwName := GatewayNamePrefix + eg.Name
 	statusBase := eg.DeepCopy()
@@ -553,14 +710,29 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 		return false, fmt.Errorf("getting Gateway: %w", gwErr)
 	}
 
-	addr, addrPending, err := r.resolveBackendAddress(ctx, eg, gwName)
+	listenerStatuses, anyPending, err := r.resolveListenerStatuses(ctx, eg, gwName)
 	if err != nil {
 		return false, err
 	}
 
 	dirty := false
-	if eg.Status.EgressBackendAddress != addr {
-		eg.Status.EgressBackendAddress = addr
+	if !equalListenerStatuses(eg.Status.Listeners, listenerStatuses) {
+		eg.Status.Listeners = listenerStatuses
+		dirty = true
+	}
+	if eg.Status.ListenerCount != int32(len(listenerStatuses)) {
+		eg.Status.ListenerCount = int32(len(listenerStatuses))
+		dirty = true
+	}
+	// Mirror the first listener onto the legacy singular field for
+	// in-flight worker code that still reads it; new callers should
+	// use Status.Listeners[*].BackendAddress.
+	var primary string
+	if len(listenerStatuses) > 0 {
+		primary = listenerStatuses[0].BackendAddress
+	}
+	if eg.Status.EgressBackendAddress != primary {
+		eg.Status.EgressBackendAddress = primary
 		dirty = true
 	}
 	if meta.SetStatusCondition(&eg.Status.Conditions, ready) {
@@ -573,13 +745,14 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 			return false, fmt.Errorf("updating status: %w", err)
 		}
 	}
-	return addrPending || ready.Status != metav1.ConditionTrue, nil
+	return anyPending || ready.Status != metav1.ConditionTrue, nil
 }
 
-// resolveBackendAddress returns the dialable address for the EG-managed
-// Service, with pending=true if the Service hasn't materialized or
-// hasn't yet been assigned a NodePort.
-func (r *EgressGatewayReconciler) resolveBackendAddress(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) (string, bool, error) {
+// resolveListenerStatuses produces one EgressListenerStatus per spec
+// listener, populating BackendAddress from the EG-managed Service's
+// matching ServicePort. anyPending=true while any listener's port is
+// still missing.
+func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) ([]clrkv1alpha1.EgressListenerStatus, bool, error) {
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs,
 		client.InNamespace(envoyGatewayNamespace),
@@ -588,41 +761,85 @@ func (r *EgressGatewayReconciler) resolveBackendAddress(ctx context.Context, eg 
 			"gateway.envoyproxy.io/owning-gateway-namespace": eg.Namespace,
 		},
 	); err != nil {
-		return "", false, fmt.Errorf("listing EG-managed services: %w", err)
+		return nil, false, fmt.Errorf("listing EG-managed services: %w", err)
 	}
-	if len(svcs.Items) == 0 {
-		return eg.Status.EgressBackendAddress, true, nil
+
+	prevByName := make(map[string]clrkv1alpha1.EgressListenerStatus, len(eg.Status.Listeners))
+	for _, ls := range eg.Status.Listeners {
+		prevByName[ls.Name] = ls
 	}
-	addr := r.computeBackendAddress(&svcs.Items[0])
-	if addr == "" {
-		return eg.Status.EgressBackendAddress, true, nil
+
+	out := make([]clrkv1alpha1.EgressListenerStatus, 0, len(eg.Spec.Listeners))
+	anyPending := false
+	for i, el := range eg.Spec.Listeners {
+		port := listenerPort(i)
+		ls := clrkv1alpha1.EgressListenerStatus{
+			Name: el.Name,
+			Port: port,
+		}
+		// Preserve any existing per-listener Conditions /
+		// AttachedRoutes set by other reconcile passes.
+		if prev, ok := prevByName[el.Name]; ok {
+			ls.Conditions = prev.Conditions
+			ls.AttachedRoutes = prev.AttachedRoutes
+		}
+		var addr string
+		if len(svcs.Items) > 0 {
+			addr = r.computeBackendAddressForPort(&svcs.Items[0], port)
+		}
+		if addr == "" {
+			anyPending = true
+			// Hold the prior address (if any) so a transient
+			// Service-list miss doesn't flap workers to direct-dial.
+			if prev, ok := prevByName[el.Name]; ok {
+				addr = prev.BackendAddress
+			}
+		}
+		ls.BackendAddress = addr
+		out = append(out, ls)
 	}
-	return addr, false, nil
+	return out, anyPending, nil
 }
 
-
-// computeBackendAddress picks the right form depending on whether we're
-// running under `clrk dev` (workers on docker network — must use NodePort
-// on the dev host) or in-cluster (use the Service's cluster DNS name).
-func (r *EgressGatewayReconciler) computeBackendAddress(svc *corev1.Service) string {
-	port := r.findEgressPort(svc)
-	if port == nil {
+// computeBackendAddressForPort picks the right address form depending
+// on whether we're running under `clrk dev` (workers on docker network
+// — NodePort on the dev host) or in-cluster (the Service's cluster DNS
+// name). Returns "" when the requested port is not yet on the Service
+// or the NodePort hasn't been assigned.
+func (r *EgressGatewayReconciler) computeBackendAddressForPort(svc *corev1.Service, port int32) string {
+	sp := findServicePort(svc, port)
+	if sp == nil {
 		return ""
 	}
 	if r.DevBackendHost != "" {
-		if port.NodePort == 0 {
+		if sp.NodePort == 0 {
 			return ""
 		}
-		return fmt.Sprintf("%s:%d", r.DevBackendHost, port.NodePort)
+		return fmt.Sprintf("%s:%d", r.DevBackendHost, sp.NodePort)
 	}
-	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, port.Port)
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, sp.Port)
 }
 
-func (r *EgressGatewayReconciler) findEgressPort(svc *corev1.Service) *corev1.ServicePort {
+func findServicePort(svc *corev1.Service, port int32) *corev1.ServicePort {
 	for i := range svc.Spec.Ports {
-		if svc.Spec.Ports[i].Port == EgressListenerPort {
+		if svc.Spec.Ports[i].Port == port {
 			return &svc.Spec.Ports[i]
 		}
 	}
 	return nil
+}
+
+func equalListenerStatuses(a, b []clrkv1alpha1.EgressListenerStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Port != b[i].Port ||
+			a[i].BackendAddress != b[i].BackendAddress ||
+			a[i].AttachedRoutes != b[i].AttachedRoutes {
+			return false
+		}
+	}
+	return true
 }

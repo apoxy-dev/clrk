@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	pb "github.com/envoyproxy/gateway/proto/extension"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -36,7 +37,6 @@ import (
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	snidfpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
-	pb "github.com/envoyproxy/gateway/proto/extension"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -66,26 +66,46 @@ const (
 	sniDFPFilterName         = "envoy.filters.network.sni_dynamic_forward_proxy"
 	tcpProxyFilterName       = "envoy.filters.network.tcp_proxy"
 
-	// tcpFallbackChainName identifies the synthesized TCP-fallback
-	// filter chain (non-HTTP TLS protocols) on each egress listener.
-	// Doubles as an idempotency marker so repeat
-	// PostHTTPListenerModify calls don't duplicate the chain.
-	tcpFallbackChainName = "clrk-egress-tcp-fallback"
+	// clrkChainName identifies the single rewritten filter chain we
+	// land on each clrk-managed listener, regardless of shape. Acts
+	// as an idempotency marker so repeat PostHTTPListenerModify calls
+	// recognize work they've already done.
+	clrkChainName = "clrk-egress"
 
 	// DFPClusterName is the synthetic dynamic_forward_proxy cluster name
 	// PostHTTPListenerModify routes to and PostTranslateModify creates.
+	// Used by HCM (HTTP/HTTPS shapes) and the TLS-passthrough chain (where
+	// sni_dynamic_forward_proxy stamps the upstream host from SNI).
 	DFPClusterName = "clrk-egress-dfp"
+
+	// OriginalDstClusterName is the synthetic ORIGINAL_DST cluster
+	// `tcp_proxy` on plain-TCP shapes uses to dial the PROXY v2
+	// destination address (the IP the agent's resolver answered with).
+	// Plain TCP has no SNI for DFP to consume; original_dst pulls the
+	// upstream from the connection's local-address tuple, which the
+	// `proxy_protocol` listener filter populates from the PROXY v2 frame.
+	OriginalDstClusterName = "clrk-egress-original-dst"
 
 	// dnsCacheName ties the dynamic_forward_proxy HTTP filter and cluster
 	// to the same DNS cache instance.
 	dnsCacheName = "clrk-egress-dns-cache"
 )
 
-// httpALPNs are the application protocol names the existing HTTP
-// chain narrows to once the TCP-fallback chain lands. Connections
-// that advertise either ALPN claim the HTTP chain; everything else
-// falls through to the default (no-FCM) TCP-fallback chain.
-var httpALPNs = []string{"h2", "http/1.1"}
+// EgressListenerShape mirrors
+// internal/controller.EgressListenerShape — duplicated to keep the
+// extension package free of a controller-package dependency. The
+// reconciler stamps the shape into the Gateway listener name as a
+// "<egListenerName>--<shape>" suffix; the extension reads it back to
+// decide how to reshape the listener.
+type EgressListenerShape string
+
+const (
+	ShapeHTTP           EgressListenerShape = "http"
+	ShapeHTTPS          EgressListenerShape = "https"
+	ShapeTLSTerminate   EgressListenerShape = "tls-terminate"
+	ShapeTLSPassthrough EgressListenerShape = "tls-passthrough"
+	ShapeTCP            EgressListenerShape = "tcp"
+)
 
 // agentTLVRules maps each clrk PROXY v2 TLV type into a dynamic-metadata
 // entry the proxy_protocol listener filter publishes. ext_proc reads them
@@ -150,6 +170,11 @@ type Server struct {
 	// identifies the calling EG to the controller-manager.
 	dfpHTTPFilter *hcmv3.HttpFilter
 	dfpCluster    *clusterv3.Cluster
+
+	// origDstCluster is the ORIGINAL_DST cluster the plain-TCP shape's
+	// tcp_proxy targets — DFP needs an SNI which plain TCP doesn't
+	// have, so we route by PROXY v2 destination instead.
+	origDstCluster *clusterv3.Cluster
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
@@ -164,25 +189,40 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	origDst, err := buildOriginalDstCluster()
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
 		dfpHTTPFilter:         dfp,
 		dfpCluster:            cluster,
+		origDstCluster:        origDst,
 	}, nil
 }
 
-// PostHTTPListenerModify rewrites every clrk-owned egress listener so that:
+// PostHTTPListenerModify rewrites every clrk-owned egress listener
+// according to the EgressListener shape encoded in its section-name
+// suffix. The reconciler always uses HTTPSProtocolType so EG generates
+// HCM scaffolding, but the actual on-wire protocol may be raw TCP /
+// TLS-passthrough — those shapes strip the HCM and substitute network
+// filters here.
 //
-//   - PROXY v2 framing is decoded off the wire and TLV agent identity is
-//     surfaced as dynamic metadata under the clrk.apoxy.dev namespace.
-//   - The TLS ClientHello is parsed so the handshaker can mint an SNI-keyed
-//     leaf cert against the per-EG CA.
-//   - Each filter chain's DownstreamTlsContext uses our gRPC certificate
-//     provider handshaker, so leaves come from controller-manager.
-//   - Each HCM gains the dynamic_forward_proxy + ext_proc HTTP filters and
-//     a single virtual_host * route to the synthetic DFP cluster created
-//     by PostTranslateModify.
+// Shapes:
+//
+//   - tls-terminate, https, http: keep the MITM HCM rewrite (cert
+//     handshaker swap + dynamic_forward_proxy + ext_proc HTTP filters
+//   - catch-all route to the DFP cluster). Plain "http" additionally
+//     strips the per-chain TLS TransportSocket.
+//   - tls-passthrough: replace every chain with a single SNI-only TCP
+//     chain (network_ext_proc + sni_dynamic_forward_proxy + tcp_proxy).
+//     TransportSocket nil; tls_inspector listener filter retained for
+//     SNI extraction.
+//   - tcp: replace every chain with a plain-TCP chain (network_ext_proc
+//   - tcp_proxy). TransportSocket nil; no tls_inspector. The
+//     proxy_protocol listener filter is retained so identity TLVs
+//     surface as filter metadata for the L4 ext_proc.
 func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPListenerModifyRequest) (*pb.PostHTTPListenerModifyResponse, error) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	listener := req.GetListener()
@@ -195,65 +235,126 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		return &pb.PostHTTPListenerModifyResponse{Listener: listener}, nil
 	}
 
+	shape, ok := shapeFromListener(listener)
+	if !ok {
+		// Forward-compat: an unrecognized suffix passes through
+		// unmodified. Logged at V(1) — operators rolling out a
+		// new shape ahead of an extension upgrade will see this.
+		logger.V(1).Info("Listener has no recognized clrk shape suffix; passing through",
+			"listener", listener.GetName())
+		return &pb.PostHTTPListenerModifyResponse{Listener: listener}, nil
+	}
+
 	logger.Info("Rewriting egress listener",
-		"listener", listener.GetName(), "eg.namespace", egKey.namespace, "eg.name", egKey.name)
+		"listener", listener.GetName(),
+		"eg.namespace", egKey.namespace,
+		"eg.name", egKey.name,
+		"shape", string(shape))
 
-	if err := ensureListenerFilters(listener); err != nil {
-		logger.Error(err, "Adding listener filters failed", "listener", listener.GetName())
-	}
-
-	allChains := listener.GetFilterChains()
-	if defaultFC := listener.GetDefaultFilterChain(); defaultFC != nil {
-		allChains = append(allChains, defaultFC)
-	}
-
-	for _, fc := range allChains {
-		if err := s.injectHandshaker(fc, egKey); err != nil {
-			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
-		}
-		if fc.GetName() == tcpFallbackChainName {
-			// The TCP-fallback chain doesn't carry an HCM; rewriteHCM
-			// would no-op on it but skipping is cheaper and explicit.
-			continue
-		}
-		if err := s.rewriteHCM(fc, egKey); err != nil {
-			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
-		}
-	}
-
-	// Narrow each existing chain to advertise HTTP ALPNs only and append
-	// a single default TCP-fallback chain. tls_inspector reads ALPN from
-	// the ClientHello before chain matching, so HTTP-ALPN connections
-	// claim the HTTP chain and everything else (no ALPN, postgresql,
-	// mongodb, grpc-exp, etc.) falls through. Idempotent: repeat
-	// PostHTTPListenerModify calls leave the listener unchanged.
-	if !hasTCPFallbackChain(listener) {
-		for _, fc := range listener.GetFilterChains() {
-			narrowChainToHTTPALPNs(fc)
-		}
-		fallback, err := s.buildTCPFallbackChain(listener.GetFilterChains(), egKey)
-		if err != nil {
-			logger.Error(err, "Build TCP-fallback chain failed", "listener", listener.GetName())
-		} else if fallback != nil {
-			listener.FilterChains = append(listener.FilterChains, fallback)
-		}
+	switch shape {
+	case ShapeTLSTerminate, ShapeHTTPS, ShapeHTTP:
+		s.applyHTTPShape(ctx, listener, egKey, shape)
+	case ShapeTLSPassthrough:
+		s.applyTLSPassthroughShape(ctx, listener, egKey)
+	case ShapeTCP:
+		s.applyTCPShape(ctx, listener, egKey)
 	}
 
 	return &pb.PostHTTPListenerModifyResponse{Listener: listener}, nil
 }
 
-// PostTranslateModify appends a synthetic dynamic_forward_proxy cluster
-// (DFPClusterName) so the HCM route action injected by
-// PostHTTPListenerModify has a concrete cluster to route to. The HTTP
-// filter and the cluster share a single DNS cache configuration so SNI
-// → upstream resolution is consistent.
+// applyHTTPShape keeps the existing MITM rewrite path: proxy_protocol
+// + tls_inspector listener filters, gRPC-cert-provider handshaker
+// injection on each chain's DownstreamTlsContext, and HCM rewriting
+// to add ext_proc + DFP filters with a catch-all route. Used by
+// tls-terminate / https / http shapes. For plain http we strip the
+// per-chain TLS TransportSocket since the listener is non-TLS.
+func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape EgressListenerShape) {
+	logger := ctrllog.FromContext(ctx).WithName("egextension")
+	if err := ensureProxyProtocolFilter(listener); err != nil {
+		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
+	}
+	if err := ensureTLSInspectorFilter(listener); err != nil {
+		logger.Error(err, "Adding tls_inspector listener filter failed", "listener", listener.GetName())
+	}
+
+	allChains := append([]*listenerv3.FilterChain{}, listener.GetFilterChains()...)
+	if defaultFC := listener.GetDefaultFilterChain(); defaultFC != nil {
+		allChains = append(allChains, defaultFC)
+	}
+
+	for _, fc := range allChains {
+		if shape == ShapeHTTP {
+			// Plain HTTP: there's no TLS handshake to terminate.
+			fc.TransportSocket = nil
+		} else if err := s.injectHandshaker(fc, egKey); err != nil {
+			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
+		}
+		if err := s.rewriteHCM(fc, egKey); err != nil {
+			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
+		}
+	}
+}
+
+// applyTLSPassthroughShape replaces every filter chain with a single
+// SNI-only TCP chain. tls_inspector reads SNI off the ClientHello and
+// sni_dynamic_forward_proxy stamps it as the upstream host. No TLS
+// termination — the chain forwards encrypted bytes to the upstream
+// the agent originally addressed.
+func (s *Server) applyTLSPassthroughShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey) {
+	logger := ctrllog.FromContext(ctx).WithName("egextension")
+	if err := ensureProxyProtocolFilter(listener); err != nil {
+		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
+	}
+	if err := ensureTLSInspectorFilter(listener); err != nil {
+		logger.Error(err, "Adding tls_inspector listener filter failed", "listener", listener.GetName())
+	}
+
+	chain, err := s.buildTLSPassthroughChain(egKey)
+	if err != nil {
+		logger.Error(err, "Build TLS-passthrough chain failed", "listener", listener.GetName())
+		return
+	}
+	listener.FilterChains = []*listenerv3.FilterChain{chain}
+	listener.DefaultFilterChain = nil
+}
+
+// applyTCPShape replaces every filter chain with a plain-TCP chain.
+// proxy_protocol stays so identity TLVs surface as filter metadata
+// for the L4 ext_proc; tls_inspector is dropped since there's no TLS
+// handshake on this listener.
+func (s *Server) applyTCPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey) {
+	logger := ctrllog.FromContext(ctx).WithName("egextension")
+	if err := ensureProxyProtocolFilter(listener); err != nil {
+		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
+	}
+	removeTLSInspectorFilter(listener)
+
+	chain, err := s.buildPlainTCPChain(egKey)
+	if err != nil {
+		logger.Error(err, "Build plain-TCP chain failed", "listener", listener.GetName())
+		return
+	}
+	listener.FilterChains = []*listenerv3.FilterChain{chain}
+	listener.DefaultFilterChain = nil
+}
+
+// PostTranslateModify appends the synthetic DFP cluster (HCM /
+// SNI-passthrough chains) and the ORIGINAL_DST cluster (plain-TCP
+// chains) so the filters injected by PostHTTPListenerModify have
+// concrete clusters to route to. The HTTP filter and the DFP cluster
+// share a DNS cache config so SNI → upstream resolution is
+// consistent.
 func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
 	in := req.GetClusters()
-	out := append(make([]*clusterv3.Cluster, 0, len(in)+1), s.dfpCluster)
+	out := make([]*clusterv3.Cluster, 0, len(in)+2)
+	out = append(out, s.dfpCluster, s.origDstCluster)
 	for _, c := range in {
-		if c.GetName() != DFPClusterName {
-			out = append(out, c)
+		switch c.GetName() {
+		case DFPClusterName, OriginalDstClusterName:
+			continue
 		}
+		out = append(out, c)
 	}
 	return &pb.PostTranslateModifyResponse{
 		Clusters: out,
@@ -450,111 +551,98 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
 	return nil
 }
 
-// ensureListenerFilters prepends the proxy_protocol and tls_inspector
-// listener filters in that order. proxy_protocol must run first since the
-// PROXY v2 frame precedes the TLS ClientHello on the wire. Idempotent —
-// skips filters already present (matched by name).
-func ensureListenerFilters(l *listenerv3.Listener) error {
-	have := make(map[string]bool, len(l.GetListenerFilters()))
+// ensureProxyProtocolFilter prepends the proxy_protocol listener
+// filter if absent. PV2 framing must be decoded before any other
+// listener filter runs since it precedes the TLS ClientHello on the
+// wire. Idempotent.
+func ensureProxyProtocolFilter(l *listenerv3.Listener) error {
 	for _, lf := range l.GetListenerFilters() {
-		have[lf.GetName()] = true
-	}
-
-	var prepend []*listenerv3.ListenerFilter
-
-	if !have[proxyProtocolListenerFilterName] {
-		ppCfg := &proxyprotov3.ProxyProtocol{Rules: agentTLVRules}
-		ppAny, err := anypb.New(ppCfg)
-		if err != nil {
-			return fmt.Errorf("marshal proxy_protocol: %w", err)
+		if lf.GetName() == proxyProtocolListenerFilterName {
+			return nil
 		}
-		prepend = append(prepend, &listenerv3.ListenerFilter{
-			Name: proxyProtocolListenerFilterName,
-			ConfigType: &listenerv3.ListenerFilter_TypedConfig{
-				TypedConfig: ppAny,
-			},
-		})
 	}
-	if !have[tlsInspectorListenerFilterName] {
-		insp, err := anypb.New(&tlsinspectorv3.TlsInspector{})
-		if err != nil {
-			return fmt.Errorf("marshal tls_inspector: %w", err)
-		}
-		prepend = append(prepend, &listenerv3.ListenerFilter{
-			Name: tlsInspectorListenerFilterName,
-			ConfigType: &listenerv3.ListenerFilter_TypedConfig{
-				TypedConfig: insp,
-			},
-		})
+	ppCfg := &proxyprotov3.ProxyProtocol{Rules: agentTLVRules}
+	ppAny, err := anypb.New(ppCfg)
+	if err != nil {
+		return fmt.Errorf("marshal proxy_protocol: %w", err)
 	}
-
-	if len(prepend) > 0 {
-		l.ListenerFilters = append(prepend, l.GetListenerFilters()...)
-	}
+	l.ListenerFilters = append([]*listenerv3.ListenerFilter{{
+		Name: proxyProtocolListenerFilterName,
+		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+			TypedConfig: ppAny,
+		},
+	}}, l.GetListenerFilters()...)
 	return nil
 }
 
-// hasTCPFallbackChain reports whether listener already carries the
-// synthesized TCP-fallback chain. Match by chain name so the marker
-// survives controller restarts that re-translate the same Gateway.
-func hasTCPFallbackChain(l *listenerv3.Listener) bool {
-	for _, fc := range l.GetFilterChains() {
-		if fc.GetName() == tcpFallbackChainName {
-			return true
+// ensureTLSInspectorFilter appends the tls_inspector listener filter
+// if absent. Required for SNI-based filter-chain selection or SNI
+// extraction by sni_dynamic_forward_proxy. Idempotent.
+func ensureTLSInspectorFilter(l *listenerv3.Listener) error {
+	for _, lf := range l.GetListenerFilters() {
+		if lf.GetName() == tlsInspectorListenerFilterName {
+			return nil
 		}
 	}
-	return false
+	insp, err := anypb.New(&tlsinspectorv3.TlsInspector{})
+	if err != nil {
+		return fmt.Errorf("marshal tls_inspector: %w", err)
+	}
+	l.ListenerFilters = append(l.GetListenerFilters(), &listenerv3.ListenerFilter{
+		Name: tlsInspectorListenerFilterName,
+		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+			TypedConfig: insp,
+		},
+	})
+	return nil
 }
 
-// narrowChainToHTTPALPNs adds httpALPNs to fc.FilterChainMatch.
-// Idempotent — leaves the slice alone when both ALPNs are already
-// present. Other ApplicationProtocols entries are preserved (in case
-// EG ever populates them itself).
-func narrowChainToHTTPALPNs(fc *listenerv3.FilterChain) {
-	if fc.FilterChainMatch == nil {
-		fc.FilterChainMatch = &listenerv3.FilterChainMatch{}
-	}
-	have := make(map[string]bool, len(fc.FilterChainMatch.ApplicationProtocols))
-	for _, p := range fc.FilterChainMatch.ApplicationProtocols {
-		have[p] = true
-	}
-	for _, p := range httpALPNs {
-		if !have[p] {
-			fc.FilterChainMatch.ApplicationProtocols = append(fc.FilterChainMatch.ApplicationProtocols, p)
-			have[p] = true
+// removeTLSInspectorFilter strips tls_inspector if present. Plain-TCP
+// listeners must not parse incoming bytes as a TLS ClientHello — the
+// inspector buffers up to a configurable amount waiting for one and
+// would impose extra latency / memory on a connection that never
+// sends TLS bytes.
+func removeTLSInspectorFilter(l *listenerv3.Listener) {
+	out := l.GetListenerFilters()[:0]
+	for _, lf := range l.GetListenerFilters() {
+		if lf.GetName() != tlsInspectorListenerFilterName {
+			out = append(out, lf)
 		}
+	}
+	l.ListenerFilters = out
+}
+
+// shapeFromListener parses the EgressListener shape suffix off the
+// listener's section name. EG names listeners as
+// "<namespace>/<gatewayName>/<sectionName>", and the controller stamps
+// "<egListenerName>--<shape>" into the section name. Returns ("", false)
+// if the suffix is missing or unrecognized.
+func shapeFromListener(l *listenerv3.Listener) (EgressListenerShape, bool) {
+	parts := strings.Split(l.GetName(), "/")
+	if len(parts) < 3 {
+		return "", false
+	}
+	section := parts[len(parts)-1]
+	idx := strings.LastIndex(section, "--")
+	if idx < 0 {
+		return "", false
+	}
+	suffix := EgressListenerShape(section[idx+2:])
+	switch suffix {
+	case ShapeHTTP, ShapeHTTPS, ShapeTLSTerminate, ShapeTLSPassthrough, ShapeTCP:
+		return suffix, true
+	default:
+		return "", false
 	}
 }
 
-// buildTCPFallbackChain assembles the catch-all chain that handles
-// non-HTTP TLS connections (Postgres direct SSL, MongoDB direct TLS,
-// gRPC-TLS, etc.). The chain shares downstream TLS termination with
-// the HTTP chain — same per-EG CA, same gRPC handshaker — but
-// substitutes a network-level filter list:
-//
-//  1. network_ext_proc: streams agent-direction bytes to the L4
-//     ext_proc server with PV2 agent identity attached as
-//     dynamic_metadata. Observe-only at MVP (handler returns
-//     UNMODIFIED + CONTINUE on every chunk).
-//  2. sni_dynamic_forward_proxy: stamps the ClientHello SNI as the
-//     upstream host the DFP cluster resolves.
-//  3. tcp_proxy: forwards to the shared DFPClusterName cluster.
-//
-// Returns nil when the listener has no chain to clone the
-// transport_socket from (would mean a non-TLS listener — clrk
-// listeners are always TLS).
-func (s *Server) buildTCPFallbackChain(httpChains []*listenerv3.FilterChain, key egKey) (*listenerv3.FilterChain, error) {
-	var template *listenerv3.FilterChain
-	for _, fc := range httpChains {
-		if fc.GetTransportSocket() != nil {
-			template = fc
-			break
-		}
-	}
-	if template == nil {
-		return nil, nil
-	}
-
+// buildTLSPassthroughChain assembles the SNI-only TCP chain.
+// network_ext_proc captures the connection (including PV2 identity
+// TLVs surfaced as filter metadata); sni_dynamic_forward_proxy stamps
+// the ClientHello SNI as the upstream host the shared DFP cluster
+// resolves; tcp_proxy forwards encrypted bytes through. No
+// TransportSocket — the listener doesn't terminate TLS.
+func (s *Server) buildTLSPassthroughChain(key egKey) (*listenerv3.FilterChain, error) {
 	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
 		Namespace: key.namespace,
 		Name:      key.name,
@@ -566,15 +654,38 @@ func (s *Server) buildTCPFallbackChain(httpChains []*listenerv3.FilterChain, key
 	if err != nil {
 		return nil, fmt.Errorf("build sni_dynamic_forward_proxy filter: %w", err)
 	}
-	tcpProxy, err := buildTCPProxyFilter()
+	tcpProxy, err := buildTCPProxyFilter(DFPClusterName)
 	if err != nil {
 		return nil, fmt.Errorf("build tcp_proxy filter: %w", err)
 	}
-
 	return &listenerv3.FilterChain{
-		Name:            tcpFallbackChainName,
-		TransportSocket: template.GetTransportSocket(),
-		Filters:         []*listenerv3.Filter{netExtProc, sniDFP, tcpProxy},
+		Name:    clrkChainName,
+		Filters: []*listenerv3.Filter{netExtProc, sniDFP, tcpProxy},
+	}, nil
+}
+
+// buildPlainTCPChain assembles the raw-TCP chain. network_ext_proc
+// captures bytes + PV2 identity; tcp_proxy forwards via the
+// ORIGINAL_DST cluster, which dials the connection's local-address
+// tuple — populated by the proxy_protocol listener filter from the
+// PROXY v2 destination the worker put on the wire. No SNI parsing,
+// no TLS termination — the connection is whatever the agent dialed
+// (Postgres wire, SMTP, raw nc, etc.).
+func (s *Server) buildPlainTCPChain(key egKey) (*listenerv3.FilterChain, error) {
+	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
+		Namespace: key.namespace,
+		Name:      key.name,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("build network_ext_proc filter: %w", err)
+	}
+	tcpProxy, err := buildTCPProxyFilter(OriginalDstClusterName)
+	if err != nil {
+		return nil, fmt.Errorf("build tcp_proxy filter: %w", err)
+	}
+	return &listenerv3.FilterChain{
+		Name:    clrkChainName,
+		Filters: []*listenerv3.Filter{netExtProc, tcpProxy},
 	}, nil
 }
 
@@ -633,7 +744,7 @@ func buildNetworkExtProcFilter(targetURI, authority string) (*listenerv3.Filter,
 // share resolution.
 func buildSNIDFPFilter() (*listenerv3.Filter, error) {
 	any, err := anypb.New(&snidfpv3.FilterConfig{
-		PortSpecifier: &snidfpv3.FilterConfig_PortValue{PortValue: 443},
+		PortSpecifier:  &snidfpv3.FilterConfig_PortValue{PortValue: 443},
 		DnsCacheConfig: dnsCacheConfig,
 	})
 	if err != nil {
@@ -646,12 +757,15 @@ func buildSNIDFPFilter() (*listenerv3.Filter, error) {
 }
 
 // buildTCPProxyFilter builds the terminal tcp_proxy filter pointing
-// at the shared DFPClusterName cluster.
-func buildTCPProxyFilter() (*listenerv3.Filter, error) {
+// at the named cluster — DFPClusterName for the SNI-passthrough chain
+// (sni_dynamic_forward_proxy stamps the upstream host) and
+// OriginalDstClusterName for the plain-TCP chain (no SNI; route by
+// PROXY v2 destination).
+func buildTCPProxyFilter(cluster string) (*listenerv3.Filter, error) {
 	any, err := anypb.New(&tcpproxyv3.TcpProxy{
 		StatPrefix: "clrk_egress_tcp",
 		ClusterSpecifier: &tcpproxyv3.TcpProxy_Cluster{
-			Cluster: DFPClusterName,
+			Cluster: cluster,
 		},
 	})
 	if err != nil {
@@ -796,6 +910,24 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 		TransportSocket: &corev3.TransportSocket{
 			Name:       tlsTransportSocketName,
 			ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
+		},
+	}, nil
+}
+
+// buildOriginalDstCluster constructs the ORIGINAL_DST cluster the
+// plain-TCP shape's tcp_proxy targets. ORIGINAL_DST tells Envoy to
+// dial the connection's local-address tuple as the upstream — and
+// the proxy_protocol listener filter has populated that tuple from
+// the PROXY v2 destination the worker put on the wire (the IP the
+// agent's resolver answered with). No upstream TLS / system trust:
+// the chain forwards bytes straight through unchanged.
+func buildOriginalDstCluster() (*clusterv3.Cluster, error) {
+	return &clusterv3.Cluster{
+		Name:           OriginalDstClusterName,
+		ConnectTimeout: durationpb.New(5 * time.Second),
+		LbPolicy:       clusterv3.Cluster_CLUSTER_PROVIDED,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_ORIGINAL_DST,
 		},
 	}, nil
 }

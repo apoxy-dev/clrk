@@ -174,12 +174,28 @@ type OTLPLogsSinkSpec struct {
 
 // EgressGatewayConditionReady is set on EgressGateway.Status.Conditions
 // to mirror the EG-managed Gateway's Programmed condition. Workers should
-// only dial Status.EgressBackendAddress once Ready=True.
+// only dial Status.Listeners[*].BackendAddress once Ready=True.
 const EgressGatewayConditionReady = "Ready"
 
 // EgressListenerStatus describes the status of a single listener.
 type EgressListenerStatus struct {
-	Name           string             `json:"name"`
+	Name string `json:"name"`
+
+	// Port is the TCP port the EG-managed Envoy listens on for this
+	// EgressListener. Workers dial Address:Port for connections that
+	// match this listener's protocol/port selectors. Distinct
+	// listener types (TLS-terminate, plain TCP, etc.) each get their
+	// own port — protocols can't share a listener.
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// BackendAddress is the host:port workers dial to reach this
+	// listener's filter chain. In-cluster it's the EG Service's
+	// cluster DNS name; in `clrk dev` it's a NodePort on the k3s
+	// container hostname.
+	// +optional
+	BackendAddress string `json:"backendAddress,omitempty"`
+
 	AttachedRoutes int32              `json:"attachedRoutes"`
 	Conditions     []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -190,12 +206,11 @@ type EgressGatewayStatus struct {
 	Listeners     []EgressListenerStatus `json:"listeners,omitempty"`
 	ListenerCount int32                  `json:"listenerCount,omitempty"`
 
-	// EgressBackendAddress is the host:port workers dial to reach this
-	// EgressGateway's Envoy data-plane. Populated by the EgressGateway
-	// controller after the Envoy-Gateway-managed Service is provisioned.
-	// In-cluster this is the EG Service's cluster DNS name; in `clrk dev`
-	// it's a NodePort on the k3s container hostname (workers and k3s share
-	// a docker network but ClusterIPs aren't routable across them).
+	// EgressBackendAddress mirrors Status.Listeners[0].BackendAddress
+	// for backward compatibility with worker code that pre-dates the
+	// per-listener split. New callers should iterate Listeners
+	// instead — this field will be removed once no in-flight worker
+	// reads it.
 	// +optional
 	EgressBackendAddress string `json:"egressBackendAddress,omitempty"`
 }

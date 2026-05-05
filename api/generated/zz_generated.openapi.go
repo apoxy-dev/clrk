@@ -2028,7 +2028,7 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewayStatus(ref common.ReferenceCallb
 					},
 					"egressBackendAddress": {
 						SchemaProps: spec.SchemaProps{
-							Description: "EgressBackendAddress is the host:port workers dial to reach this EgressGateway's Envoy data-plane. Populated by the EgressGateway controller after the Envoy-Gateway-managed Service is provisioned. In-cluster this is the EG Service's cluster DNS name; in `clrk dev` it's a NodePort on the k3s container hostname (workers and k3s share a docker network but ClusterIPs aren't routable across them).",
+							Description: "EgressBackendAddress mirrors Status.Listeners[0].BackendAddress for backward compatibility with worker code that pre-dates the per-listener split. New callers should iterate Listeners instead — this field will be removed once no in-flight worker reads it.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -2328,6 +2328,20 @@ func schema_clrk_api_clrk_v1alpha1_EgressListenerStatus(ref common.ReferenceCall
 							Default: "",
 							Type:    []string{"string"},
 							Format:  "",
+						},
+					},
+					"port": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Port is the TCP port the EG-managed Envoy listens on for this EgressListener. Workers dial Address:Port for connections that match this listener's protocol/port selectors. Distinct listener types (TLS-terminate, plain TCP, etc.) each get their own port — protocols can't share a listener.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"backendAddress": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BackendAddress is the host:port workers dial to reach this listener's filter chain. In-cluster it's the EG Service's cluster DNS name; in `clrk dev` it's a NodePort on the k3s container hostname.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"attachedRoutes": {
@@ -2674,7 +2688,7 @@ func schema_clrk_api_clrk_v1alpha1_L4RouteMatch(ref common.ReferenceCallback) co
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "DestinationHostnames matches by hostname. On TLS-terminated listeners (protocol=TLS or HTTPS with mode=Terminate) the match runs against the SNI value the tls_inspector recorded on the connection. Exact (`api.openai.com`) and wildcard (`*.openai.com`) forms are accepted. On plain TCP listeners hostnames are silently ignored — there is no SNI to match against; APO-573 lifts this limitation by binding the agent's resolved DNS name into a PROXY v2 TLV.",
+							Description: "DestinationHostnames matches by hostname. Exact (`api.openai.com`) and wildcard (`*.openai.com`) forms are accepted (gwapiv1.Hostname semantics — wildcard matches exactly one prefix label).\n\nOn TLS-terminated listeners (protocol=TLS or HTTPS with mode=Terminate) the match runs against the SNI value the tls_inspector recorded on the connection. On plain TCP listeners the match runs against the DNS-bound destination name: the worker snoops UDP/53 responses, caches each `(resolved IP) → name` binding, and emits the hostname for the connection's destination IP via PROXY v2 TLVDstName so Envoy and L4 ext_proc records pick it up.\n\nLimitation: encrypted resolvers (DoT on TCP/853, DoH on TCP/443) bypass the snoop. Connections from agents that use those resolvers fall back to CIDR-only matching — no error, just no name binding. Use the kernel resolver (default) to guarantee hostname rules apply.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

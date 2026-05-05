@@ -299,7 +299,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 		dialer := netstack.Dialer(&egress.IdentityDialer{
 			Base:         m.dialer,
 			Identity:     sb.Identity,
-			Backend:      sb.EgressBackend,
+			Backends:     sb.EgressBackends,
 			DNSResolvers: m.workerResolvers,
 			DNSCache:     stack.DNSCache(),
 		})
@@ -325,17 +325,17 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	return nil
 }
 
-// SetEgressBackend configures the EG egress listener address for a
-// sandbox between Create and Start. Empty disables PROXY v2 framing and
-// direct-dials upstream.
-func (m *SandboxManager) SetEgressBackend(id SandboxID, addr string) error {
+// SetEgressBackends configures the per-listener EG egress backends
+// for a sandbox between Create and Start. Empty / nil disables PROXY
+// v2 framing and direct-dials upstream.
+func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
 		return ErrNotFound
 	}
-	sb.EgressBackend = addr
+	sb.EgressBackends = backends
 	return nil
 }
 
