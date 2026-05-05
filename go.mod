@@ -218,3 +218,12 @@ require (
 )
 
 tool k8s.io/kube-openapi/cmd/openapi-gen
+
+// Pin gvisor to the apoxy fork. The fork's apoxy-main branch drops
+// pkg/tcpip/stack/bridge_test.go, which upstream ships with
+// `package bridge_test` while the rest of the dir is `package stack`
+// — a mismatch Go's package loader rejects, breaking
+// `go install ./cmd/clrk` on linux. Bazel builds aren't affected
+// (test files are filtered by BUILD rules) but CLI installs are.
+// Mirrors the same replace in apoxy-cloud's go.mod.
+replace gvisor.dev/gvisor => github.com/apoxy-dev/gvisor v0.0.0-20260402225801-fe4a1e4de650
