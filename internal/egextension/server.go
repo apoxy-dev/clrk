@@ -73,11 +73,19 @@ const (
 	// recognize work they've already done.
 	clrkChainName = "clrk-egress"
 
-	// DFPClusterName is the synthetic dynamic_forward_proxy cluster name
-	// PostHTTPListenerModify routes to and PostTranslateModify creates.
-	// Used by HCM (HTTP/HTTPS shapes) and the TLS-passthrough chain (where
-	// sni_dynamic_forward_proxy stamps the upstream host from SNI).
+	// DFPClusterName is the synthetic dynamic_forward_proxy cluster the
+	// HCM route_config (HTTP/HTTPS shapes) targets. Speaks TLS upstream
+	// because the MITM path decrypts the sandbox's TLS at the listener
+	// and must re-encrypt to the origin (Cloudflare-fronted public APIs
+	// reject plaintext on :443 with 403).
 	DFPClusterName = "clrk-egress-dfp"
+
+	// DFPPlainClusterName is the plaintext sibling of DFPClusterName the
+	// TLS-passthrough chain's tcp_proxy targets. Same DNS cache + DFP
+	// custom cluster type, but no UpstreamTlsContext — passthrough bytes
+	// are *already* TLS, so re-wrapping them yields TLS-of-TLS the origin
+	// rejects.
+	DFPPlainClusterName = "clrk-egress-dfp-plain"
 
 	// OriginalDstClusterName is the synthetic ORIGINAL_DST cluster
 	// `tcp_proxy` on plain-TCP shapes uses to dial the PROXY v2
@@ -149,12 +157,13 @@ type Server struct {
 	// ExtProcTargetURI is the gRPC target for body-capture.
 	ExtProcTargetURI string
 
-	// dfpHTTPFilter and dfpCluster are pre-built — their proto contents
-	// don't vary across listeners. The ext_proc filter is rebuilt per
-	// listener because it carries a per-EG :authority value that
-	// identifies the calling EG to the controller-manager.
-	dfpHTTPFilter *hcmv3.HttpFilter
-	dfpCluster    *clusterv3.Cluster
+	// dfpHTTPFilter, dfpCluster, dfpPlainCluster are pre-built — their
+	// proto contents don't vary across listeners. The ext_proc filter is
+	// rebuilt per listener because it carries a per-EG :authority value
+	// that identifies the calling EG to the controller-manager.
+	dfpHTTPFilter   *hcmv3.HttpFilter
+	dfpCluster      *clusterv3.Cluster
+	dfpPlainCluster *clusterv3.Cluster
 
 	// origDstCluster is the ORIGINAL_DST cluster the plain-TCP shape's
 	// tcp_proxy targets — DFP needs an SNI which plain TCP doesn't
@@ -174,6 +183,10 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	plainCluster, err := buildDFPPlainCluster()
+	if err != nil {
+		return nil, err
+	}
 	origDst, err := buildOriginalDstCluster()
 	if err != nil {
 		return nil, err
@@ -183,6 +196,7 @@ func New(certProviderURI, extProcURI string) (*Server, error) {
 		ExtProcTargetURI:      extProcURI,
 		dfpHTTPFilter:         dfp,
 		dfpCluster:            cluster,
+		dfpPlainCluster:       plainCluster,
 		origDstCluster:        origDst,
 	}, nil
 }
@@ -324,19 +338,19 @@ func (s *Server) applyTCPShape(ctx context.Context, listener *listenerv3.Listene
 	listener.DefaultFilterChain = nil
 }
 
-// PostTranslateModify appends the synthetic DFP cluster (HCM /
-// SNI-passthrough chains) and the ORIGINAL_DST cluster (plain-TCP
-// chains) so the filters injected by PostHTTPListenerModify have
-// concrete clusters to route to. The HTTP filter and the DFP cluster
-// share a DNS cache config so SNI → upstream resolution is
-// consistent.
+// PostTranslateModify appends the synthetic clusters every clrk-shape
+// chain dispatches to: DFP (TLS-upstream, for HCM HTTP/HTTPS shapes),
+// DFP-plain (no TLS-upstream, for the TLS-passthrough chain — bytes are
+// already TLS), and ORIGINAL_DST (for plain-TCP, dialed by PROXY v2 dst).
+// The HTTP filter and both DFP clusters share a single DNS cache config
+// so name resolution is consistent across shapes.
 func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
 	in := req.GetClusters()
-	out := make([]*clusterv3.Cluster, 0, len(in)+2)
-	out = append(out, s.dfpCluster, s.origDstCluster)
+	out := make([]*clusterv3.Cluster, 0, len(in)+3)
+	out = append(out, s.dfpCluster, s.dfpPlainCluster, s.origDstCluster)
 	for _, c := range in {
 		switch c.GetName() {
-		case DFPClusterName, OriginalDstClusterName:
+		case DFPClusterName, DFPPlainClusterName, OriginalDstClusterName:
 			continue
 		}
 		out = append(out, c)
@@ -627,7 +641,10 @@ func (s *Server) buildTLSPassthroughChain(key egKey) (*listenerv3.FilterChain, e
 	if err != nil {
 		return nil, fmt.Errorf("build sni_dynamic_forward_proxy filter: %w", err)
 	}
-	tcpProxy, err := buildTCPProxyFilter(DFPClusterName)
+	// DFPPlainClusterName (not DFPClusterName) — passthrough bytes are
+	// already TLS and the upstream expects raw TLS, so the cluster must
+	// not re-wrap with UpstreamTlsContext.
+	tcpProxy, err := buildTCPProxyFilter(DFPPlainClusterName)
 	if err != nil {
 		return nil, fmt.Errorf("build tcp_proxy filter: %w", err)
 	}
@@ -827,24 +844,15 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 	}, nil
 }
 
-// buildDFPCluster constructs the synthetic DFP cluster the HCM route_config
-// targets. Uses the same DNS cache as the HTTP filter so resolution is
-// shared. Always speaks TLS upstream — the EG terminates the sandbox's
-// TLS at our MITM listener, so without re-encrypting we'd send plaintext
-// to public origins (e.g. Cloudflare-fronted api.openai.com), which they
-// reject with 403. SNI is taken from the per-request Host header, and
-// upstream certs are verified against the envoy image's system trust
-// bundle.
+// buildDFPCluster constructs the synthetic DFP cluster the HCM
+// route_config targets. Uses the same DNS cache as the HTTP filter so
+// resolution is shared. Always speaks TLS upstream — the EG terminates
+// the sandbox's TLS at our MITM listener, so without re-encrypting we'd
+// send plaintext to public origins (e.g. Cloudflare-fronted
+// api.openai.com), which they reject with 403. SNI is taken from the
+// per-request Host header, and upstream certs are verified against the
+// envoy image's system trust bundle.
 func buildDFPCluster() (*clusterv3.Cluster, error) {
-	dfpAny, err := anypb.New(&dfpclusterv3.ClusterConfig{
-		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
-			DnsCacheConfig: dnsCacheConfig,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal dfp cluster: %w", err)
-	}
-
 	tlsCtx := &tlsv3.UpstreamTlsContext{
 		// Derive SNI from the upstream host. Envoy strips the port from
 		// :authority before using it as the SNI value, so the ext_proc
@@ -869,9 +877,36 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal upstream TLS context: %w", err)
 	}
+	return buildDFPClusterShape(DFPClusterName, &corev3.TransportSocket{
+		Name:       tlsTransportSocketName,
+		ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
+	})
+}
 
+// buildDFPPlainCluster is the plaintext sibling of buildDFPCluster used
+// by the TLS-passthrough chain. Same DFP custom-cluster type and shared
+// DNS cache, but no UpstreamTlsContext: the agent's bytes are already
+// TLS and the upstream completes the real handshake — re-wrapping here
+// would yield TLS-of-TLS the origin rejects.
+func buildDFPPlainCluster() (*clusterv3.Cluster, error) {
+	return buildDFPClusterShape(DFPPlainClusterName, nil)
+}
+
+// buildDFPClusterShape is the shared spine of the two DFP clusters. The
+// only axis that varies is the upstream TransportSocket — TLS-wrapped
+// for the MITM HCM path (re-encrypt to origin), nil for TLS-passthrough
+// (origin terminates the agent's own TLS).
+func buildDFPClusterShape(name string, ts *corev3.TransportSocket) (*clusterv3.Cluster, error) {
+	dfpAny, err := anypb.New(&dfpclusterv3.ClusterConfig{
+		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
+			DnsCacheConfig: dnsCacheConfig,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal dfp cluster %s: %w", name, err)
+	}
 	return &clusterv3.Cluster{
-		Name:           DFPClusterName,
+		Name:           name,
 		ConnectTimeout: durationpb.New(5 * time.Second),
 		LbPolicy:       clusterv3.Cluster_CLUSTER_PROVIDED,
 		ClusterDiscoveryType: &clusterv3.Cluster_ClusterType{
@@ -880,10 +915,7 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 				TypedConfig: dfpAny,
 			},
 		},
-		TransportSocket: &corev3.TransportSocket{
-			Name:       tlsTransportSocketName,
-			ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
-		},
+		TransportSocket: ts,
 	}, nil
 }
 
