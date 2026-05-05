@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-listener-echo
+  labels:
+    app: multi-listener-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-listener-echo
+  template:
+    metadata:
+      labels:
+        app: multi-listener-echo
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: echo
+          image: docker.io/library/busybox:latest
+          # Stand-in for an internal TCP service (Postgres / Redis /
+          # custom protocol). busybox `nc -l ... -e cat` accepts ONE
+          # connection, exec's cat (echo back), exits — the while loop
+          # restarts it for the next client.
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                nc -l -p 9999 -s 0.0.0.0 -e /bin/cat || sleep 0.1
+              done
+          ports:
+            - name: tcp
+              containerPort: 9999
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-listener-echo
+spec:
+  type: NodePort
+  selector:
+    app: multi-listener-echo
+  ports:
+    - name: tcp
+      port: 9999
+      targetPort: 9999
+      # Pinned NodePort so the EgressGateway's TCP listener can reference
+      # it by exact port (EgressListener.spec.port matches the *original
+      # destination* port the agent dialed; for `clrk dev` that's the
+      # NodePort the agent reaches via the docker network). Pick any
+      # value in the cluster's NodePort range that isn't already taken.
+      nodePort: 30099
+      protocol: TCP

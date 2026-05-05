@@ -1,0 +1,38 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: multi-listener-egress
+spec:
+  defaultPolicy: allow-all
+  # Two listeners on the same EgressGateway, each materialized as its
+  # own Envoy listener on a distinct port (EgressListenerBasePort + i,
+  # i.e. 18080 for the first listener, 18081 for the second). The
+  # egextension reshapes each listener's filter chain per shape; the
+  # worker's IdentityDialer.pickBackend selects the right listener at
+  # dial time using `port` as the most-specific match.
+  listeners:
+    # Listener 1: catch-all HTTPS MITM. No `port` constraint, so it
+    # catches every dial whose port doesn't match a more-specific
+    # listener (here, port=30099 belongs to egress-tcp). The chain
+    # rewrite is HCM with a leaf cert minted on-the-fly from the
+    # per-EG CA; ext_proc captures the decrypted request/response.
+    - name: egress-mitm
+      protocol: TLS
+      tls:
+        mode: Terminate
+    # Listener 2: plain TCP. `port: 30099` matches dials to the
+    # multi-listener-echo NodePort. The chain is
+    # network_ext_proc + tcp_proxy → ORIGINAL_DST cluster, with no
+    # TransportSocket, so raw TCP bytes pass straight through to the
+    # echo upstream while the L4 ext_proc filter records bytes_upstream
+    # and (via the worker's UDP/53 snoop → PROXY v2 TLVDstName)
+    # clrk.dst.name=clrk-k3s on the resulting OTLP record.
+    - name: egress-tcp
+      protocol: TCP
+      port: 30099
+  otlp:
+    # Optional: point at any OTLP/HTTP logs endpoint. When unset (or
+    # unreachable) ext_proc falls back to the controller-manager's
+    # slog handler so captures still land in `clrk dev logs`.
+    captureBody:
+      maxBytes: 65536

@@ -1,0 +1,46 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: multi-listener-egress
+spec:
+  workerPoolRef: default
+  restartPolicy: Always
+  egressRefs:
+    # Single EG ref — both listeners belong to this EG; the worker
+    # populates IdentityDialer.Backends with one entry per
+    # EgressGateway.Status.Listeners[*] and routes per dial by dst port.
+    - gatewayRef: multi-listener-egress
+  template:
+    spec:
+      # curlimages/curl:8.10.1 is busybox-based and ships both `curl`
+      # (for the HTTPS MITM flow) and `nc` (for the plain TCP flow) —
+      # avoids the apk-add-at-startup race that a vanilla alpine image
+      # would have on cold-start.
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Two flows in one loop, each landing on a different
+          # EgressGateway listener:
+          #
+          #   1. curl https://api.openai.com/v1/models → port 443 →
+          #      no `port` match → catch-all → egress-mitm listener
+          #      (TLS-Terminate). ext_proc records a full L7
+          #      request/response with method=GET, status=401, agent
+          #      identity attributes. The bogus token guarantees a 401.
+          #
+          #   2. nc clrk-k3s 30099 → port 30099 → exact match on
+          #      egress-tcp.spec.port → egress-tcp listener (plain TCP).
+          #      Bytes pass through opaquely; the L4 ext_proc filter
+          #      records bytes_upstream and clrk.dst.name=clrk-k3s
+          #      (worker's UDP/53 snoop populated DNSCache before the
+          #      TCP connect).
+          while true; do
+            curl -sS -o /dev/null -w 'mitm  http %{http_code} %{url_effective}\n' \
+              -H 'Authorization: Bearer sk-clrk-dev-bogus' \
+              https://api.openai.com/v1/models
+            echo ping | nc -w 2 clrk-k3s 30099 \
+              && echo 'tcp   ok    clrk-k3s:30099' \
+              || echo 'tcp   fail  clrk-k3s:30099'
+            sleep 5
+          done
