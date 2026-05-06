@@ -1965,6 +1965,14 @@ func (in *TaskAgentStatus) DeepCopyInto(out *TaskAgentStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.LastScheduleTime != nil {
+		in, out := &in.LastScheduleTime, &out.LastScheduleTime
+		*out = (*in).DeepCopy()
+	}
+	if in.NextScheduleTime != nil {
+		in, out := &in.NextScheduleTime, &out.NextScheduleTime
+		*out = (*in).DeepCopy()
+	}
 	return
 }
 

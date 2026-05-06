@@ -175,6 +175,17 @@ func main() {
 			log.Error(err, "Unable to register controller", "controller", "TaskAgentIngress")
 			os.Exit(1)
 		}
+		// Cron firer is gated on --ingress-controller because the HTTP
+		// invoker targets the Gateway URL the ingress reconciler creates.
+		// Without ingress, there's nothing to invoke.
+		if err := (&controller.TaskAgentCronReconciler{
+			Client:  cm.GetClient(),
+			Scheme:  cm.GetScheme(),
+			Invoker: controller.NewHTTPInvoker(cm.GetClient()),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "TaskAgentCron")
+			os.Exit(1)
+		}
 	}
 	if *workerDeployment {
 		if err := (&controller.WorkerPoolDeploymentReconciler{

@@ -1,0 +1,37 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: TaskAgent
+metadata:
+  name: cron-bot
+spec:
+  workerPoolRef: default
+  # Fire every minute. Standard 5-field cron syntax (parsed by
+  # github.com/robfig/cron/ParseStandard) — see
+  # api/clrk/v1alpha1/validation.go for the accepted shapes
+  # (@hourly, @daily, "*/5 * * * *", etc.).
+  schedule: "*/1 * * * *"
+  # Body POSTed to the agent on each cron fire. The agent reads it
+  # from stdin via the trigger HTTP request body. Arbitrary JSON.
+  scheduleInput:
+    greeting: "hello from cron"
+    iteration: 0
+  # Per-execution wall-clock cap. The cron firer also bounds each
+  # POST at min(timeoutSeconds, 5min) so a wedged sandbox doesn't
+  # pin the ticker goroutine across slots.
+  timeoutSeconds: 30
+  template:
+    spec:
+      # Minimal agent: print the trigger body and exit. The
+      # supervised TaskAgent framework respawns per-fire via the
+      # cron path, NOT via RestartPolicy (TaskAgent has no
+      # restart semantic — that's DaemonAgent).
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Read the trigger body from stdin. The HTTP path delivers
+          # spec.scheduleInput as the request body; the agent's
+          # entrypoint sees it on FD 0.
+          echo "cron fired at $(date -u +%FT%TZ)"
+          echo "input:"
+          cat
+          echo

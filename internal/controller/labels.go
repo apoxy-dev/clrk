@@ -36,4 +36,5 @@ const (
 	condConfigured       = "Configured"
 	condAvailable        = "Available"
 	condProgressing      = "Progressing"
+	condScheduled        = "Scheduled"
 )

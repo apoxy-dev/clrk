@@ -18,6 +18,8 @@ import (
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.workerPoolRef`
 // +kubebuilder:printcolumn:name="Latest Ready",type=string,JSONPath=`.status.latestReadyRevisionName`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeExecutions`
+// +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`
+// +kubebuilder:printcolumn:name="Last Run",type=date,JSONPath=`.status.lastScheduleTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type TaskAgent struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -88,6 +90,15 @@ type TaskAgentStatus struct {
 	// LatestReadyRevisionName is the name of the last revision that became ready.
 	// +optional
 	LatestReadyRevisionName string `json:"latestReadyRevisionName,omitempty"`
+	// LastScheduleTime is the last time the cron schedule fired. Unset
+	// when spec.schedule is empty or no fire has occurred yet.
+	// +optional
+	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
+	// NextScheduleTime is the next time the cron schedule will fire on
+	// the current leader. Computed lazily from spec.schedule; expect skew
+	// of up to one slot across leader failover.
+	// +optional
+	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
 	// ObservedGeneration is the generation most recently observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
