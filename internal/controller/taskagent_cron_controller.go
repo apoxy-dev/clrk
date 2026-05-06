@@ -27,38 +27,31 @@ type TaskAgentInvoker interface {
 	Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, body []byte) error
 }
 
-// tickInterval bounds the worst-case skew between a cron entry's nextFire
-// time and the actual fire. Cron expressions are minute-resolution, so a
-// 1-Hz sweep is well below the granularity of anything a user can express.
-const tickInterval = time.Second
+const (
+	// tickInterval is the cron sweep cadence. Cron expressions are
+	// minute-resolution so 1 Hz is well under user-expressible granularity.
+	tickInterval = time.Second
+	// invokeTimeoutCap upper-bounds the per-fire HTTP call so a wedged
+	// backend can't pin a fire goroutine forever. spec.timeoutSeconds caps
+	// from below.
+	invokeTimeoutCap = 5 * time.Minute
+)
 
-// invokeTimeoutCap upper-bounds the per-fire HTTP call so a wedged backend
-// can't pin the ticker goroutine. spec.timeoutSeconds caps from below.
-const invokeTimeoutCap = 5 * time.Minute
-
-// cronEntry is the per-TaskAgent in-memory state owned by
-// TaskAgentCronReconciler. Mutated under the reconciler's mutex.
 type cronEntry struct {
 	specSchedule string
 	schedule     cron.Schedule
 	nextFire     time.Time
 	lastFire     time.Time
-	lastErr      string
 }
 
 // TaskAgentCronReconciler watches TaskAgents with a non-empty spec.schedule
-// and fires them on a cron clock. The actual sandbox-invocation path is
-// pluggable via Invoker — production uses an HTTP POST to the TaskAgent's
-// gateway URL; tests inject a fake.
-//
-// The fire loop runs on a separate goroutine registered as a Runnable so
-// controller-runtime gates start-up on the leader-election lease.
+// and fires them on a cron clock via Invoker. The fire loop runs as a
+// separate Runnable that opts into leader election.
 type TaskAgentCronReconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
 	Invoker TaskAgentInvoker
 	// Now is overridable so tests can advance the clock without sleeping.
-	// Defaults to time.Now in SetupWithManager.
 	Now func() time.Time
 
 	mu      sync.Mutex
@@ -82,36 +75,42 @@ func (r *TaskAgentCronReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if ta.Spec.Schedule == nil || *ta.Spec.Schedule == "" {
 		r.dropEntry(req.NamespacedName)
-		return r.patchScheduledCondition(ctx, &ta, metav1.ConditionFalse, "NotScheduled", "spec.schedule is empty")
+		return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionFalse, reasonNotScheduled, "spec.schedule is empty")
 	}
 
-	sched, err := cron.ParseStandard(*ta.Spec.Schedule)
+	specSched := *ta.Spec.Schedule
+	if r.entryMatches(req.NamespacedName, specSched) {
+		// No spec change — skip the parse and reuse the existing entry's
+		// timing. Status patch still runs to refresh ObservedGeneration.
+		return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionTrue, reasonScheduleRegistered,
+			fmt.Sprintf("Cron entry registered for %q", specSched))
+	}
+
+	sched, err := cron.ParseStandard(specSched)
 	if err != nil {
 		r.dropEntry(req.NamespacedName)
 		// Admission already rejects bad expressions; defense in depth.
-		logger.Error(err, "Schedule failed to parse despite admission validation", "schedule", *ta.Spec.Schedule)
-		return r.patchScheduledCondition(ctx, &ta, metav1.ConditionFalse, "ParseError", err.Error())
+		logger.Error(err, "Schedule failed to parse despite admission validation", "schedule", specSched)
+		return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionFalse, reasonParseError, err.Error())
 	}
 
-	r.upsertEntry(req.NamespacedName, *ta.Spec.Schedule, sched)
-
-	return r.patchScheduledCondition(ctx, &ta, metav1.ConditionTrue, "ScheduleRegistered",
-		fmt.Sprintf("Cron entry registered for %q", *ta.Spec.Schedule))
+	r.upsertEntry(req.NamespacedName, specSched, sched)
+	return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionTrue, reasonScheduleRegistered,
+		fmt.Sprintf("Cron entry registered for %q", specSched))
 }
 
-// upsertEntry installs (or refreshes) a cron entry for key. Preserves
-// lastFire/nextFire when the schedule string is unchanged so a no-op
-// reconcile doesn't reset the cadence.
+func (r *TaskAgentCronReconciler) entryMatches(key types.NamespacedName, specSched string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[key]
+	return ok && e.specSchedule == specSched
+}
+
 func (r *TaskAgentCronReconciler) upsertEntry(key types.NamespacedName, specSched string, sched cron.Schedule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.entries == nil {
 		r.entries = map[types.NamespacedName]*cronEntry{}
-	}
-	if existing, ok := r.entries[key]; ok && existing.specSchedule == specSched {
-		// Same schedule; replace the parsed Schedule (cheap) but keep timing state.
-		existing.schedule = sched
-		return
 	}
 	r.entries[key] = &cronEntry{
 		specSchedule: specSched,
@@ -133,53 +132,53 @@ func (r *TaskAgentCronReconciler) now() time.Time {
 	return time.Now()
 }
 
-// patchScheduledCondition updates the Scheduled condition and patches the
-// status subresource. Disjoint from TaskAgentRevisionReconciler's writes
-// (it touches Conditions[type=WorkerPoolReady|EgressConfigured|RevisionReady|Accepted]
-// and the *Revision* + ObservedGeneration fields; we touch Conditions[type=Scheduled]
-// + LastScheduleTime + NextScheduleTime).
-func (r *TaskAgentCronReconciler) patchScheduledCondition(
+// timing returns the entry's last/next fire times for status projection.
+// Returns (nil, nil) when no entry exists. Caller writes the values into
+// status; this helper only reads.
+func (r *TaskAgentCronReconciler) timing(key types.NamespacedName) (last, next *metav1.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[key]
+	if !ok {
+		return nil, nil
+	}
+	if !e.lastFire.IsZero() {
+		t := metav1.NewTime(e.lastFire)
+		last = &t
+	}
+	if !e.nextFire.IsZero() {
+		t := metav1.NewTime(e.nextFire)
+		next = &t
+	}
+	return last, next
+}
+
+// patchScheduled sets the Scheduled condition + LastScheduleTime/
+// NextScheduleTime on ta and patches the status subresource. The cron
+// reconciler owns this disjoint slice of TaskAgentStatus; other
+// reconcilers (revision, ingress) own the rest.
+func (r *TaskAgentCronReconciler) patchScheduled(
 	ctx context.Context,
 	ta *clrkv1alpha1.TaskAgent,
 	status metav1.ConditionStatus,
 	reason, message string,
-) (ctrl.Result, error) {
+) error {
 	base := ta.DeepCopy()
-	cond := metav1.Condition{
+	meta.SetStatusCondition(&ta.Status.Conditions, metav1.Condition{
 		Type:               condScheduled,
 		Status:             status,
 		ObservedGeneration: ta.Generation,
 		LastTransitionTime: metav1.Now(),
 		Reason:             reason,
 		Message:            message,
-	}
-	meta.SetStatusCondition(&ta.Status.Conditions, cond)
-	r.copyTimingToStatus(types.NamespacedName{Namespace: ta.Namespace, Name: ta.Name}, &ta.Status)
+	})
+	last, next := r.timing(types.NamespacedName{Namespace: ta.Namespace, Name: ta.Name})
+	ta.Status.LastScheduleTime = last
+	ta.Status.NextScheduleTime = next
 	if err := r.Status().Patch(ctx, ta, client.MergeFrom(base)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("patching Scheduled condition: %w", err)
+		return fmt.Errorf("patching Scheduled condition: %w", err)
 	}
-	return ctrl.Result{}, nil
-}
-
-// copyTimingToStatus copies the in-memory entry's last/next fire times onto
-// status (or clears them when no entry exists).
-func (r *TaskAgentCronReconciler) copyTimingToStatus(key types.NamespacedName, st *clrkv1alpha1.TaskAgentStatus) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.entries[key]
-	if !ok {
-		st.LastScheduleTime = nil
-		st.NextScheduleTime = nil
-		return
-	}
-	if !e.lastFire.IsZero() {
-		t := metav1.NewTime(e.lastFire)
-		st.LastScheduleTime = &t
-	}
-	if !e.nextFire.IsZero() {
-		t := metav1.NewTime(e.nextFire)
-		st.NextScheduleTime = &t
-	}
+	return nil
 }
 
 // SetupWithManager registers the reconciler and the tick runnable on mgr.
@@ -206,7 +205,6 @@ type cronTicker struct {
 	interval time.Duration
 }
 
-// NeedLeaderElection makes controller-runtime gate Start on the lease.
 func (t *cronTicker) NeedLeaderElection() bool { return true }
 
 func (t *cronTicker) Start(ctx context.Context) error {
@@ -225,15 +223,13 @@ func (t *cronTicker) Start(ctx context.Context) error {
 	}
 }
 
-// Tick walks all registered entries and synchronously fires those whose
-// nextFire time has passed (using r.Now). Exported so tests can drive the
-// loop without spawning the production ticker goroutine; production code
-// invokes it from cronTicker.Start.
+// Tick walks all registered entries and fires those whose nextFire time
+// has passed. Fires within a single tick run in parallel goroutines so
+// one slow Invoker can't starve sibling agents; Tick returns once all
+// in-flight fires complete (so the next ticker tick is paced to the
+// slowest fire — good enough for minute-resolution cron).
 //
-// Synchronous fires keep the test ordering deterministic. Production
-// callers tolerate this because the per-fire HTTP timeout
-// (invokeTimeoutCap or spec.timeoutSeconds, whichever is smaller) caps
-// the wall-clock cost.
+// Exported because tests drive it directly to avoid sleeping.
 func (r *TaskAgentCronReconciler) Tick(ctx context.Context) {
 	now := r.now()
 	type due struct {
@@ -245,26 +241,33 @@ func (r *TaskAgentCronReconciler) Tick(ctx context.Context) {
 	for key, e := range r.entries {
 		if !e.nextFire.IsZero() && !e.nextFire.After(now) {
 			ready = append(ready, due{key: key, fireTime: e.nextFire})
-			// Roll forward immediately so a slow Invoker doesn't double-fire on
-			// the next tick. Errors update lastErr but don't reset nextFire.
+			// Roll forward immediately so a slow Invoker can't double-fire on the next tick.
 			e.nextFire = e.schedule.Next(now)
 		}
 	}
 	r.mu.Unlock()
 
-	for _, d := range ready {
-		r.fire(ctx, d.key, d.fireTime)
+	if len(ready) == 0 {
+		return
 	}
+	var wg sync.WaitGroup
+	wg.Add(len(ready))
+	for _, d := range ready {
+		go func(d due) {
+			defer wg.Done()
+			r.fire(ctx, d.key, d.fireTime)
+		}(d)
+	}
+	wg.Wait()
 }
 
-// fire invokes the TaskAgent and updates entry + status with the outcome.
 func (r *TaskAgentCronReconciler) fire(parent context.Context, key types.NamespacedName, fireTime time.Time) {
 	logger := log.FromContext(parent).WithValues("taskagent", key, "fireTime", fireTime)
 
 	var ta clrkv1alpha1.TaskAgent
 	if err := r.Get(parent, key, &ta); err != nil {
 		logger.Error(err, "Get TaskAgent before fire")
-		r.recordFire(key, fireTime, err)
+		r.recordFire(key, fireTime)
 		return
 	}
 
@@ -287,54 +290,32 @@ func (r *TaskAgentCronReconciler) fire(parent context.Context, key types.Namespa
 		logger.Error(invokeErr, "Cron fire failed")
 	}
 	// Record lastFire on both success and failure: K8s CronJob's
-	// status.lastScheduleTime tracks when the schedule fired, not when
-	// the downstream invocation succeeded. lastErr separately carries
-	// the error string for the next reconcile's condition message.
-	r.recordFire(key, fireTime, invokeErr)
-	r.patchFireOutcome(parent, &ta, fireTime, invokeErr)
+	// status.lastScheduleTime tracks the schedule clock, not the
+	// invocation outcome.
+	r.recordFire(key, fireTime)
+
+	status := metav1.ConditionTrue
+	reason := reasonScheduleRegistered
+	msg := fmt.Sprintf("Last fire at %s succeeded", fireTime.UTC().Format(time.RFC3339))
+	if invokeErr != nil {
+		status = metav1.ConditionFalse
+		reason = reasonLastFireFailed
+		msg = fmt.Sprintf("Last fire at %s failed: %s", fireTime.UTC().Format(time.RFC3339), invokeErr)
+	}
+	if err := r.patchScheduled(parent, &ta, status, reason, msg); err != nil {
+		logger.Error(err, "Patching Scheduled condition after fire")
+	}
 }
 
-func (r *TaskAgentCronReconciler) recordFire(key types.NamespacedName, fireTime time.Time, fireErr error) {
+func (r *TaskAgentCronReconciler) recordFire(key types.NamespacedName, fireTime time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, ok := r.entries[key]
-	if !ok {
-		return
-	}
-	e.lastFire = fireTime
-	if fireErr != nil {
-		e.lastErr = fireErr.Error()
-	} else {
-		e.lastErr = ""
+	if e, ok := r.entries[key]; ok {
+		e.lastFire = fireTime
 	}
 }
 
-// patchFireOutcome updates the Scheduled condition with the last fire's
-// outcome and stamps lastScheduleTime / nextScheduleTime onto status.
-func (r *TaskAgentCronReconciler) patchFireOutcome(ctx context.Context, ta *clrkv1alpha1.TaskAgent, fireTime time.Time, fireErr error) {
-	base := ta.DeepCopy()
-	reason, msg := "ScheduleRegistered", fmt.Sprintf("Last fire at %s succeeded", fireTime.UTC().Format(time.RFC3339))
-	st := metav1.ConditionTrue
-	if fireErr != nil {
-		st = metav1.ConditionFalse
-		reason = "LastFireFailed"
-		msg = fmt.Sprintf("Last fire at %s failed: %s", fireTime.UTC().Format(time.RFC3339), fireErr)
-	}
-	meta.SetStatusCondition(&ta.Status.Conditions, metav1.Condition{
-		Type:               condScheduled,
-		Status:             st,
-		ObservedGeneration: ta.Generation,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            msg,
-	})
-	r.copyTimingToStatus(types.NamespacedName{Namespace: ta.Namespace, Name: ta.Name}, &ta.Status)
-	if err := r.Status().Patch(ctx, ta, client.MergeFrom(base)); err != nil {
-		log.FromContext(ctx).Error(err, "Patching Scheduled condition after fire", "taskagent", ta.Name)
-	}
-}
-
-// Compile-time assertion that cronTicker satisfies the manager.Runnable +
-// manager.LeaderElectionRunnable contract controller-runtime expects.
-var _ manager.LeaderElectionRunnable = (*cronTicker)(nil)
-var _ manager.Runnable = (*cronTicker)(nil)
+var (
+	_ manager.LeaderElectionRunnable = (*cronTicker)(nil)
+	_ manager.Runnable               = (*cronTicker)(nil)
+)

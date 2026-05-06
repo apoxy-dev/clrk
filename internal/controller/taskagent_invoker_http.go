@@ -24,12 +24,13 @@ type HTTPInvoker struct {
 	HTTP   *http.Client
 }
 
-// NewHTTPInvoker returns an HTTPInvoker with a default http.Client whose
-// per-call timeout is supplied by the caller's context.
+// NewHTTPInvoker returns an HTTPInvoker with a default http.Client. The
+// per-call deadline is supplied by the caller's context, so the client
+// itself has no Timeout set.
 func NewHTTPInvoker(c client.Client) *HTTPInvoker {
 	return &HTTPInvoker{
 		Client: c,
-		HTTP:   &http.Client{Timeout: 0},
+		HTTP:   &http.Client{},
 	}
 }
 

@@ -38,3 +38,11 @@ const (
 	condProgressing      = "Progressing"
 	condScheduled        = "Scheduled"
 )
+
+// Reason values for the Scheduled condition.
+const (
+	reasonScheduleRegistered = "ScheduleRegistered"
+	reasonNotScheduled       = "NotScheduled"
+	reasonParseError         = "ParseError"
+	reasonLastFireFailed     = "LastFireFailed"
+)
