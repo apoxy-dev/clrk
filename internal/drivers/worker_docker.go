@@ -10,9 +10,6 @@ import (
 )
 
 const (
-	// DefaultWorkerImage is used when no override is supplied.
-	DefaultWorkerImage = "clrk/worker:latest"
-
 	// workerContainerPrefix is the name prefix for worker containers.
 	// Workers are numbered to support N>1 replicas.
 	workerContainerPrefix = "clrk-worker-"

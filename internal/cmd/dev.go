@@ -34,20 +34,22 @@ import (
 const devOtelPort = 14318
 
 type devOpts struct {
-	watch           bool
-	controllerImage string
-	workerImage     string
-	k3sImage        string
-	workers         int
-	dataDir         string
-	tui             bool
-	tuiSet          bool
-	applyPaths      []string
-	applyRecursive  bool
-	reloadTar       []string
-	secrets         []string
-	parsedSecrets   []secretSpec
-	otelEndpoint    string
+	watch              bool
+	controllerImage    string
+	controllerImageSet bool
+	workerImage        string
+	workerImageSet     bool
+	k3sImage           string
+	workers            int
+	dataDir            string
+	tui                bool
+	tuiSet             bool
+	applyPaths         []string
+	applyRecursive     bool
+	reloadTar          []string
+	secrets            []string
+	parsedSecrets      []secretSpec
+	otelEndpoint       string
 }
 
 func newDevCmd() *cobra.Command {
@@ -59,6 +61,8 @@ func newDevCmd() *cobra.Command {
 			"and N worker containers on a shared docker network.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.tuiSet = cmd.Flags().Changed("tui")
+			o.controllerImageSet = cmd.Flags().Changed("controller-image")
+			o.workerImageSet = cmd.Flags().Changed("worker-image")
 			return runDev(cmd.Context(), o)
 		},
 	}
@@ -123,6 +127,15 @@ func runDev(ctx context.Context, o *devOpts) error {
 	// explicitly set --tui=true.
 	if !o.tuiSet && !term.IsTerminal(int(os.Stdout.Fd())) {
 		o.tui = false
+	}
+
+	// `--reload-tar=<component>=…` without an explicit image override
+	// flips the corresponding image ref to the bazel-stamped local tag
+	// (`clrk/{controller-manager,worker}:latest`) so the loaded tarball
+	// is what the container actually runs. This must happen before
+	// bringUp consumes o.controllerImage / o.workerImage.
+	if err := applyReloadTarImageOverrides(o); err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -216,6 +229,34 @@ func startReloadWatchers(ctx context.Context, o *devOpts) error {
 	for _, s := range specs {
 		slog.Info("Watching tarball for reload", "component", s.Component, "index", s.Index, "path", s.Path)
 		go runReloadWatcher(ctx, o, s)
+	}
+	return nil
+}
+
+// applyReloadTarImageOverrides flips the controller-manager / worker
+// image refs to the bazel-stamped local tag when the user supplied
+// `--reload-tar=<component>=…` without an explicit
+// `--controller-image` / `--worker-image`. Without this, the GAR
+// default would shadow the freshly-loaded local tarball and the
+// container would either pull the published image (defeating the
+// dev workflow) or fail with `manifest unknown` if the matching tag
+// hasn't been pushed for the running clrk SHA.
+func applyReloadTarImageOverrides(o *devOpts) error {
+	specs, err := parseReloadTar(o.reloadTar)
+	if err != nil {
+		return err
+	}
+	for _, s := range specs {
+		switch s.Component {
+		case "controller-manager":
+			if !o.controllerImageSet {
+				o.controllerImage = drivers.BazelLocalControllerManagerTag
+			}
+		case "worker":
+			if !o.workerImageSet {
+				o.workerImage = drivers.BazelLocalWorkerTag
+			}
+		}
 	}
 	return nil
 }
