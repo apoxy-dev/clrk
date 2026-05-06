@@ -94,6 +94,9 @@ func (d *K3sDriver) Start(ctx context.Context, opts ...Option) (string, error) {
 		// but we want the standard in-container path so we can docker cp.
 		"--env", "K3S_KUBECONFIG_MODE=644",
 	}
+	if o.Pull != "" {
+		args = append(args, "--pull", o.Pull)
+	}
 	for _, k := range sortedStringKeys(o.Labels) {
 		args = append(args, "--label", k+"="+o.Labels[k])
 	}

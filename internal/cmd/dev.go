@@ -41,6 +41,7 @@ type devOpts struct {
 	workerImageSet     bool
 	k3sImage           string
 	pull               string
+	skipPreflight      bool
 	workers            int
 	dataDir            string
 	tui                bool
@@ -73,6 +74,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.workerImage, "worker-image", drivers.DefaultWorkerImage, "Worker image ref.")
 	cmd.Flags().StringVar(&o.k3sImage, "k3s-image", drivers.DefaultK3sImage, "k3s image ref.")
 	cmd.Flags().StringVar(&o.pull, "pull", "", "Forwarded to `docker run --pull` for every clrk-managed container. Accepted: \"always\", \"missing\" (docker default), \"never\". Use \"always\" to force a re-pull when a SHA-tagged image was retagged out-of-band.")
+	cmd.Flags().BoolVar(&o.skipPreflight, "skip-preflight", false, "Skip the host-readiness checks (docker daemon, /dev/net/tun, IPv6, image-pullable). Use only when the checks are wrong about your environment.")
 	cmd.Flags().IntVar(&o.workers, "workers", 1, "Number of worker replicas.")
 	cmd.Flags().StringVar(&o.dataDir, "data-dir", "", "Host path for ~/.clrk state (defaults to --clrk-dir).")
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
@@ -138,6 +140,17 @@ func runDev(ctx context.Context, o *devOpts) error {
 	// bringUp consumes o.controllerImage / o.workerImage.
 	if err := applyReloadTarImageOverrides(o); err != nil {
 		return err
+	}
+
+	// Pre-flight checks run after image-ref resolution so
+	// checkImagePullable looks at the actual refs bringUp will use.
+	// On failure we want users to see the report and stop — bringUp
+	// would deliver the same diagnoses as opaque docker errors a
+	// minute later.
+	if !o.skipPreflight {
+		if err := preflight(ctx, o); err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

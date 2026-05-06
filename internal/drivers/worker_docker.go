@@ -62,6 +62,9 @@ func (d *WorkerDriver) Start(ctx context.Context, opts ...Option) (string, error
 		"--security-opt", "seccomp=unconfined",
 		"--security-opt", "apparmor=unconfined",
 	}
+	if o.Pull != "" {
+		baseArgs = append(baseArgs, "--pull", o.Pull)
+	}
 	for _, k := range sortedStringKeys(o.Labels) {
 		baseArgs = append(baseArgs, "--label", k+"="+o.Labels[k])
 	}
