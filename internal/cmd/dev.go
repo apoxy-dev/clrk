@@ -40,6 +40,7 @@ type devOpts struct {
 	workerImage        string
 	workerImageSet     bool
 	k3sImage           string
+	pull               string
 	workers            int
 	dataDir            string
 	tui                bool
@@ -71,6 +72,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.controllerImage, "controller-image", drivers.DefaultControllerManagerImage, "Controller-manager image ref.")
 	cmd.Flags().StringVar(&o.workerImage, "worker-image", drivers.DefaultWorkerImage, "Worker image ref.")
 	cmd.Flags().StringVar(&o.k3sImage, "k3s-image", drivers.DefaultK3sImage, "k3s image ref.")
+	cmd.Flags().StringVar(&o.pull, "pull", "", "Forwarded to `docker run --pull` for every clrk-managed container. Accepted: \"always\", \"missing\" (docker default), \"never\". Use \"always\" to force a re-pull when a SHA-tagged image was retagged out-of-band.")
 	cmd.Flags().IntVar(&o.workers, "workers", 1, "Number of worker replicas.")
 	cmd.Flags().StringVar(&o.dataDir, "data-dir", "", "Host path for ~/.clrk state (defaults to --clrk-dir).")
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
@@ -381,7 +383,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	// avoids collision with other local clusters (kind, k3d, minikube).
 	state.k3s.HostPort = 16443
 	if err := withStatus(prog, drivers.K3sContainerName, func() error {
-		if _, err := state.k3s.Start(ctx, drivers.WithImage(o.k3sImage)); err != nil {
+		if _, err := state.k3s.Start(ctx, drivers.WithImage(o.k3sImage), drivers.WithPull(o.pull)); err != nil {
 			return fmt.Errorf("starting k3s: %w", err)
 		}
 		slog.Info("k3s running", "container", drivers.K3sContainerName)
@@ -504,6 +506,7 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 	}
 	opts := []drivers.Option{
 		drivers.WithImage(o.controllerImage),
+		drivers.WithPull(o.pull),
 		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
 		drivers.WithEnv(env),
 		// Resolve `host.docker.internal` to the docker bridge IP so the
@@ -551,6 +554,7 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 func workerOpts(o *devOpts, w *drivers.WorkerDriver) ([]drivers.Option, error) {
 	opts := []drivers.Option{
 		drivers.WithImage(o.workerImage),
+		drivers.WithPull(o.pull),
 		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
 		drivers.WithEnv(map[string]string{
 			// Route all resource access through k3s; clrk.apoxy.dev is

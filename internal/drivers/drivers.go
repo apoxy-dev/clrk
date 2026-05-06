@@ -33,6 +33,11 @@ type Options struct {
 	Labels      map[string]string
 	Ports       map[int]int
 	ExtraHosts  map[string]string
+	// Pull is forwarded to `docker run --pull=<value>`. Empty leaves
+	// the docker default ("missing") in place. Accepted: "always",
+	// "missing", "never". Only "always" forces a re-pull when the
+	// tag already exists locally.
+	Pull string
 }
 
 // Option configures driver behavior.
@@ -95,6 +100,13 @@ func WithPort(host, container int) Option {
 // `host-gateway` (resolves to the host bridge address).
 func WithExtraHost(name, address string) Option {
 	return func(o *Options) { o.ExtraHosts[name] = address }
+}
+
+// WithPull sets the docker run --pull policy. Accepted values:
+// "always", "missing" (docker default), "never". Empty string leaves
+// the docker default in place.
+func WithPull(policy string) Option {
+	return func(o *Options) { o.Pull = policy }
 }
 
 // Apply runs the option funcs in order and returns the resulting Options.

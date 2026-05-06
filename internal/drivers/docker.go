@@ -55,6 +55,9 @@ func runArgs(name, image string, o *Options) []string {
 		"--label", ownerLabel,
 		"--restart", "on-failure",
 	}
+	if o.Pull != "" {
+		args = append(args, "--pull", o.Pull)
+	}
 
 	for _, k := range sortedStringKeys(o.Labels) {
 		args = append(args, "--label", k+"="+o.Labels[k])
