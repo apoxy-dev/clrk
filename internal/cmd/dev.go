@@ -142,6 +142,15 @@ func runDev(ctx context.Context, o *devOpts) error {
 		return err
 	}
 
+	// Seed each --reload-tar tarball into the docker daemon before
+	// bringUp tries to `docker run` against the local-only ref. The
+	// mtime watcher only handles subsequent reloads — without this
+	// the first container start fails with "pull access denied" on
+	// the bazel-stamped tag.
+	if err := seedReloadTarImages(ctx, o); err != nil {
+		return err
+	}
+
 	// Pre-flight checks run after image-ref resolution so
 	// checkImagePullable looks at the actual refs bringUp will use.
 	// On failure we want users to see the report and stop — bringUp
@@ -244,6 +253,23 @@ func startReloadWatchers(ctx context.Context, o *devOpts) error {
 	for _, s := range specs {
 		slog.Info("Watching tarball for reload", "component", s.Component, "index", s.Index, "path", s.Path)
 		go runReloadWatcher(ctx, o, s)
+	}
+	return nil
+}
+
+// seedReloadTarImages loads each --reload-tar tarball into the local
+// docker daemon. Required before bringUp because the mtime watcher
+// only fires on subsequent changes — the initial `docker run` against
+// the bazel-stamped local tag would otherwise pull-and-fail.
+func seedReloadTarImages(ctx context.Context, o *devOpts) error {
+	specs, err := parseReloadTar(o.reloadTar)
+	if err != nil {
+		return err
+	}
+	for _, s := range specs {
+		if err := dockerLoad(ctx, s.Path); err != nil {
+			return fmt.Errorf("seeding %s tarball: %w", s.Component, err)
+		}
 	}
 	return nil
 }
