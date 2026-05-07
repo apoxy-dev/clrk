@@ -9,6 +9,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 )
 
@@ -52,11 +53,18 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Daemon supervisor — owns one goroutine per elected DaemonAgent.
 	daemonMgr := newDaemonLifecycleManager(ctx, sandboxMgr, r.Client, router, r.PodName)
 
+	// TaskAgent dispatcher — accepts inbound HTTP requests routed to
+	// this pod by the per-TaskAgent HTTPRoute and executes one
+	// short-lived sandbox per request.
+	active := NewActiveCounter()
+	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active)
+
 	// Set up SandboxState watcher.
 	watcher := &sandboxWatcher{
 		Client:     r.Client,
 		sandboxMgr: sandboxMgr,
 		daemonMgr:  daemonMgr,
+		dispatcher: disp,
 		poolName:   r.PoolName,
 		podName:    r.PodName,
 		namespace:  r.Namespace,
@@ -74,13 +82,24 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Start heartbeat goroutine.
 	go watcher.heartbeatLoop(ctx, heartbeatInterval)
 
-	log.Info("Worker runtime started")
+	// Start the dispatcher HTTP server. Failures get logged; the
+	// daemon side stays up so DaemonAgents keep running even if the
+	// dispatcher port is busy or misconfigured.
+	dispatchAddr := fmt.Sprintf(":%d", clrkcontroller.DispatchPort)
+	go func() {
+		if err := disp.Run(ctx, dispatchAddr); err != nil {
+			log.Error(err, "Dispatcher HTTP server exited", "addr", dispatchAddr)
+		}
+	}()
+
+	log.Info("Worker runtime started", "dispatchAddr", dispatchAddr)
 
 	// Block until context is cancelled.
 	<-ctx.Done()
 
 	// Graceful shutdown — drain daemon loops first so they don't race with
-	// SandboxManager teardown.
+	// SandboxManager teardown. The dispatcher goroutine returns on its
+	// own once Shutdown completes (triggered by ctx cancellation).
 	log.Info("Shutting down worker runtime")
 	daemonMgr.Shutdown()
 	shutdown(sandboxMgr)

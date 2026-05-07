@@ -123,15 +123,15 @@ func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
 }
 
 func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
-	extProcGroup := gwapiv1.Group(envoyGatewayGroup)
-	extProcKind := gwapiv1.Kind("ExternalProcessor")
-	extProcName := gwapiv1.ObjectName(ta.Name + "-ext-proc")
-
-	resolverGroup := gwapiv1.Group(envoyGatewayGroup)
-	resolverKind := gwapiv1.Kind("DynamicResolver")
-	resolverName := gwapiv1.ObjectName(ta.Name + "-resolver")
-
 	pathPrefix := gwapiv1.PathMatchPathPrefix
+
+	// Backend is the WorkerPool's Service, port `dispatch`. EG resolves
+	// the Service to live Endpoints (default routingType=Endpoint) and
+	// load-balances across worker pods. Per-request muxing to the right
+	// TaskAgent happens at the worker via the X-Clrk-TaskAgent header
+	// injected by the RequestHeaderModifier filter below.
+	wpSvcName := gwapiv1.ObjectName(ta.Spec.WorkerPoolRef + "-workers")
+	wpSvcPort := gwapiv1.PortNumber(DispatchPort)
 
 	return &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -162,11 +162,18 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 					},
 					Filters: []gwapiv1.HTTPRouteFilter{
 						{
-							Type: gwapiv1.HTTPRouteFilterExtensionRef,
-							ExtensionRef: &gwapiv1.LocalObjectReference{
-								Group: extProcGroup,
-								Kind:  extProcKind,
-								Name:  extProcName,
+							Type: gwapiv1.HTTPRouteFilterRequestHeaderModifier,
+							RequestHeaderModifier: &gwapiv1.HTTPHeaderFilter{
+								Set: []gwapiv1.HTTPHeader{
+									{
+										Name:  "X-Clrk-TaskAgent",
+										Value: ta.Namespace + "/" + ta.Name,
+									},
+									{
+										Name:  "X-Clrk-Trigger",
+										Value: "http",
+									},
+								},
 							},
 						},
 					},
@@ -174,9 +181,8 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
-									Group: (*gwapiv1.Group)(&resolverGroup),
-									Kind:  (*gwapiv1.Kind)(&resolverKind),
-									Name:  resolverName,
+									Name: wpSvcName,
+									Port: &wpSvcPort,
 								},
 							},
 						},

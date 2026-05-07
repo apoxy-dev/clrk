@@ -4032,6 +4032,13 @@ func schema_clrk_api_clrk_v1alpha1_WorkerSandboxStatus(ref common.ReferenceCallb
 							Format:      "int32",
 						},
 					},
+					"activeExecutions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ActiveExecutions is the number of in-flight TaskAgent executions dispatched to this worker for the parent agent of the revision. Aggregated across workers by the TaskAgent revision controller into TaskAgent.Status.ActiveExecutions.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"lastHeartbeat": {
 						SchemaProps: spec.SchemaProps{
 							Description: "LastHeartbeat is the last time this worker reported status.",

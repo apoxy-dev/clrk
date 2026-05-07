@@ -5,6 +5,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -33,6 +34,9 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/netstack"
 )
+
+// Compile-time guard: *SandboxManager satisfies SandboxRuntime.
+var _ SandboxRuntime = (*SandboxManager)(nil)
 
 func init() {
 	if len(os.Args) > 1 && os.Args[1] == "init" {
@@ -105,6 +109,12 @@ func NewSandboxManager(stateDir, rootDir, logsDir string, imageStore *ImageStore
 // agentRef, identity, and resources come from the parent agent (TaskAgent
 // or DaemonAgent), since AgentSandboxRevision (the watched resource) only
 // carries the immutable image+command snapshot.
+//
+// When stdio is true the returned instance carries os.Pipe-backed
+// Stdin/Stdout/Stderr that Start will splice into the libcontainer
+// Process. The dispatcher uses this to feed an HTTP request body in
+// and stream the response body out; daemons leave stdio false and
+// keep Process.Stdin = nil.
 func (m *SandboxManager) Create(
 	ctx context.Context,
 	id SandboxID,
@@ -113,6 +123,7 @@ func (m *SandboxManager) Create(
 	caPEM []byte,
 	sandbox clrkv1alpha1.AgentSandbox,
 	resources clrkv1alpha1.ExecutionResources,
+	stdio bool,
 ) (*SandboxInstance, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
@@ -204,6 +215,48 @@ func (m *SandboxManager) Create(
 		CreatedAt: time.Now(),
 	}
 
+	// 7a. Wire stdio pipes when requested. Caller writes to Stdin and
+	// reads from Stdout/Stderr; the libcontainer Process gets the other
+	// ends in Start. Failure here unwinds the same state Create owns.
+	if stdio {
+		inR, inW, err := os.Pipe()
+		if err != nil {
+			m.removeSandboxNetConfig(id)
+			m.removeAgentCA(id)
+			stack.Close()
+			TeardownNetNS(nsCfg)
+			return nil, fmt.Errorf("creating stdin pipe: %w", err)
+		}
+		outR, outW, err := os.Pipe()
+		if err != nil {
+			inR.Close()
+			inW.Close()
+			m.removeSandboxNetConfig(id)
+			m.removeAgentCA(id)
+			stack.Close()
+			TeardownNetNS(nsCfg)
+			return nil, fmt.Errorf("creating stdout pipe: %w", err)
+		}
+		errR, errW, err := os.Pipe()
+		if err != nil {
+			inR.Close()
+			inW.Close()
+			outR.Close()
+			outW.Close()
+			m.removeSandboxNetConfig(id)
+			m.removeAgentCA(id)
+			stack.Close()
+			TeardownNetNS(nsCfg)
+			return nil, fmt.Errorf("creating stderr pipe: %w", err)
+		}
+		sb.Stdin = inW
+		sb.Stdout = outR
+		sb.Stderr = errR
+		sb.stdinChild = inR
+		sb.stdoutChild = outW
+		sb.stderrChild = errW
+	}
+
 	m.mu.Lock()
 	m.sandboxes[id] = sb
 	m.containers[id] = ctr
@@ -276,6 +329,26 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout", logFile)
 	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr", logFile)
 
+	// When the sandbox was Created with stdio pipes, splice them into
+	// libcontainer's Process: agent reads from the dispatcher via stdin,
+	// and stdout/stderr fan out to both the dispatcher (for the response
+	// body) and the per-agent log sink so structured logging keeps
+	// working unchanged.
+	var (
+		procStdin  io.Reader = nil
+		procStdout io.Writer = stdoutLog
+		procStderr io.Writer = stderrLog
+	)
+	if sb.stdinChild != nil {
+		procStdin = sb.stdinChild
+	}
+	if sb.stdoutChild != nil {
+		procStdout = io.MultiWriter(sb.stdoutChild, stdoutLog)
+	}
+	if sb.stderrChild != nil {
+		procStderr = io.MultiWriter(sb.stderrChild, stderrLog)
+	}
+
 	p := &libcontainer.Process{
 		Args:            args,
 		Env:             env,
@@ -283,9 +356,9 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 		GID:             0,
 		Cwd:             "/",
 		NoNewPrivileges: ptr.To(true),
-		Stdin:           nil,
-		Stdout:          stdoutLog,
-		Stderr:          stderrLog,
+		Stdin:           procStdin,
+		Stdout:          procStdout,
+		Stderr:          procStderr,
 		Init:            true,
 	}
 
@@ -370,13 +443,21 @@ func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessSta
 	state, err := p.Wait()
 
 	m.mu.Lock()
-	if sb, ok := m.sandboxes[id]; ok {
+	sb, sbOK := m.sandboxes[id]
+	if sbOK {
 		sb.Phase = SandboxStopped
 	}
 	delete(m.processes, id)
 	logs, hasLogs := m.stdLogs[id]
 	delete(m.stdLogs, id)
 	m.mu.Unlock()
+
+	// Close the child ends of the stdio pipes now that the process has
+	// exited. This makes the dispatcher's stdout reader see EOF and lets
+	// it return cleanly without waiting for Delete.
+	if sbOK {
+		closeStdioChildren(sb)
+	}
 
 	// Emit any tail bytes the agent wrote without a trailing newline
 	// before exit so the last line of output isn't dropped, then close
@@ -489,6 +570,12 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 
 	m.removeAgentCA(id)
 	m.removeSandboxNetConfig(id)
+
+	// Close any stdio pipe ends still open. closeStdioChildren is safe
+	// to call multiple times (each *os.File close is idempotent under
+	// our usage); Wait may have closed the child ends already.
+	closeStdioChildren(sb)
+	closeStdioParents(sb)
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)
@@ -610,6 +697,49 @@ func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 	}
 
 	TeardownNetNS(&NetNSConfig{NSName: fmt.Sprintf("run-%s", id)})
+}
+
+// closeStdioChildren closes the libcontainer-Process-facing pipe ends.
+// Called after Wait returns (so the parent reader sees EOF) and again
+// from Delete defensively. Each *os.File.Close is safe to call twice;
+// the second returns a "file already closed" error we discard.
+func closeStdioChildren(sb *SandboxInstance) {
+	if sb == nil {
+		return
+	}
+	if sb.stdinChild != nil {
+		_ = sb.stdinChild.Close()
+		sb.stdinChild = nil
+	}
+	if sb.stdoutChild != nil {
+		_ = sb.stdoutChild.Close()
+		sb.stdoutChild = nil
+	}
+	if sb.stderrChild != nil {
+		_ = sb.stderrChild.Close()
+		sb.stderrChild = nil
+	}
+}
+
+// closeStdioParents closes the dispatcher-facing pipe ends. Called
+// from Delete; the dispatcher itself typically closes Stdin once it's
+// done writing the request body, so this is a defensive sweep.
+func closeStdioParents(sb *SandboxInstance) {
+	if sb == nil {
+		return
+	}
+	if sb.Stdin != nil {
+		_ = sb.Stdin.Close()
+		sb.Stdin = nil
+	}
+	if sb.Stdout != nil {
+		_ = sb.Stdout.Close()
+		sb.Stdout = nil
+	}
+	if sb.Stderr != nil {
+		_ = sb.Stderr.Close()
+		sb.Stderr = nil
+	}
 }
 
 // phaseFromStatus maps libcontainer.Status to SandboxPhase.

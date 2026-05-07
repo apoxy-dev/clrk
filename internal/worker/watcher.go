@@ -25,6 +25,7 @@ type sandboxWatcher struct {
 	client.Client
 	sandboxMgr *SandboxManager
 	daemonMgr  *daemonLifecycleManager
+	dispatcher *Dispatcher // optional; nil if dispatcher disabled
 	poolName   string
 	podName    string
 	namespace  string
@@ -58,7 +59,12 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
-	if err := w.updateWorkerStatus(ctx, &rev, imagePulled, warmCount); err != nil {
+	var activeExecutions int32
+	if w.dispatcher != nil {
+		activeExecutions = w.dispatcher.ActiveCountFor(&rev)
+	}
+
+	if err := w.updateWorkerStatus(ctx, &rev, imagePulled, warmCount, activeExecutions); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating worker status: %w", err)
 	}
 
@@ -127,7 +133,7 @@ func (w *sandboxWatcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool
 
 // updateWorkerStatus upserts this worker's entry in
 // AgentSandboxRevision.Status.Workers.
-func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision, imagePulled bool, warmCount int32) error {
+func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision, imagePulled bool, warmCount, activeExecutions int32) error {
 	now := metav1.NewTime(time.Now())
 
 	found := false
@@ -135,6 +141,7 @@ func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alph
 		if rev.Status.Workers[i].PodName == w.podName {
 			rev.Status.Workers[i].ImagePulled = imagePulled
 			rev.Status.Workers[i].WarmCount = warmCount
+			rev.Status.Workers[i].ActiveExecutions = activeExecutions
 			rev.Status.Workers[i].LastHeartbeat = now
 			found = true
 			break
@@ -142,10 +149,11 @@ func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alph
 	}
 	if !found {
 		rev.Status.Workers = append(rev.Status.Workers, clrkv1alpha1.WorkerSandboxStatus{
-			PodName:       w.podName,
-			ImagePulled:   imagePulled,
-			WarmCount:     warmCount,
-			LastHeartbeat: now,
+			PodName:          w.podName,
+			ImagePulled:      imagePulled,
+			WarmCount:        warmCount,
+			ActiveExecutions: activeExecutions,
+			LastHeartbeat:    now,
 		})
 	}
 
@@ -199,9 +207,14 @@ func (w *sandboxWatcher) heartbeatLoop(ctx context.Context, interval time.Durati
 			now := metav1.NewTime(time.Now())
 			for i := range revList.Items {
 				rev := &revList.Items[i]
+				var active int32
+				if w.dispatcher != nil {
+					active = w.dispatcher.ActiveCountFor(rev)
+				}
 				for j := range rev.Status.Workers {
 					if rev.Status.Workers[j].PodName == w.podName {
 						rev.Status.Workers[j].LastHeartbeat = now
+						rev.Status.Workers[j].ActiveExecutions = active
 						break
 					}
 				}

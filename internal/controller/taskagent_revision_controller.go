@@ -146,6 +146,26 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
 
+	// Aggregate ActiveExecutions across workers for the latest-ready
+	// revision. We only count the latest-ready slice because executions
+	// against older revisions drain quickly (one-shot semantics) and
+	// summing every revision would double-count during a rollover.
+	if ta.Status.LatestReadyRevisionName != "" {
+		var activeRev clrkv1alpha1.AgentSandboxRevision
+		activeKey := types.NamespacedName{Name: ta.Status.LatestReadyRevisionName, Namespace: ta.Namespace}
+		if err := r.Get(ctx, activeKey, &activeRev); err == nil {
+			var sum int32
+			for _, ws := range activeRev.Status.Workers {
+				sum += ws.ActiveExecutions
+			}
+			ta.Status.ActiveExecutions = sum
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting active revision for ActiveExecutions sum: %w", err)
+		}
+	} else {
+		ta.Status.ActiveExecutions = 0
+	}
+
 	accepted := metav1.Condition{
 		Type:               condAccepted,
 		Status:             metav1.ConditionTrue,

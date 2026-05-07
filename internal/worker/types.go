@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,33 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
+
+// SandboxRuntime is the subset of SandboxManager the dispatcher relies
+// on. Defined as an interface so unit tests can supply a fake runtime
+// (the linux-only libcontainer plumbing makes the concrete manager
+// untestable off-platform).
+//
+// All methods correspond 1:1 to *SandboxManager — see sandbox.go for
+// the production implementation.
+type SandboxRuntime interface {
+	Purge(ctx context.Context, id SandboxID)
+	Create(
+		ctx context.Context,
+		id SandboxID,
+		agentRef string,
+		identity proxyproto.AgentIdentity,
+		caPEM []byte,
+		sandbox clrkv1alpha1.AgentSandbox,
+		resources clrkv1alpha1.ExecutionResources,
+		stdio bool,
+	) (*SandboxInstance, error)
+	SetEgressBackends(id SandboxID, backends []egress.BackendListener) error
+	SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error
+	Start(ctx context.Context, id SandboxID) error
+	Stop(ctx context.Context, id SandboxID) error
+	Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error)
+	Delete(ctx context.Context, id SandboxID) error
+}
 
 // WorkerLogsDir is the path inside a worker container where per-agent
 // stdio is teed for `clrk agents logs` to `tail -F` via docker exec /
@@ -63,6 +91,22 @@ type SandboxInstance struct {
 	TAPFD     *os.File  // Host-side TAP fd for netstack (APO-536).
 	RootFS    string    // Extracted rootfs path.
 	Stack     io.Closer // Per-sandbox netstack (*netstack.SandboxStack on linux).
+
+	// Stdin/Stdout/Stderr are populated when the sandbox was Created with
+	// stdio=true. The dispatcher uses these to stream the HTTP request
+	// body in and the response body out. Nil on daemon (non-stdio)
+	// sandboxes — stdout/stderr still flow to the per-agent log file
+	// via the line-splitter sink in either mode.
+	Stdin  io.WriteCloser
+	Stdout io.ReadCloser
+	Stderr io.ReadCloser
+
+	// stdinChild / stdoutChild / stderrChild are the libcontainer-Process-
+	// facing ends of the stdio pipes. Held here so Start can hand them to
+	// the Process and Delete can close them; not exposed to callers.
+	stdinChild  *os.File
+	stdoutChild *os.File
+	stderrChild *os.File
 
 	Sandbox   clrkv1alpha1.AgentSandbox
 	Resources clrkv1alpha1.ExecutionResources

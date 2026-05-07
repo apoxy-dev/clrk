@@ -23,6 +23,12 @@ const (
 	maxRevisionHistory = 10
 )
 
+// DispatchPort is the TCP port the worker dispatcher binds to and the
+// WorkerPool Service exposes. TaskAgent HTTPRoutes target this port on
+// the WorkerPool Service; EG resolves the Service to live Endpoints
+// (default routingType=Endpoint) and load-balances across worker pods.
+const DispatchPort int32 = 8090
+
 // Status.Conditions Type values written across the split reconcilers.
 // Distinct values matter: meta.SetStatusCondition matches by Type, so each
 // reconciler half (revision/ingress for TaskAgent, status/deployment for

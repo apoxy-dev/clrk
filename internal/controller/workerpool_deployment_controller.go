@@ -187,6 +187,12 @@ func (r *WorkerPoolDeploymentReconciler) desiredService(wp *clrkv1alpha1.WorkerP
 					TargetPort: intstr.FromInt32(8080),
 					Protocol:   corev1.ProtocolTCP,
 				},
+				{
+					Name:       "dispatch",
+					Port:       DispatchPort,
+					TargetPort: intstr.FromInt32(DispatchPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
 			},
 			Type: corev1.ServiceTypeClusterIP,
 		},

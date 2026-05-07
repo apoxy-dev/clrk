@@ -1,0 +1,533 @@
+package worker
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/egress"
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+)
+
+const (
+	// dispatchHeaderTaskAgent identifies the target TaskAgent. Injected
+	// by the per-TaskAgent HTTPRoute's RequestHeaderModifier filter so
+	// the worker doesn't need to mux on Host or path.
+	dispatchHeaderTaskAgent = "X-Clrk-TaskAgent"
+	// dispatchHeaderTrigger labels the invocation source (http or cron)
+	// for telemetry and audit. Optional.
+	dispatchHeaderTrigger = "X-Clrk-Trigger"
+	// dispatchHeaderExitCode carries the sandbox process exit code on
+	// non-2xx responses so the caller can distinguish agent failures
+	// from infra failures without parsing the body.
+	dispatchHeaderExitCode = "X-Clrk-Exit-Code"
+
+	// hardTimeoutCap is the absolute upper bound on a single execution,
+	// regardless of TaskAgent.spec.timeoutSeconds. Matches the cron
+	// invoker's per-fire cap so cron and HTTP share the same ceiling.
+	hardTimeoutCap = 5 * time.Minute
+)
+
+// activeCounter tracks in-flight TaskAgent executions per
+// (taskAgentNS, taskAgentName). The heartbeat loop snapshots it and
+// projects the per-(agent, worker) count into
+// AgentSandboxRevision.Status.Workers[i].ActiveExecutions.
+type activeCounter struct {
+	mu     sync.Mutex
+	counts map[types.NamespacedName]int32
+}
+
+func newActiveCounter() *activeCounter {
+	return &activeCounter{counts: make(map[types.NamespacedName]int32)}
+}
+
+func (c *activeCounter) inc(key types.NamespacedName) {
+	c.mu.Lock()
+	c.counts[key]++
+	c.mu.Unlock()
+}
+
+func (c *activeCounter) dec(key types.NamespacedName) {
+	c.mu.Lock()
+	if c.counts[key] > 0 {
+		c.counts[key]--
+	}
+	if c.counts[key] == 0 {
+		delete(c.counts, key)
+	}
+	c.mu.Unlock()
+}
+
+// get returns the current count for key (0 if absent).
+func (c *activeCounter) get(key types.NamespacedName) int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[key]
+}
+
+// Dispatcher serves inbound TaskAgent execution requests routed to
+// this worker by the per-TaskAgent HTTPRoute. One shared instance per
+// worker pod; concurrency is capped per-TaskAgent via semaphores.
+//
+// Exported so out-of-tree black-box tests at apoxy-cloud//clrk/worker
+// can construct a Dispatcher with a fake SandboxRuntime — see
+// SandboxRuntime in types.go.
+type Dispatcher struct {
+	client     client.Client
+	sandboxMgr SandboxRuntime
+	router     *egress.Router
+	podName    string
+	namespace  string
+
+	active *activeCounter
+
+	// semaphores caps in-flight executions per (TaskAgent ns, name).
+	// Stored as *sema so the same capacity value (the chan) is reused
+	// across requests for the same agent, and resized lazily when the
+	// spec.maxConcurrent value changes.
+	semaphores sync.Map // types.NamespacedName -> *sema
+}
+
+type sema struct {
+	cap int32
+	ch  chan struct{}
+}
+
+// NewDispatcher constructs a Dispatcher. Production callers pass a
+// real *SandboxManager (which satisfies SandboxRuntime) and a real
+// *egress.Router; tests pass fakes / nil where appropriate.
+func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podName, namespace string, active *activeCounter) *Dispatcher {
+	return &Dispatcher{
+		client:     c,
+		sandboxMgr: mgr,
+		router:     r,
+		podName:    podName,
+		namespace:  namespace,
+		active:     active,
+	}
+}
+
+// NewActiveCounter returns an empty activeCounter usable as the
+// `active` argument to NewDispatcher. Exported so tests can inspect
+// the counter independently.
+func NewActiveCounter() *activeCounter { return newActiveCounter() }
+
+// Active returns the count of in-flight executions for the agent
+// identified by ns/name. Test-only accessor; production code reads
+// the count via the heartbeat path.
+func (c *activeCounter) Active(ns, name string) int32 {
+	return c.get(types.NamespacedName{Namespace: ns, Name: name})
+}
+
+// acquire returns a release func on success or nil if the per-TaskAgent
+// MaxConcurrent cap is full. cap == 0 means unlimited (no semaphore
+// allocated).
+func (d *Dispatcher) acquire(key types.NamespacedName, cap int32) func() {
+	if cap <= 0 {
+		return func() {}
+	}
+	for {
+		v, ok := d.semaphores.Load(key)
+		if !ok {
+			fresh := &sema{cap: cap, ch: make(chan struct{}, int(cap))}
+			actual, loaded := d.semaphores.LoadOrStore(key, fresh)
+			if !loaded {
+				v = fresh
+			} else {
+				v = actual
+			}
+		}
+		s := v.(*sema)
+		// If the cap shrank or grew between requests, swap atomically.
+		// Old chan drains as in-flight requests release; new requests
+		// queue against the new chan immediately.
+		if s.cap != cap {
+			fresh := &sema{cap: cap, ch: make(chan struct{}, int(cap))}
+			if d.semaphores.CompareAndSwap(key, s, fresh) {
+				s = fresh
+			} else {
+				continue
+			}
+		}
+		select {
+		case s.ch <- struct{}{}:
+			return func() { <-s.ch }
+		default:
+			return nil
+		}
+	}
+}
+
+func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log := ctrl.LoggerFrom(r.Context()).WithName("dispatch")
+
+	hdr := r.Header.Get(dispatchHeaderTaskAgent)
+	if hdr == "" {
+		http.Error(w, "missing "+dispatchHeaderTaskAgent+" header", http.StatusBadRequest)
+		return
+	}
+	ns, name, ok := strings.Cut(hdr, "/")
+	if !ok || ns == "" || name == "" {
+		http.Error(w, "invalid "+dispatchHeaderTaskAgent+" header (want ns/name)", http.StatusBadRequest)
+		return
+	}
+	key := types.NamespacedName{Namespace: ns, Name: name}
+	log = log.WithValues("taskAgent", key.String(), "trigger", r.Header.Get(dispatchHeaderTrigger))
+
+	var ta clrkv1alpha1.TaskAgent
+	if err := d.client.Get(r.Context(), key, &ta); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, "TaskAgent not found", http.StatusNotFound)
+			return
+		}
+		log.Error(err, "Failed to get TaskAgent")
+		http.Error(w, "TaskAgent lookup failed", http.StatusInternalServerError)
+		return
+	}
+
+	if ta.Status.LatestReadyRevisionName == "" {
+		http.Error(w, "TaskAgent has no ready revision", http.StatusServiceUnavailable)
+		return
+	}
+
+	maxConcurrent := int32(0)
+	if ta.Spec.MaxConcurrent != nil {
+		maxConcurrent = *ta.Spec.MaxConcurrent
+	}
+	release := d.acquire(key, maxConcurrent)
+	if release == nil {
+		http.Error(w, "TaskAgent at MaxConcurrent on this worker", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+
+	d.active.inc(key)
+	defer d.active.dec(key)
+
+	var rev clrkv1alpha1.AgentSandboxRevision
+	revKey := types.NamespacedName{Namespace: ns, Name: ta.Status.LatestReadyRevisionName}
+	if err := d.client.Get(r.Context(), revKey, &rev); err != nil {
+		if apierrors.IsNotFound(err) {
+			http.Error(w, "AgentSandboxRevision not found locally", http.StatusServiceUnavailable)
+			return
+		}
+		log.Error(err, "Failed to get AgentSandboxRevision")
+		http.Error(w, "revision lookup failed", http.StatusInternalServerError)
+		return
+	}
+
+	timeout := hardTimeoutCap
+	if ta.Spec.TimeoutSeconds != nil && *ta.Spec.TimeoutSeconds > 0 {
+		t := time.Duration(*ta.Spec.TimeoutSeconds) * time.Second
+		if t < timeout {
+			timeout = t
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	suffix, err := randHex(4)
+	if err != nil {
+		log.Error(err, "Failed to generate sandbox id suffix")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	sandboxID := SandboxID(fmt.Sprintf("ta-%s-%s-%s", ns, name, suffix))
+
+	identity := proxyproto.AgentIdentity{
+		Kind:      proxyproto.AgentKindTask,
+		Namespace: ns,
+		Name:      name,
+		UID:       string(ta.UID),
+		Revision:  rev.Name,
+	}
+
+	caPEM, backends, policy, err := resolveEgressForExecution(ctx, d.client, d.router, ns, ta.Spec.EgressRefs)
+	if err != nil {
+		log.Error(err, "Failed to resolve egress for TaskAgent")
+		http.Error(w, "egress not ready", http.StatusServiceUnavailable)
+		return
+	}
+
+	d.sandboxMgr.Purge(ctx, sandboxID)
+	sb, err := d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, true)
+	if err != nil {
+		log.Error(err, "Failed to create sandbox")
+		http.Error(w, "sandbox create failed", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err := d.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, ErrNotFound) {
+			log.Error(err, "Failed to delete sandbox")
+		}
+	}()
+	if len(backends) > 0 {
+		if err := d.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
+			log.Error(err, "Set egress backends failed")
+		}
+	}
+	if policy != nil {
+		if err := d.sandboxMgr.SetEgressPolicy(sandboxID, policy); err != nil {
+			log.Error(err, "Set egress policy failed")
+		}
+	}
+
+	if err := d.sandboxMgr.Start(ctx, sandboxID); err != nil {
+		log.Error(err, "Failed to start sandbox")
+		http.Error(w, "sandbox start failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Pump request body → sandbox stdin in the background; close stdin
+	// on EOF so the agent's read returns. errCh surfaces a copy error
+	// so we can attribute a 500 if the body wasn't fully delivered.
+	stdinErr := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(sb.Stdin, r.Body)
+		_ = sb.Stdin.Close()
+		stdinErr <- err
+	}()
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	// Stream stdout to the response with explicit flushes so SSE / NDJSON
+	// agents work without any unix-socket plumbing. flusher may be nil
+	// on HTTP/1.0 or weird middleware — just skip flushing in that case.
+	//
+	// Run the pump in a goroutine so we can race it against waitOrStop:
+	// on ctx cancellation Wait returns first via Stop, the runtime
+	// closes child-stdout, and the pump observes EOF and returns.
+	flusher, _ := w.(http.Flusher)
+	respCh := make(chan bool, 1)
+	go func() { respCh <- streamWithFlush(w, sb.Stdout, flusher) }()
+
+	state, waitErr := waitOrStop(ctx, d.sandboxMgr, sandboxID)
+	<-stdinErr // drain so we don't leak the stdin goroutine
+	wroteAnyBytes := <-respCh
+
+	exitCode := -1
+	success := false
+	if state != nil {
+		success = state.Success()
+		if success {
+			exitCode = 0
+		} else if ws, ok := state.Sys().(interface{ ExitStatus() int }); ok {
+			exitCode = ws.ExitStatus()
+		}
+	}
+
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		// Headers may already be flushed if we streamed any bytes; in
+		// that case the trailer is the only signal we can give.
+		if !wroteAnyBytes {
+			http.Error(w, "execution timed out", http.StatusGatewayTimeout)
+		}
+	case waitErr != nil:
+		log.Error(waitErr, "Sandbox wait failed")
+		if !wroteAnyBytes {
+			http.Error(w, "sandbox wait failed", http.StatusInternalServerError)
+		}
+	case !success:
+		w.Header().Set(dispatchHeaderExitCode, fmt.Sprintf("%d", exitCode))
+		if !wroteAnyBytes {
+			http.Error(w, fmt.Sprintf("agent exited with code %d", exitCode), http.StatusInternalServerError)
+		}
+		// If we already streamed bytes, the response is whatever's on
+		// the wire — exit code lives in the (best-effort) header above.
+	}
+}
+
+// streamWithFlush copies src → dst and flushes after each chunk.
+// Returns true if any bytes were written, so the caller can decide
+// whether it's still safe to write a 5xx error.
+func streamWithFlush(dst io.Writer, src io.Reader, flusher http.Flusher) bool {
+	buf := make([]byte, 32*1024)
+	wrote := false
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return wrote
+			}
+			wrote = true
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return wrote
+		}
+	}
+}
+
+// waitOrStop blocks on the sandbox's Wait, but races against ctx so a
+// cancellation triggers a sandbox Stop and lets Wait return. Mirrors
+// the daemon path's waitOrCancel; duplicated to avoid coupling the
+// dispatcher to a daemon-only file.
+func waitOrStop(ctx context.Context, mgr SandboxRuntime, id SandboxID) (*os.ProcessState, error) {
+	type result struct {
+		state *os.ProcessState
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, e := mgr.Wait(context.Background(), id)
+		ch <- result{state: s, err: e}
+	}()
+	select {
+	case r := <-ch:
+		return r.state, r.err
+	case <-ctx.Done():
+		_ = mgr.Stop(context.Background(), id)
+		r := <-ch
+		return r.state, r.err
+	}
+}
+
+// randHex returns 2*n hex characters of crypto-random data, used to
+// disambiguate sandbox IDs across concurrent fires of the same TaskAgent.
+func randHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// resolveEgressForExecution loads the EG MITM CA, listener backends,
+// and per-sandbox policy for a one-shot execution. Returns nil/nil/nil
+// when the agent has no EgressRefs (no MITM, direct dial). Returns an
+// error if the EG exists but isn't ready yet — the caller should map
+// that to a retryable status (we use 503).
+//
+// Unlike the daemon path's waitForEgressReady, this returns immediately
+// without polling: a TaskAgent execution can't afford a multi-minute
+// warm-up loop, and the caller (cron or HTTP client) is responsible for
+// retry semantics.
+func resolveEgressForExecution(ctx context.Context, c client.Client, router *egress.Router, namespace string, refs []clrkv1alpha1.AgentEgressRef) ([]byte, []egress.BackendListener, *egress.SandboxPolicy, error) {
+	if len(refs) == 0 {
+		return nil, nil, nil, nil
+	}
+	egName := refs[0].GatewayRef
+
+	var sec corev1.Secret
+	caKey := types.NamespacedName{Namespace: namespace, Name: clrkcontroller.EgressGatewayCASecretName(egName)}
+	if err := c.Get(ctx, caKey, &sec); err != nil {
+		return nil, nil, nil, fmt.Errorf("fetching EgressGateway CA secret %s: %w", caKey, err)
+	}
+	caPEM := sec.Data[corev1.TLSCertKey]
+	if len(caPEM) == 0 {
+		return nil, nil, nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", caKey, corev1.TLSCertKey)
+	}
+
+	var eg clrkv1alpha1.EgressGateway
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: egName}, &eg); err != nil {
+		return nil, nil, nil, fmt.Errorf("get EgressGateway %s/%s: %w", namespace, egName, err)
+	}
+
+	specByName := make(map[string]clrkv1alpha1.EgressListener, len(eg.Spec.Listeners))
+	for _, el := range eg.Spec.Listeners {
+		specByName[el.Name] = el
+	}
+	backends := make([]egress.BackendListener, 0, len(eg.Status.Listeners))
+	for _, ls := range eg.Status.Listeners {
+		if ls.BackendAddress == "" {
+			continue
+		}
+		spec, ok := specByName[ls.Name]
+		if !ok {
+			continue
+		}
+		shape, err := clrkv1alpha1.ShapeForListener(spec)
+		if err != nil {
+			continue
+		}
+		var matchPort int32
+		if spec.Port != nil {
+			matchPort = *spec.Port
+		}
+		backends = append(backends, egress.BackendListener{
+			Name:      ls.Name,
+			Addr:      ls.BackendAddress,
+			Shape:     string(shape),
+			MatchPort: matchPort,
+			Priority:  clrkv1alpha1.ShapePriority(shape),
+		})
+	}
+	if len(backends) == 0 {
+		return nil, nil, nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready", namespace, egName)
+	}
+
+	var l4Routes clrkv1alpha1.EgressL4RouteList
+	if err := c.List(ctx, &l4Routes, client.InNamespace(namespace)); err != nil {
+		return nil, nil, nil, fmt.Errorf("list EgressL4Routes in %s: %w", namespace, err)
+	}
+	policy := router.SyncPolicy(eg, l4Routes.Items)
+
+	return caPEM, backends, policy, nil
+}
+
+// activeCountFor returns the number of in-flight executions for the
+// (parent) agent that owns the given AgentSandboxRevision. Used by the
+// heartbeat loop to publish per-worker accounting into Status.Workers.
+func (d *Dispatcher) ActiveCountFor(rev *clrkv1alpha1.AgentSandboxRevision) int32 {
+	agentName := rev.Labels[clrkv1alpha1.LabelAgent]
+	if agentName == "" {
+		return 0
+	}
+	return d.active.get(types.NamespacedName{Namespace: rev.Namespace, Name: agentName})
+}
+
+// runHTTP starts the dispatcher's HTTP server and returns when ctx is
+// cancelled. Server.Shutdown drains in-flight requests cleanly.
+func (d *Dispatcher) Run(ctx context.Context, addr string) error {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: d,
+		// No read/write timeouts: per-execution deadlines are enforced
+		// inside ServeHTTP via spec.timeoutSeconds, and streaming
+		// responses can run as long as the agent does (up to the cap).
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctrl.LoggerInto(context.Background(), ctrl.Log.WithName("dispatch"))
+		},
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
+	}
+}
