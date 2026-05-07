@@ -6,19 +6,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
-// HTTPInvoker invokes a TaskAgent by POSTing to the in-cluster Gateway URL
-// that the TaskAgentIngressReconciler materializes for it. Used by the cron
-// firer in production; tests inject a fake.
+// HTTPInvoker invokes a TaskAgent by POSTing directly to the WorkerPool's
+// in-cluster dispatch Service. Reads the Service's EndpointSlices and
+// dials a ready pod IP rather than the Service DNS — the
+// controller-manager runs outside the cluster in `clrk dev` and so
+// can't resolve `*.svc.cluster.local`, but the docker bridge / pod IPs
+// in EndpointSlices are routable in both modes (production: shared pod
+// CIDR; dev: shared docker network via the selectorless
+// Service+EndpointSlice bridge that `clrk dev` materializes for the
+// default WorkerPool).
 type HTTPInvoker struct {
 	Client client.Client
 	HTTP   *http.Client
@@ -35,11 +38,10 @@ func NewHTTPInvoker(c client.Client) *HTTPInvoker {
 }
 
 func (h *HTTPInvoker) Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, body []byte) error {
-	addr, err := h.resolveGatewayAddress(ctx, ta)
+	addr, err := h.dispatchAddress(ctx, ta)
 	if err != nil {
-		return fmt.Errorf("resolving Gateway address: %w", err)
+		return fmt.Errorf("resolving dispatch address: %w", err)
 	}
-
 	url := fmt.Sprintf("http://%s/", addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -47,13 +49,13 @@ func (h *HTTPInvoker) Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, bo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Clrk-Trigger", "cron")
+	req.Header.Set("X-Clrk-TaskAgent", ta.Namespace+"/"+ta.Name)
 
 	resp, err := h.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	// Drain so the connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("POST %s returned %d", url, resp.StatusCode)
@@ -61,67 +63,51 @@ func (h *HTTPInvoker) Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, bo
 	return nil
 }
 
-// resolveGatewayAddress reads the Gateway named after ta and picks the first
-// usable Status.Addresses entry. The Gateway is created by
-// TaskAgentIngressReconciler with name=ta.Name in ta.Namespace; Envoy
-// Gateway populates Status.Addresses with the LB / ClusterIP / hostname
-// once the listener is programmed.
-func (h *HTTPInvoker) resolveGatewayAddress(ctx context.Context, ta *clrkv1alpha1.TaskAgent) (string, error) {
-	var gw gwapiv1.Gateway
-	key := types.NamespacedName{Namespace: ta.Namespace, Name: ta.Name}
-	// Tight retry: Gateway.Status.Addresses can lag program-time by a few
-	// seconds after a fresh apply. Bound the total wait to the request
-	// context — the caller already enforces the per-fire timeout.
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		err := h.Client.Get(ctx, key, &gw)
-		if err == nil {
-			if addr, ok := pickAddress(gw.Status.Addresses, gatewayFirstListenerPort(&gw)); ok {
-				return addr, nil
-			}
-		} else if !apierrors.IsNotFound(err) {
-			return "", err
-		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return "", fmt.Errorf("Gateway %s not found within deadline: %w", key, err)
-			}
-			return "", fmt.Errorf("Gateway %s has no usable Status.Addresses", key)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(time.Second):
-		}
+// dispatchAddress lists the EndpointSlices for the WorkerPool's
+// dispatch Service and returns the first ready address with the
+// `dispatch` port. WorkerPoolDeploymentReconciler creates the
+// `{wp}-workers` Service (with a `dispatch` port) selecting worker
+// pods; the dev-mode bridge
+// (`drivers/k3s_docker.go::ApplyDefaultWorkerPoolBridge`) materializes
+// a selectorless Service+EndpointSlice with the same name, pointing
+// at worker docker IPs — same shape, same lookup.
+func (h *HTTPInvoker) dispatchAddress(ctx context.Context, ta *clrkv1alpha1.TaskAgent) (string, error) {
+	svcName := ta.Spec.WorkerPoolRef + "-workers"
+	var slices discoveryv1.EndpointSliceList
+	if err := h.Client.List(ctx, &slices,
+		client.InNamespace(ta.Namespace),
+		client.MatchingLabels{discoveryv1.LabelServiceName: svcName},
+	); err != nil {
+		return "", fmt.Errorf("list EndpointSlices for %s/%s: %w", ta.Namespace, svcName, err)
 	}
-}
-
-// pickAddress returns the first Hostname or IPAddress entry from addrs and
-// appends :port. Returns ok=false if no usable address was found.
-func pickAddress(addrs []gwapiv1.GatewayStatusAddress, port int32) (string, bool) {
-	for _, a := range addrs {
-		if a.Value == "" {
+	for i := range slices.Items {
+		s := &slices.Items[i]
+		var port int32
+		for _, p := range s.Ports {
+			if p.Name != nil && *p.Name == "dispatch" && p.Port != nil {
+				port = *p.Port
+				break
+			}
+		}
+		if port == 0 {
 			continue
 		}
-		if a.Type == nil {
-			return fmt.Sprintf("%s:%d", a.Value, port), true
-		}
-		switch *a.Type {
-		case gwapiv1.IPAddressType, gwapiv1.HostnameAddressType:
-			return fmt.Sprintf("%s:%d", a.Value, port), true
+		for _, ep := range s.Endpoints {
+			// Skip endpoints whose Conditions explicitly mark them
+			// not-ready. Nil Ready means "unknown" per the API; treat
+			// that as ready (matches kube-proxy's behavior).
+			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
+				continue
+			}
+			for _, ip := range ep.Addresses {
+				if ip == "" {
+					continue
+				}
+				return fmt.Sprintf("%s:%d", ip, port), nil
+			}
 		}
 	}
-	return "", false
-}
-
-// gatewayFirstListenerPort returns the port of gw's first listener,
-// defaulting to 80 when none is set (TaskAgentIngressReconciler always
-// creates one).
-func gatewayFirstListenerPort(gw *gwapiv1.Gateway) int32 {
-	for _, l := range gw.Spec.Listeners {
-		return int32(l.Port)
-	}
-	return 80
+	return "", fmt.Errorf("no ready dispatch endpoint for Service %s/%s", ta.Namespace, svcName)
 }
 
 // Compile-time assertion: HTTPInvoker satisfies TaskAgentInvoker.

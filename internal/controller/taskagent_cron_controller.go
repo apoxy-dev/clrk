@@ -60,6 +60,7 @@ type TaskAgentCronReconciler struct {
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
 func (r *TaskAgentCronReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -80,10 +81,13 @@ func (r *TaskAgentCronReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	specSched := *ta.Spec.Schedule
 	if r.entryMatches(req.NamespacedName, specSched) {
-		// No spec change — skip the parse and reuse the existing entry's
-		// timing. Status patch still runs to refresh ObservedGeneration.
-		return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionTrue, reasonScheduleRegistered,
-			fmt.Sprintf("Cron entry registered for %q", specSched))
+		// No spec change — refresh the timing fields but don't clobber
+		// the Scheduled condition. The fire path writes the
+		// informative "Last fire at X succeeded/failed" message, and
+		// the reconciler running on the resulting status update would
+		// otherwise immediately overwrite it with the registration
+		// boilerplate, hiding fire outcomes from any post-hoc reader.
+		return ctrl.Result{}, r.patchTiming(ctx, &ta)
 	}
 
 	sched, err := cron.ParseStandard(specSched)
@@ -151,6 +155,22 @@ func (r *TaskAgentCronReconciler) timing(key types.NamespacedName) (last, next *
 		next = &t
 	}
 	return last, next
+}
+
+// patchTiming refreshes only LastScheduleTime/NextScheduleTime on ta,
+// leaving the Scheduled condition untouched. Used on the steady-state
+// reconcile path so we don't overwrite the fire-path's status message
+// with registration boilerplate every time the apiserver echoes a
+// status update back to us.
+func (r *TaskAgentCronReconciler) patchTiming(ctx context.Context, ta *clrkv1alpha1.TaskAgent) error {
+	base := ta.DeepCopy()
+	last, next := r.timing(types.NamespacedName{Namespace: ta.Namespace, Name: ta.Name})
+	ta.Status.LastScheduleTime = last
+	ta.Status.NextScheduleTime = next
+	if err := r.Status().Patch(ctx, ta, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("patching schedule timing: %w", err)
+	}
+	return nil
 }
 
 // patchScheduled sets the Scheduled condition + LastScheduleTime/

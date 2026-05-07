@@ -5,6 +5,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -25,6 +26,10 @@ func init() {
 	// to start the watch sources for those owned types.
 	utilruntime.Must(corev1.AddToScheme(Scheme))
 	utilruntime.Must(appsv1.AddToScheme(Scheme))
+	// EndpointSlices: the cron HTTPInvoker lists them to find the
+	// WorkerPool dispatch endpoint without going through cluster DNS
+	// (controller-manager runs outside the cluster in clrk dev).
+	utilruntime.Must(discoveryv1.AddToScheme(Scheme))
 	utilruntime.Must(gwapiv1.Install(Scheme))
 	// Envoy Gateway EnvoyProxy is optional at runtime (the controller
 	// tolerates NoMatchError when the CRD is missing), but we still need
