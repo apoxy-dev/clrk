@@ -239,7 +239,20 @@ func ensureBaseSystemFiles(rootfs string) error {
 
 // extractLayer extracts a tar (optionally gzipped) layer into the rootfs directory,
 // handling OCI whiteout files for layer squashing.
+//
+// All filesystem operations are scoped to an *os.Root pinned at rootFS so that
+// neither path-traversal entries (../foo, /etc/passwd) nor symlinks created by
+// earlier entries can escape rootFS. A prefix check on filepath.Clean alone is
+// not sufficient: it accepts sibling paths sharing the prefix (e.g. a peer
+// "rootfs-evil" directory next to "rootfs"), and it does not constrain
+// resolution through attacker-controlled symlinks at intermediate components.
 func extractLayer(rootFS string, data []byte, mediaType string) error {
+	root, err := os.OpenRoot(rootFS)
+	if err != nil {
+		return fmt.Errorf("opening rootfs: %w", err)
+	}
+	defer root.Close()
+
 	var r io.Reader = bytes.NewReader(data)
 
 	// Handle gzip-compressed layers.
@@ -252,8 +265,6 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 		r = gr
 	}
 
-	cleanRoot := filepath.Clean(rootFS)
-
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -264,71 +275,78 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 			return fmt.Errorf("reading tar header: %w", err)
 		}
 
-		// Handle OCI whiteout files.
-		base := filepath.Base(hdr.Name)
-		dir := filepath.Dir(hdr.Name)
+		// Skip entries we can't safely place under rootFS: absolute paths and
+		// any path that escapes the archive root via "..". *os.Root would
+		// reject these too, but rejecting up front keeps a single malicious
+		// entry from aborting extraction of the whole layer.
+		name := filepath.Clean(hdr.Name)
+		if name == "" || name == "." {
+			continue
+		}
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			continue
+		}
+
+		base := filepath.Base(name)
+		dir := filepath.Dir(name)
 		if base == ".wh..wh..opq" {
 			// Opaque whiteout: remove all children of this directory.
-			target := filepath.Join(rootFS, dir)
-			if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
+			entries, err := fs.ReadDir(root.FS(), dir)
+			if err != nil {
 				continue
 			}
-			entries, _ := os.ReadDir(target)
 			for _, e := range entries {
-				os.RemoveAll(filepath.Join(target, e.Name()))
+				_ = root.RemoveAll(filepath.Join(dir, e.Name()))
 			}
 			continue
 		}
 		if strings.HasPrefix(base, ".wh.") {
 			// File whiteout: remove the named file.
-			target := filepath.Join(rootFS, dir, strings.TrimPrefix(base, ".wh."))
-			if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
-				continue
-			}
-			os.RemoveAll(target)
-			continue
-		}
-
-		target := filepath.Join(rootFS, hdr.Name)
-		// Guard against path traversal.
-		if !strings.HasPrefix(filepath.Clean(target), cleanRoot) {
+			_ = root.RemoveAll(filepath.Join(dir, strings.TrimPrefix(base, ".wh.")))
 			continue
 		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
-				return fmt.Errorf("creating directory %s: %w", target, err)
+			if err := root.MkdirAll(name, os.FileMode(hdr.Mode)); err != nil {
+				return fmt.Errorf("creating directory %s: %w", name, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("creating parent dir for %s: %w", target, err)
+			if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
+				return fmt.Errorf("creating parent dir for %s: %w", name, err)
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			// Drop any pre-existing entry first: an O_CREATE|O_TRUNC open
+			// would otherwise follow a symlink left by a prior layer and
+			// truncate its (in-root) target instead of replacing the entry.
+			_ = root.Remove(name)
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
 			if err != nil {
-				return fmt.Errorf("creating file %s: %w", target, err)
+				return fmt.Errorf("creating file %s: %w", name, err)
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
-				return fmt.Errorf("writing file %s: %w", target, err)
+				return fmt.Errorf("writing file %s: %w", name, err)
 			}
 			f.Close()
 		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("creating parent dir for symlink %s: %w", target, err)
+			if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
+				return fmt.Errorf("creating parent dir for symlink %s: %w", name, err)
 			}
-			os.Remove(target) // Remove existing symlink if any.
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return fmt.Errorf("creating symlink %s: %w", target, err)
+			_ = root.Remove(name)
+			if err := root.Symlink(hdr.Linkname, name); err != nil {
+				return fmt.Errorf("creating symlink %s: %w", name, err)
 			}
 		case tar.TypeLink:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("creating parent dir for hardlink %s: %w", target, err)
+			if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
+				return fmt.Errorf("creating parent dir for hardlink %s: %w", name, err)
 			}
-			linkTarget := filepath.Join(rootFS, hdr.Linkname)
-			os.Remove(target)
-			if err := os.Link(linkTarget, target); err != nil {
-				return fmt.Errorf("creating hardlink %s: %w", target, err)
+			linkSrc := filepath.Clean(hdr.Linkname)
+			if filepath.IsAbs(linkSrc) || linkSrc == ".." || strings.HasPrefix(linkSrc, ".."+string(filepath.Separator)) {
+				continue
+			}
+			_ = root.Remove(name)
+			if err := root.Link(linkSrc, name); err != nil {
+				return fmt.Errorf("creating hardlink %s: %w", name, err)
 			}
 		}
 	}
