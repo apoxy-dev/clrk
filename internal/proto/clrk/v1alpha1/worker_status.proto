@@ -13,7 +13,7 @@ syntax = "proto3";
 
 package clrk.v1alpha1;
 
-option go_package = "github.com/apoxy-dev/clrk/proto/clrk/v1alpha1;workerstatusv1alpha1";
+option go_package = "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1;workerstatusv1alpha1";
 
 service WorkerStatusService {
   rpc Watch(WatchRequest) returns (stream WorkerStatus);

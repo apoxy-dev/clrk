@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/proto/clrk/v1alpha1"
+	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1"
 )
 
 // statusHeartbeat is the floor cadence at which the worker sends a

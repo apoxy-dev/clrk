@@ -29,7 +29,7 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/ports"
-	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/proto/clrk/v1alpha1"
+	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1"
 )
 
 // healthcheckerSyncInterval is how often the top-level loop reconciles
