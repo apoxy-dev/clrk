@@ -1,4 +1,13 @@
-package controller
+// Package healthcheck streams every worker pod's WorkerStatusService
+// state into an in-memory map and exposes Pick for the ingress
+// ext_proc to choose a per-execution worker.
+//
+// Lives in its own package — distinct from internal/controller — so
+// the proto dependency only pollutes the bazel-built controller-
+// manager binary, not anything cmd/clrk transitively imports. Per
+// memory feedback_clrk_standalone_build, generated *.pb.go are not
+// committed to this repo; only cmd/clrk must build standalone.
+package healthcheck
 
 import (
 	"context"
@@ -19,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/ports"
 	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/proto/clrk/v1alpha1"
 )
 
@@ -175,7 +185,7 @@ func (h *WorkerHealthChecker) syncPoolEndpoints(ctx context.Context, ps *workerP
 		s := &slices.Items[i]
 		hasStatusPort := false
 		for _, p := range s.Ports {
-			if p.Name != nil && *p.Name == "status" && p.Port != nil && *p.Port == WorkerStatusPort {
+			if p.Name != nil && *p.Name == "status" && p.Port != nil && *p.Port == ports.WorkerStatusPort {
 				hasStatusPort = true
 				break
 			}
@@ -227,7 +237,7 @@ func (h *WorkerHealthChecker) runWorkerStream(ctx context.Context, pool types.Na
 	log := ctrl.LoggerFrom(ctx).WithName("worker-healthchecker.stream").
 		WithValues("pool", pool, "ip", ws.podIP)
 
-	addr := fmt.Sprintf("%s:%d", ws.podIP, WorkerStatusPort)
+	addr := fmt.Sprintf("%s:%d", ws.podIP, ports.WorkerStatusPort)
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
@@ -420,7 +430,7 @@ func (h *WorkerHealthChecker) Pick(pool types.NamespacedName, ns, agent, revisio
 		return hi < hj
 	})
 
-	return PickResult{Addr: fmt.Sprintf("%s:%d", cands[0].ip, DispatchPort)}, true
+	return PickResult{Addr: fmt.Sprintf("%s:%d", cands[0].ip, ports.DispatchPort)}, true
 }
 
 func pickHash(tieBreaker, ip string) uint64 {

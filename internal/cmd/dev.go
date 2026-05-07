@@ -24,9 +24,9 @@ import (
 	"github.com/apoxy-dev/clrk/internal/cmd/devagents"
 	"github.com/apoxy-dev/clrk/internal/cmd/devotel"
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
-	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/drivers"
 	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // devOtelPort is the host TCP port the in-process OTLP/HTTP receiver
@@ -521,7 +521,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		}
 		workerIPs = append(workerIPs, ip)
 	}
-	if err := state.k3s.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, clrkcontroller.DispatchPort); err != nil {
+	if err := state.k3s.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, ports.DispatchPort); err != nil {
 		return state, fmt.Errorf("bridging default WorkerPool dispatch port: %w", err)
 	}
 	if len(o.parsedSecrets) > 0 {

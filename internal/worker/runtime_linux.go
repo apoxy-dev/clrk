@@ -9,8 +9,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 const (
@@ -87,7 +87,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Start the dispatcher HTTP server. Failures get logged; the
 	// daemon side stays up so DaemonAgents keep running even if the
 	// dispatcher port is busy or misconfigured.
-	dispatchAddr := fmt.Sprintf(":%d", clrkcontroller.DispatchPort)
+	dispatchAddr := fmt.Sprintf(":%d", ports.DispatchPort)
 	go func() {
 		if err := disp.Run(ctx, dispatchAddr); err != nil {
 			log.Error(err, "Dispatcher HTTP server exited", "addr", dispatchAddr)
@@ -97,7 +97,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Start the worker status gRPC server. controller-manager opens
 	// one Watch stream per pod (sourced from the WorkerPool's
 	// EndpointSlice) and feeds the in-memory routing state map.
-	statusAddr := fmt.Sprintf(":%d", clrkcontroller.WorkerStatusPort)
+	statusAddr := fmt.Sprintf(":%d", ports.WorkerStatusPort)
 	statusSvc := NewStatusService(sandboxMgr, imageStore, active)
 	go func() {
 		if err := RunStatusServer(ctx, statusAddr, statusSvc); err != nil {

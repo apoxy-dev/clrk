@@ -33,3 +33,10 @@ go.work.sum
 
 /controller-manager
 .claude/
+
+# Generated protobuf Go output. Source `.proto` files live under
+# proto/, the generated `*.pb.go` and `*_grpc.pb.go` are emitted by
+# apoxy-cloud bazel codegen targets at build time and not checked in.
+# Only `cmd/clrk` must build standalone via `go build`, and it does
+# not import any proto packages.
+proto/**/*.pb.go

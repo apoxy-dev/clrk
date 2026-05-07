@@ -28,6 +28,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
+	"github.com/apoxy-dev/clrk/internal/healthcheck"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/crds"
 )
@@ -178,7 +179,7 @@ func main() {
 	// Run in every mode (not gated on --ingress-controller) so even
 	// the cron-only/dispatch-only paths can read consistent in-flight
 	// state.
-	healthChecker := controller.NewWorkerHealthChecker(cm.GetClient())
+	healthChecker := healthcheck.NewWorkerHealthChecker(cm.GetClient())
 	if err := cm.Add(healthChecker); err != nil {
 		log.Error(err, "Unable to add worker health checker")
 		os.Exit(1)

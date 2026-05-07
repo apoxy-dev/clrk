@@ -24,7 +24,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/healthcheck"
 )
 
 // Header names. X-Clrk-TaskAgent matches what
@@ -36,10 +36,10 @@ const (
 	headerExecutionID    = "X-Clrk-Execution-ID"
 )
 
-// Picker is the subset of WorkerHealthChecker the server depends on.
-// Defined here so unit tests can supply a fake.
+// Picker is the subset of healthcheck.WorkerHealthChecker the
+// server depends on. Defined here so unit tests can supply a fake.
 type Picker interface {
-	Pick(pool types.NamespacedName, ns, agent, revision string, maxConcurrent uint32, tieBreaker string) (controller.PickResult, bool)
+	Pick(pool types.NamespacedName, ns, agent, revision string, maxConcurrent uint32, tieBreaker string) (healthcheck.PickResult, bool)
 }
 
 // Server implements envoy.service.ext_proc.v3.ExternalProcessor for
