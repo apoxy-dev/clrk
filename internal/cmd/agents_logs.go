@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 
-	"github.com/apoxy-dev/clrk/internal/worker"
+	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
 var agentSandboxRevisionGVR = schema.GroupVersionResource{Group: "clrk.apoxy.dev", Version: "v1alpha1", Resource: "agentsandboxrevisions"}
@@ -103,7 +103,7 @@ func streamAgentLogs(ctx context.Context, stdout, stderr io.Writer, dyn dynamic.
 	if err != nil {
 		return err
 	}
-	logPath := worker.AgentLogPath(worker.WorkerLogsDir, ns, name)
+	logPath := workerlog.AgentPath(workerlog.Dir, ns, name)
 
 	if isDevKubeconfig(kubeconfig) {
 		return tailDockerLog(ctx, stdout, pod, logPath, follow, tailLines)

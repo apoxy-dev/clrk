@@ -3,10 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
@@ -39,24 +37,6 @@ type SandboxRuntime interface {
 	Stop(ctx context.Context, id SandboxID) error
 	Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error)
 	Delete(ctx context.Context, id SandboxID) error
-}
-
-// WorkerLogsDir is the path inside a worker container where per-agent
-// stdio is teed for `clrk agents logs` to `tail -F` via docker exec /
-// kubectl exec. Untagged so the CLI on darwin can reference it without
-// pulling in the linux-only runtime.
-const WorkerLogsDir = "/run/clrk/logs"
-
-// AgentLogPath returns the on-disk file the worker tees agent stdio to,
-// shaped so `clrk agents logs` can construct the same path it asks the
-// worker container to `tail -F`. Per-agent (not per-sandbox) so
-// restarts append to the same file and the CLI doesn't have to chase
-// SandboxID generations.
-func AgentLogPath(rootDir, namespace, name string) string {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return filepath.Join(rootDir, fmt.Sprintf("%s__%s.log", namespace, name))
 }
 
 // SandboxID uniquely identifies a sandbox instance within a worker.

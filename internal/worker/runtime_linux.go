@@ -11,13 +11,14 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/ports"
+	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
 const (
 	clrkStateDir  = "/run/clrk/state"
 	clrkRootDir   = "/run/clrk/rootfs"
 	clrkImagesDir = "/run/clrk/images"
-	clrkLogsDir   = WorkerLogsDir
+	clrkLogsDir   = workerlog.Dir
 
 	heartbeatInterval = 30 * time.Second
 )

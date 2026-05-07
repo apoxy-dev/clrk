@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
 // sandboxLineWriter is an io.Writer that splits incoming bytes on '\n'
@@ -102,6 +104,6 @@ func openAgentLogFile(rootDir, namespace, name string) (*os.File, error) {
 	if rootDir == "" {
 		return nil, fmt.Errorf("logs dir not configured")
 	}
-	return os.OpenFile(AgentLogPath(rootDir, namespace, name),
+	return os.OpenFile(workerlog.AgentPath(rootDir, namespace, name),
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 }
