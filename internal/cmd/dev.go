@@ -24,6 +24,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/cmd/devagents"
 	"github.com/apoxy-dev/clrk/internal/cmd/devotel"
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
+	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/drivers"
 	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
 )
@@ -506,6 +507,22 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 	if err := bootstrapDefaultWorkerPool(ctx, state.k3s.HostKubeconfigPath()); err != nil {
 		return state, fmt.Errorf("bootstrapping default WorkerPool: %w", err)
+	}
+	// Bridge the default WorkerPool's dispatch port into k3s so
+	// in-cluster pods (e.g. integration tests, future cron-fired
+	// invokers) can dial workers by Service DNS the same way they
+	// would in cluster mode. WorkerPoolDeploymentReconciler creates
+	// this Service in cluster mode but isn't wired in clrk dev.
+	workerIPs := make([]string, 0, len(state.workers))
+	for _, w := range state.workers {
+		ip, err := dockerutils.IPOnNetwork(ctx, w.Name(), drivers.NetworkName)
+		if err != nil {
+			return state, fmt.Errorf("getting worker IP for %s: %w", w.Name(), err)
+		}
+		workerIPs = append(workerIPs, ip)
+	}
+	if err := state.k3s.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, clrkcontroller.DispatchPort); err != nil {
+		return state, fmt.Errorf("bridging default WorkerPool dispatch port: %w", err)
 	}
 	if len(o.parsedSecrets) > 0 {
 		if err := applySecretSpecs(ctx, state.k3s.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {

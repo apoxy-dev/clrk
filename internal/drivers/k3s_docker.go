@@ -271,6 +271,60 @@ func (d *K3sDriver) KubectlApply(ctx context.Context, source string, stdin []byt
 	return nil
 }
 
+// ApplyDefaultWorkerPoolBridge wires a `default-workers` Service in
+// the default namespace to the worker docker container(s) so
+// in-cluster pods can dial the dispatcher by the same DNS name the
+// WorkerPoolDeploymentReconciler would use in cluster mode
+// (`{wp.Name}-workers`). Without this bridge clrk dev has no way to
+// reach the worker dispatch port from inside k3s — the worker runs
+// as a docker container outside the pod network.
+//
+// Called once per bringUp after every worker container is up and its
+// docker-network IP is known.
+func (d *K3sDriver) ApplyDefaultWorkerPoolBridge(ctx context.Context, workerIPs []string, dispatchPort int32) error {
+	if len(workerIPs) == 0 {
+		return nil
+	}
+	yaml := workerBridge("default", "default-workers", workerIPs, dispatchPort)
+	return d.KubectlApply(ctx, "-", []byte(yaml))
+}
+
+// workerBridge renders a selectorless Service + multi-address
+// Endpoints fronting one or more worker docker IPs under the same
+// DNS name a real WorkerPool's Service would have. Single port
+// named "dispatch" matching the controller's Service spec.
+func workerBridge(ns, name string, ips []string, port int32) string {
+	addrs := ""
+	for _, ip := range ips {
+		addrs += fmt.Sprintf("      - ip: %s\n", ip)
+	}
+	return fmt.Sprintf(`apiVersion: v1
+kind: Service
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  ports:
+    - name: dispatch
+      port: %d
+      protocol: TCP
+      targetPort: %d
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: %s
+  namespace: %s
+subsets:
+  - addresses:
+%s    ports:
+      - name: dispatch
+        port: %d
+        protocol: TCP
+---
+`, name, ns, port, port, name, ns, addrs, port)
+}
+
 // ApplyControllerManagerBridge wires two selectorless Services to the
 // clrk-controller-manager docker container so in-cluster pods can dial
 // it by DNS name:
