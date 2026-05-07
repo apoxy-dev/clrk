@@ -158,13 +158,6 @@ func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podNam
 // the counter independently.
 func NewActiveCounter() *activeCounter { return newActiveCounter() }
 
-// Active returns the count of in-flight executions for the agent
-// identified by ns/name. Test-only accessor; production code reads
-// the count via the heartbeat path.
-func (c *activeCounter) Active(ns, name string) int32 {
-	return c.get(types.NamespacedName{Namespace: ns, Name: name})
-}
-
 // acquire returns a release func on success or nil if the per-TaskAgent
 // MaxConcurrent cap is full. cap == 0 means unlimited (no semaphore
 // allocated).
