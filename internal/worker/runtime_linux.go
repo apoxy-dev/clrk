@@ -59,12 +59,14 @@ func (r *Runtime) Start(ctx context.Context) error {
 	active := NewActiveCounter()
 	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active)
 
-	// Set up SandboxState watcher.
+	// Set up SandboxState watcher. The dispatcher reference is no
+	// longer needed — ActiveExecutions accounting moved to the
+	// WorkerStatusService gRPC stream consumed by the controller.
+	_ = disp
 	watcher := &sandboxWatcher{
 		Client:     r.Client,
 		sandboxMgr: sandboxMgr,
 		daemonMgr:  daemonMgr,
-		dispatcher: disp,
 		poolName:   r.PoolName,
 		podName:    r.PodName,
 		namespace:  r.Namespace,
@@ -92,7 +94,18 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}()
 
-	log.Info("Worker runtime started", "dispatchAddr", dispatchAddr)
+	// Start the worker status gRPC server. controller-manager opens
+	// one Watch stream per pod (sourced from the WorkerPool's
+	// EndpointSlice) and feeds the in-memory routing state map.
+	statusAddr := fmt.Sprintf(":%d", clrkcontroller.WorkerStatusPort)
+	statusSvc := NewStatusService(sandboxMgr, imageStore, active)
+	go func() {
+		if err := RunStatusServer(ctx, statusAddr, statusSvc); err != nil {
+			log.Error(err, "Worker status server exited", "addr", statusAddr)
+		}
+	}()
+
+	log.Info("Worker runtime started", "dispatchAddr", dispatchAddr, "statusAddr", statusAddr)
 
 	// Block until context is cancelled.
 	<-ctx.Done()

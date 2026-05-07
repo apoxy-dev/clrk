@@ -28,7 +28,7 @@ import (
 //go:embed gateway-api/experimental-install-v1.2.1.yaml
 var gatewayAPIYAML []byte
 
-//go:embed envoy-gateway/crds-v1.1.3.yaml
+//go:embed envoy-gateway/crds-v1.4.0.yaml
 var envoyGatewayYAML []byte
 
 // envoyGatewayNamespaceYAML is the envoy-gateway-system namespace EG

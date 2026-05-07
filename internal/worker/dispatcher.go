@@ -46,22 +46,27 @@ const (
 )
 
 // activeCounter tracks in-flight TaskAgent executions per
-// (taskAgentNS, taskAgentName). The heartbeat loop snapshots it and
-// projects the per-(agent, worker) count into
-// AgentSandboxRevision.Status.Workers[i].ActiveExecutions.
+// (taskAgentNS, taskAgentName). The WorkerStatusService streams the
+// snapshot to the controller-manager which feeds it into the ingress
+// ext_proc cluster-wide MaxConcurrent enforcement.
 type activeCounter struct {
-	mu     sync.Mutex
-	counts map[types.NamespacedName]int32
+	mu       sync.Mutex
+	counts   map[types.NamespacedName]int32
+	notifier *changeNotifier
 }
 
 func newActiveCounter() *activeCounter {
-	return &activeCounter{counts: make(map[types.NamespacedName]int32)}
+	return &activeCounter{
+		counts:   make(map[types.NamespacedName]int32),
+		notifier: newChangeNotifier(),
+	}
 }
 
 func (c *activeCounter) inc(key types.NamespacedName) {
 	c.mu.Lock()
 	c.counts[key]++
 	c.mu.Unlock()
+	c.notifier.broadcast()
 }
 
 func (c *activeCounter) dec(key types.NamespacedName) {
@@ -73,6 +78,7 @@ func (c *activeCounter) dec(key types.NamespacedName) {
 		delete(c.counts, key)
 	}
 	c.mu.Unlock()
+	c.notifier.broadcast()
 }
 
 // get returns the current count for key (0 if absent).
@@ -80,6 +86,29 @@ func (c *activeCounter) get(key types.NamespacedName) int32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.counts[key]
+}
+
+// snapshot returns a copy of all (key, count) pairs. Used by the
+// WorkerStatusService to build a stream message.
+func (c *activeCounter) snapshot() map[types.NamespacedName]int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[types.NamespacedName]int32, len(c.counts))
+	for k, v := range c.counts {
+		out[k] = v
+	}
+	return out
+}
+
+// Notifier returns the change notifier for this counter so external
+// publishers (e.g. the WorkerStatusService) can subscribe to inc/dec
+// events.
+func (c *activeCounter) Notifier() *changeNotifier { return c.notifier }
+
+// Snapshot is the exported equivalent of snapshot for the
+// WorkerStatusService.
+func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
+	return c.snapshot()
 }
 
 // Dispatcher serves inbound TaskAgent execution requests routed to
@@ -486,17 +515,6 @@ func resolveEgressForExecution(ctx context.Context, c client.Client, router *egr
 	policy := router.SyncPolicy(eg, l4Routes.Items)
 
 	return caPEM, backends, policy, nil
-}
-
-// activeCountFor returns the number of in-flight executions for the
-// (parent) agent that owns the given AgentSandboxRevision. Used by the
-// heartbeat loop to publish per-worker accounting into Status.Workers.
-func (d *Dispatcher) ActiveCountFor(rev *clrkv1alpha1.AgentSandboxRevision) int32 {
-	agentName := rev.Labels[clrkv1alpha1.LabelAgent]
-	if agentName == "" {
-		return 0
-	}
-	return d.active.get(types.NamespacedName{Namespace: rev.Namespace, Name: agentName})
 }
 
 // runHTTP starts the dispatcher's HTTP server and returns when ctx is

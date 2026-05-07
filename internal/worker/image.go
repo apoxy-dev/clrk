@@ -55,6 +55,20 @@ func NewImageStore(baseDir string) *ImageStore {
 	}
 }
 
+// CachedRefs returns the image references currently resident in the
+// store. The controller-side health-checker uses this list to prefer a
+// worker that already has a revision's image when picking a dispatch
+// target.
+func (s *ImageStore) CachedRefs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	refs := make([]string, 0, len(s.images))
+	for ref := range s.images {
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
 // EnsureImage pulls and extracts the OCI image if not cached.
 // Returns image info including the path to the extracted rootfs directory.
 // Concurrent calls for the same imageRef are deduplicated via singleflight.

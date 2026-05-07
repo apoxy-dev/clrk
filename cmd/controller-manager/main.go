@@ -27,6 +27,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egextension"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
+	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/crds"
 )
@@ -59,6 +60,9 @@ func main() {
 		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.Listeners[*].BackendAddress entries are published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
 		envoyGatewayBinary = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
 		crdInstallMode    = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
+		ingressExtProcAddr = flag.String("ingress-extproc-addr", ":9444", "Bind address for the ingress (TaskAgent) ext_proc gRPC server. Per-TA EnvoyExtensionPolicy points at this server via a per-namespace Backend.")
+		ingressExtProcHost = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
+		ingressExtProcPort = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -167,10 +171,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// WorkerHealthChecker streams every worker pod's status RPC into
+	// an in-memory map. The ingress ext_proc consults Pick() per
+	// inbound request to route to a worker that already has the
+	// revision warm/cached, and to enforce cluster-wide MaxConcurrent.
+	// Run in every mode (not gated on --ingress-controller) so even
+	// the cron-only/dispatch-only paths can read consistent in-flight
+	// state.
+	healthChecker := controller.NewWorkerHealthChecker(cm.GetClient())
+	if err := cm.Add(healthChecker); err != nil {
+		log.Error(err, "Unable to add worker health checker")
+		os.Exit(1)
+	}
+
 	if *ingressController {
+		if *ingressExtProcHost == "" {
+			log.Error(fmt.Errorf("--ingress-extproc-host is required when --ingress-controller is on"), "Missing required flag")
+			os.Exit(1)
+		}
 		if err := (&controller.TaskAgentIngressReconciler{
-			Client: cm.GetClient(),
-			Scheme: cm.GetScheme(),
+			Client:             cm.GetClient(),
+			Scheme:             cm.GetScheme(),
+			IngressExtProcHost: *ingressExtProcHost,
+			IngressExtProcPort: int32(*ingressExtProcPort),
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "TaskAgentIngress")
 			os.Exit(1)
@@ -243,6 +266,25 @@ func main() {
 		defer cancel()
 		extprocSrv.Stop(shutCtx)
 	}()
+
+	// Ingress ext_proc — separate gRPC listener so the egress and
+	// ingress ExternalProcessor service registrations don't collide.
+	// Only useful when the ingress controller is on (no per-TA EG
+	// policy points here otherwise), but cheap to run unconditionally.
+	ingressLis, err := net.Listen("tcp", *ingressExtProcAddr)
+	if err != nil {
+		log.Error(err, "Unable to bind ingress ext_proc listener", "addr", *ingressExtProcAddr)
+		os.Exit(1)
+	}
+	ingressGRPC := grpc.NewServer()
+	extprocv3.RegisterExternalProcessorServer(ingressGRPC, ingressextproc.New(cm.GetClient(), healthChecker))
+	go func() {
+		slog.Info("Serving ingress ext_proc gRPC", "addr", ingressLis.Addr().String())
+		if err := ingressGRPC.Serve(ingressLis); err != nil {
+			log.Error(err, "Ingress ext_proc gRPC server exited")
+		}
+	}()
+	defer ingressGRPC.GracefulStop()
 
 	egErrCh := make(chan error, 1)
 	if clusterCfg != nil && (*ingressController || *egController) {

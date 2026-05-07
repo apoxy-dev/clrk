@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.2.2+incompatible
 	github.com/dpeckett/contextio v0.5.1
-	github.com/envoyproxy/gateway v0.5.0-rc.1.0.20240618131507-bdff5d56b59d
+	github.com/envoyproxy/gateway v1.4.0
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/k3s-io/kine v0.14.11
 	github.com/mattn/go-sqlite3 v1.14.42
@@ -110,7 +110,7 @@ require (
 	github.com/nats-io/nats.go v1.48.0 // indirect
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8 // indirect
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect

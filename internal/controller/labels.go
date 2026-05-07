@@ -29,6 +29,20 @@ const (
 // (default routingType=Endpoint) and load-balances across worker pods.
 const DispatchPort int32 = 8090
 
+// WorkerStatusPort is the gRPC port each worker pod serves
+// WorkerStatusService on. The controller-manager opens one Watch
+// stream per pod sourced from the WorkerPool's EndpointSlice and
+// feeds the in-memory state map that the ingress ext_proc consults.
+const WorkerStatusPort int32 = 8091
+
+// IngressExtProcBackendName is the name of the per-namespace EG
+// Backend that the per-TaskAgent EnvoyExtensionPolicy points its
+// extProc.backendRefs at. The Backend's FQDN/IP+port is filled in
+// by the ingress controller from the `--ingress-extproc-host` /
+// `--ingress-extproc-port` flags so EG can reach the controller-
+// manager's ingress ext_proc gRPC server.
+const IngressExtProcBackendName = "clrk-ingress-extproc"
+
 // Status.Conditions Type values written across the split reconcilers.
 // Distinct values matter: meta.SetStatusCondition matches by Type, so each
 // reconciler half (revision/ingress for TaskAgent, status/deployment for

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,21 +13,42 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
-// TaskAgentIngressReconciler owns the k8s-side half of TaskAgent: it
-// creates a Gateway + HTTPRoute to front the agent's HTTP trigger. It is
-// only useful when Gateway API is available in the cluster; wire it in
-// cluster mode only.
+// TaskAgentIngressReconciler owns the k8s-side half of TaskAgent.
+//
+// Per-TaskAgent it materializes:
+//   - a Gateway (one HTTP listener) and HTTPRoute (per-TA path tree)
+//   - an EG `Backend` of `type: DynamicResolver` — EG generates a
+//     dynamic_forward_proxy cluster that dials whatever `:authority`
+//     the request carries, so the HTTPRoute backendRef is this object
+//     instead of a static Service
+//   - an `EnvoyExtensionPolicy` attaching the controller-manager's
+//     ingress ext_proc onto the per-TA HTTPRoute
+//
+// Per TaskAgent's namespace it also materializes a shared
+// `clrk-ingress-extproc` Backend pointing at the controller-manager's
+// ingress ext_proc gRPC service (FQDN + port from
+// IngressExtProc{Host,Port}). One Backend per namespace keeps the
+// ExtensionPolicy backendRef short and re-targetable from a single
+// place.
 type TaskAgentIngressReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// IngressExtProcHost / IngressExtProcPort point at the
+	// controller-manager's ingress ext_proc gRPC endpoint. Wired from
+	// `--ingress-extproc-host` / `--ingress-extproc-port`.
+	IngressExtProcHost string
+	IngressExtProcPort int32
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends;envoyextensionpolicies,verbs=get;list;watch;create;update;patch
 
 func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ta clrkv1alpha1.TaskAgent
@@ -64,6 +86,30 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, gatewayReady)
 
+	// Per-TA DynamicResolver Backend. EG generates a
+	// dynamic_forward_proxy cluster with no static endpoints; the
+	// host:port to dial comes from the request `:authority`, which
+	// the ingress ext_proc rewrites per request to the worker pod
+	// picked by WorkerHealthChecker.
+	dynBackend := &egv1alpha1.Backend{ObjectMeta: metav1.ObjectMeta{Name: dynamicBackendName(&ta), Namespace: ta.Namespace}}
+	if err := createOrUpdateWithRetry(ctx, r.Client, dynBackend, func() error {
+		desired := desiredDynamicResolverBackend(&ta)
+		dynBackend.Labels = desired.Labels
+		dynBackend.Spec = desired.Spec
+		return ctrl.SetControllerReference(&ta, dynBackend, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling DynamicResolver Backend: %w", err)
+	}
+
+	// Per-namespace shared Backend pointing at the controller-manager's
+	// ingress ext_proc gRPC endpoint. Reconciled by every TaskAgent in
+	// the namespace; idempotent SSA. Owner ref left blank so the
+	// Backend survives any single TA's deletion (other TAs in the
+	// namespace still need it).
+	if err := r.reconcileExtProcBackend(ctx, ta.Namespace); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling ingress ext_proc Backend: %w", err)
+	}
+
 	hr := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: ta.Name, Namespace: ta.Namespace}}
 	if err := createOrUpdateWithRetry(ctx, r.Client, hr, func() error {
 		desired := desiredHTTPRoute(&ta)
@@ -74,11 +120,51 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("reconciling HTTPRoute: %w", err)
 	}
 
+	// Per-TA EnvoyExtensionPolicy attaching the ingress ext_proc onto
+	// the per-TA HTTPRoute.
+	pol := &egv1alpha1.EnvoyExtensionPolicy{ObjectMeta: metav1.ObjectMeta{Name: extProcPolicyName(&ta), Namespace: ta.Namespace}}
+	if err := createOrUpdateWithRetry(ctx, r.Client, pol, func() error {
+		desired := desiredExtProcPolicy(&ta)
+		pol.Labels = desired.Labels
+		pol.Spec = desired.Spec
+		return ctrl.SetControllerReference(&ta, pol, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling EnvoyExtensionPolicy: %w", err)
+	}
+
 	if err := r.Status().Patch(ctx, &ta, client.MergeFrom(taStatusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// reconcileExtProcBackend ensures a per-namespace EG Backend pointing
+// at the controller-manager's ingress ext_proc gRPC endpoint exists.
+// FQDN is preferred (in-cluster Service DNS); IP also accepted via
+// flag. Owner-ref-less so the Backend stays around as long as any
+// TaskAgent in the namespace needs it; orphan cleanup is a follow-up.
+func (r *TaskAgentIngressReconciler) reconcileExtProcBackend(ctx context.Context, namespace string) error {
+	if r.IngressExtProcHost == "" || r.IngressExtProcPort == 0 {
+		return fmt.Errorf("ingress ext_proc host/port not configured")
+	}
+	be := &egv1alpha1.Backend{ObjectMeta: metav1.ObjectMeta{Name: IngressExtProcBackendName, Namespace: namespace}}
+	return createOrUpdateWithRetry(ctx, r.Client, be, func() error {
+		be.Labels = map[string]string{
+			labelComponent: "ingress-extproc",
+		}
+		be.Spec = egv1alpha1.BackendSpec{
+			Endpoints: []egv1alpha1.BackendEndpoint{
+				{
+					FQDN: &egv1alpha1.FQDNEndpoint{
+						Hostname: r.IngressExtProcHost,
+						Port:     r.IngressExtProcPort,
+					},
+				},
+			},
+		}
+		return nil
+	})
 }
 
 func gatewayProgrammed(gw *gwapiv1.Gateway) bool {
@@ -96,7 +182,89 @@ func (r *TaskAgentIngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&clrkv1alpha1.TaskAgent{}).
 		Owns(&gwapiv1.Gateway{}).
 		Owns(&gwapiv1.HTTPRoute{}).
+		Owns(&egv1alpha1.Backend{}).
+		Owns(&egv1alpha1.EnvoyExtensionPolicy{}).
 		Complete(r)
+}
+
+func dynamicBackendName(ta *clrkv1alpha1.TaskAgent) string { return ta.Name + "-resolver" }
+func extProcPolicyName(ta *clrkv1alpha1.TaskAgent) string  { return ta.Name + "-ext-proc" }
+
+func desiredDynamicResolverBackend(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.Backend {
+	dr := egv1alpha1.BackendTypeDynamicResolver
+	return &egv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dynamicBackendName(ta),
+			Namespace: ta.Namespace,
+			Labels: map[string]string{
+				labelAgent:     ta.Name,
+				labelComponent: "ingress",
+			},
+		},
+		Spec: egv1alpha1.BackendSpec{
+			Type: &dr,
+		},
+	}
+}
+
+func desiredExtProcPolicy(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.EnvoyExtensionPolicy {
+	beGroup := gwapiv1.Group(envoyGatewayGroup)
+	beKind := gwapiv1.Kind(egv1alpha1.KindBackend)
+	beName := gwapiv1.ObjectName(IngressExtProcBackendName)
+	beNs := gwapiv1.Namespace(ta.Namespace)
+	bePort := gwapiv1.PortNumber(0) // ignored for Backend kind
+
+	streamed := egv1alpha1.StreamedExtProcBodyProcessingMode
+
+	return &egv1alpha1.EnvoyExtensionPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      extProcPolicyName(ta),
+			Namespace: ta.Namespace,
+			Labels: map[string]string{
+				labelAgent:     ta.Name,
+				labelComponent: "ingress",
+			},
+		},
+		Spec: egv1alpha1.EnvoyExtensionPolicySpec{
+			PolicyTargetReferences: egv1alpha1.PolicyTargetReferences{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReferenceWithSectionName{
+					{
+						LocalPolicyTargetReference: gwapiv1a2.LocalPolicyTargetReference{
+							Group: gwapiv1a2.Group("gateway.networking.k8s.io"),
+							Kind:  gwapiv1a2.Kind("HTTPRoute"),
+							Name:  gwapiv1a2.ObjectName(ta.Name),
+						},
+					},
+				},
+			},
+			ExtProc: []egv1alpha1.ExtProc{
+				{
+					BackendCluster: egv1alpha1.BackendCluster{
+						BackendRefs: []egv1alpha1.BackendRef{
+							{
+								BackendObjectReference: gwapiv1.BackendObjectReference{
+									Group:     &beGroup,
+									Kind:      &beKind,
+									Name:      beName,
+									Namespace: &beNs,
+									Port:      &bePort,
+								},
+							},
+						},
+					},
+					ProcessingMode: &egv1alpha1.ExtProcProcessingMode{
+						Request: &egv1alpha1.ProcessingModeOptions{
+							// Streamed body so request payloads pass through
+							// without buffering — the dispatcher pumps stdin
+							// of the sandbox and we don't want to wait on
+							// full-body buffering for endpoint selection.
+							Body: &streamed,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
@@ -125,13 +293,17 @@ func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
 func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 	pathPrefix := gwapiv1.PathMatchPathPrefix
 
-	// Backend is the WorkerPool's Service, port `dispatch`. EG resolves
-	// the Service to live Endpoints (default routingType=Endpoint) and
-	// load-balances across worker pods. Per-request muxing to the right
-	// TaskAgent happens at the worker via the X-Clrk-TaskAgent header
-	// injected by the RequestHeaderModifier filter below.
-	wpSvcName := gwapiv1.ObjectName(ta.Spec.WorkerPoolRef + "-workers")
-	wpSvcPort := gwapiv1.PortNumber(DispatchPort)
+	// BackendRef is the per-TA DynamicResolver Backend. EG generates
+	// a dynamic_forward_proxy cluster with no static endpoints; the
+	// destination host is read off the request `:authority`, which
+	// the ingress ext_proc rewrites to the worker pod IP picked by
+	// WorkerHealthChecker. The X-Clrk-TaskAgent header injected here
+	// gives the worker dispatcher its lookup key on the receiving
+	// end (ext_proc has set `:authority` to a pod IP, so the worker
+	// can't infer the TaskAgent from Host).
+	beGroup := gwapiv1.Group(envoyGatewayGroup)
+	beKind := gwapiv1.Kind("Backend")
+	beName := gwapiv1.ObjectName(dynamicBackendName(ta))
 
 	return &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -181,8 +353,9 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
-									Name: wpSvcName,
-									Port: &wpSvcPort,
+									Group: &beGroup,
+									Kind:  &beKind,
+									Name:  beName,
 								},
 							},
 						},
