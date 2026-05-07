@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // HTTPInvoker invokes a TaskAgent by POSTing directly to the WorkerPool's
@@ -48,8 +49,8 @@ func (h *HTTPInvoker) Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, bo
 		return fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Clrk-Trigger", "cron")
-	req.Header.Set("X-Clrk-TaskAgent", ta.Namespace+"/"+ta.Name)
+	req.Header.Set(ports.HeaderTrigger, "cron")
+	req.Header.Set(ports.HeaderTaskAgent, ta.Namespace+"/"+ta.Name)
 
 	resp, err := h.HTTP.Do(req)
 	if err != nil {

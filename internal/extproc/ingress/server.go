@@ -17,23 +17,13 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
-)
-
-// Header names. X-Clrk-TaskAgent matches what
-// internal/worker/dispatcher.go reads — the per-TaskAgent HTTPRoute's
-// RequestHeaderModifier filter injects it.
-const (
-	headerTaskAgent      = "X-Clrk-TaskAgent"
-	headerWorkerEndpoint = "X-Clrk-Worker-Endpoint"
-	headerExecutionID    = "X-Clrk-Execution-ID"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // Picker is the subset of healthcheck.WorkerHealthChecker the
@@ -63,7 +53,6 @@ func New(c client.Client, picker Picker) *Server {
 // phases are continued unchanged.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	ctx := stream.Context()
-	logger := ctrllog.FromContext(ctx).WithName("ingress-extproc")
 
 	for {
 		req, err := stream.Recv()
@@ -76,13 +65,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 
 		switch m := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
-			resp, sendErr := s.handleRequestHeaders(ctx, m.RequestHeaders, logger)
+			resp := s.handleRequestHeaders(ctx, m.RequestHeaders)
 			if err := stream.Send(resp); err != nil {
 				return err
 			}
-			// If we returned an ImmediateResponse, the next Recv will
-			// be EOF; let the loop drain it.
-			_ = sendErr
 		default:
 			if err := stream.Send(continueResponse()); err != nil {
 				return err
@@ -97,28 +83,27 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 // right HTTP status; on internal errors we return a continue and let
 // the request fall through to the static fallback path (whatever
 // EG's DFP cluster does with a missing host).
-func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHeaders, logger logr.Logger) (*extprocv3.ProcessingResponse, error) {
-	_ = logger
+func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHeaders) *extprocv3.ProcessingResponse {
 	hdrs := headersToMap(in.Headers)
-	taHdr := hdrs[strings.ToLower(headerTaskAgent)]
+	taHdr := hdrs[strings.ToLower(ports.HeaderTaskAgent)]
 	if taHdr == "" {
-		return immediateResponse(typev3.StatusCode_BadRequest, "clrk: missing "+headerTaskAgent+" header"), nil
+		return immediateResponse(typev3.StatusCode_BadRequest, "clrk: missing "+ports.HeaderTaskAgent+" header")
 	}
 	ns, name, ok := strings.Cut(taHdr, "/")
 	if !ok || ns == "" || name == "" {
-		return immediateResponse(typev3.StatusCode_BadRequest, "clrk: invalid "+headerTaskAgent+" (want ns/name)"), nil
+		return immediateResponse(typev3.StatusCode_BadRequest, "clrk: invalid "+ports.HeaderTaskAgent+" (want ns/name)")
 	}
 
 	var ta clrkv1alpha1.TaskAgent
 	if err := s.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &ta); err != nil {
 		if apierrors.IsNotFound(err) {
-			return immediateResponse(typev3.StatusCode_NotFound, "clrk: TaskAgent not found"), nil
+			return immediateResponse(typev3.StatusCode_NotFound, "clrk: TaskAgent not found")
 		}
-		return immediateResponse(typev3.StatusCode_InternalServerError, "clrk: TaskAgent lookup failed"), nil
+		return immediateResponse(typev3.StatusCode_InternalServerError, "clrk: TaskAgent lookup failed")
 	}
 
 	if ta.Status.LatestReadyRevisionName == "" {
-		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: TaskAgent has no ready revision"), nil
+		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: TaskAgent has no ready revision")
 	}
 
 	pool := types.NamespacedName{Namespace: ns, Name: ta.Spec.WorkerPoolRef}
@@ -127,7 +112,7 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 		maxConcurrent = uint32(*ta.Spec.MaxConcurrent)
 	}
 
-	tieBreaker := hdrs[strings.ToLower(headerExecutionID)]
+	tieBreaker := hdrs[strings.ToLower(ports.HeaderExecutionID)]
 	if tieBreaker == "" {
 		// Fall back to the request-id header Envoy auto-injects so we
 		// still spread thundering-herd across workers when the caller
@@ -138,9 +123,9 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 	pick, ok := s.picker.Pick(pool, ns, name, ta.Status.LatestReadyRevisionName, maxConcurrent, tieBreaker)
 	if !ok {
 		if pick.AlreadyAtCap {
-			return immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: TaskAgent at MaxConcurrent across the cluster"), nil
+			return immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: TaskAgent at MaxConcurrent across the cluster")
 		}
-		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: no ready worker for TaskAgent"), nil
+		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: no ready worker for TaskAgent")
 	}
 
 	// Rewrite :authority so EG's dynamic_forward_proxy cluster dials
@@ -162,7 +147,7 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 			},
 			{
 				Header: &corev3.HeaderValue{
-					Key:      headerWorkerEndpoint,
+					Key:      ports.HeaderWorkerEndpoint,
 					RawValue: []byte(pick.Addr),
 				},
 			},
@@ -178,7 +163,7 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 				},
 			},
 		},
-	}, nil
+	}
 }
 
 func continueResponse() *extprocv3.ProcessingResponse {

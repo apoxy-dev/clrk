@@ -16,6 +16,7 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // TaskAgentIngressReconciler owns the k8s-side half of TaskAgent.
@@ -338,11 +339,11 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 							RequestHeaderModifier: &gwapiv1.HTTPHeaderFilter{
 								Set: []gwapiv1.HTTPHeader{
 									{
-										Name:  "X-Clrk-TaskAgent",
+										Name:  ports.HeaderTaskAgent,
 										Value: ta.Namespace + "/" + ta.Name,
 									},
 									{
-										Name:  "X-Clrk-Trigger",
+										Name:  ports.HeaderTrigger,
 										Value: "http",
 									},
 								},

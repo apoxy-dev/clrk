@@ -183,19 +183,6 @@ func (h *WorkerHealthChecker) syncPoolEndpoints(ctx context.Context, ps *workerP
 	live := make(map[string]struct{})
 	for i := range slices.Items {
 		s := &slices.Items[i]
-		hasStatusPort := false
-		for _, p := range s.Ports {
-			if p.Name != nil && *p.Name == "status" && p.Port != nil && *p.Port == ports.WorkerStatusPort {
-				hasStatusPort = true
-				break
-			}
-		}
-		// During the rollout window between this commit and the
-		// WorkerPoolDeploymentReconciler patch, Services may not
-		// yet expose the status port. Fall back to assuming the
-		// status port is at WorkerStatusPort on every endpoint
-		// listed by the dispatch slice.
-		_ = hasStatusPort
 		for _, ep := range s.Endpoints {
 			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
 				continue
@@ -369,15 +356,6 @@ func (h *WorkerHealthChecker) Pick(pool types.NamespacedName, ns, agent, revisio
 				c.warm = w.GetCount()
 				break
 			}
-		}
-		for _, ci := range snap.GetCachedImages() {
-			// Without the revision's image ref handy here we can't
-			// match on it directly. Treat any cached image as a
-			// neutral signal for now; the warm-revision tier is
-			// the primary affinity dimension. Revision→imageRef
-			// mapping is a follow-up: pass it via Pick or extend
-			// the proto with a per-revision marker.
-			_ = ci
 		}
 		for _, f := range snap.GetInFlight() {
 			if f.GetNamespace() == ns && f.GetAgent() == agent {

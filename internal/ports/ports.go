@@ -25,3 +25,17 @@ const WorkerStatusPort int32 = 8091
 // by the ingress controller from runtime flags so EG can reach the
 // controller-manager's ingress ext_proc gRPC server.
 const IngressExtProcBackendName = "clrk-ingress-extproc"
+
+// Dispatch headers carried on every TaskAgent invocation. The HTTPRoute
+// filter (or cron HTTP invoker) sets HeaderTaskAgent + HeaderTrigger;
+// the ingress ext_proc reads HeaderExecutionID for tie-breaking and
+// stamps HeaderWorkerEndpoint with the picked pod IP for telemetry;
+// the worker dispatcher reads HeaderTaskAgent and writes HeaderExitCode
+// on the response.
+const (
+	HeaderTaskAgent       = "X-Clrk-TaskAgent"
+	HeaderTrigger         = "X-Clrk-Trigger"
+	HeaderExitCode        = "X-Clrk-Exit-Code"
+	HeaderExecutionID     = "X-Clrk-Execution-ID"
+	HeaderWorkerEndpoint  = "X-Clrk-Worker-Endpoint"
+)

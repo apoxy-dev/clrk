@@ -24,21 +24,10 @@ import (
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 const (
-	// dispatchHeaderTaskAgent identifies the target TaskAgent. Injected
-	// by the per-TaskAgent HTTPRoute's RequestHeaderModifier filter so
-	// the worker doesn't need to mux on Host or path.
-	dispatchHeaderTaskAgent = "X-Clrk-TaskAgent"
-	// dispatchHeaderTrigger labels the invocation source (http or cron)
-	// for telemetry and audit. Optional.
-	dispatchHeaderTrigger = "X-Clrk-Trigger"
-	// dispatchHeaderExitCode carries the sandbox process exit code on
-	// non-2xx responses so the caller can distinguish agent failures
-	// from infra failures without parsing the body.
-	dispatchHeaderExitCode = "X-Clrk-Exit-Code"
-
 	// hardTimeoutCap is the absolute upper bound on a single execution,
 	// regardless of TaskAgent.spec.timeoutSeconds. Matches the cron
 	// invoker's per-fire cap so cron and HTTP share the same ceiling.
@@ -88,9 +77,9 @@ func (c *activeCounter) get(key types.NamespacedName) int32 {
 	return c.counts[key]
 }
 
-// snapshot returns a copy of all (key, count) pairs. Used by the
+// Snapshot returns a copy of all (key, count) pairs. Used by the
 // WorkerStatusService to build a stream message.
-func (c *activeCounter) snapshot() map[types.NamespacedName]int32 {
+func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make(map[types.NamespacedName]int32, len(c.counts))
@@ -104,12 +93,6 @@ func (c *activeCounter) snapshot() map[types.NamespacedName]int32 {
 // publishers (e.g. the WorkerStatusService) can subscribe to inc/dec
 // events.
 func (c *activeCounter) Notifier() *changeNotifier { return c.notifier }
-
-// Snapshot is the exported equivalent of snapshot for the
-// WorkerStatusService.
-func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
-	return c.snapshot()
-}
 
 // Dispatcher serves inbound TaskAgent execution requests routed to
 // this worker by the per-TaskAgent HTTPRoute. One shared instance per
@@ -200,18 +183,18 @@ func (d *Dispatcher) acquire(key types.NamespacedName, cap int32) func() {
 func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := ctrl.LoggerFrom(r.Context()).WithName("dispatch")
 
-	hdr := r.Header.Get(dispatchHeaderTaskAgent)
+	hdr := r.Header.Get(ports.HeaderTaskAgent)
 	if hdr == "" {
-		http.Error(w, "missing "+dispatchHeaderTaskAgent+" header", http.StatusBadRequest)
+		http.Error(w, "missing "+ports.HeaderTaskAgent+" header", http.StatusBadRequest)
 		return
 	}
 	ns, name, ok := strings.Cut(hdr, "/")
 	if !ok || ns == "" || name == "" {
-		http.Error(w, "invalid "+dispatchHeaderTaskAgent+" header (want ns/name)", http.StatusBadRequest)
+		http.Error(w, "invalid "+ports.HeaderTaskAgent+" header (want ns/name)", http.StatusBadRequest)
 		return
 	}
 	key := types.NamespacedName{Namespace: ns, Name: name}
-	log = log.WithValues("taskAgent", key.String(), "trigger", r.Header.Get(dispatchHeaderTrigger))
+	log = log.WithValues("taskAgent", key.String(), "trigger", r.Header.Get(ports.HeaderTrigger))
 
 	var ta clrkv1alpha1.TaskAgent
 	if err := d.client.Get(r.Context(), key, &ta); err != nil {
@@ -371,7 +354,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "sandbox wait failed", http.StatusInternalServerError)
 		}
 	case !success:
-		w.Header().Set(dispatchHeaderExitCode, fmt.Sprintf("%d", exitCode))
+		w.Header().Set(ports.HeaderExitCode, fmt.Sprintf("%d", exitCode))
 		if !wroteAnyBytes {
 			http.Error(w, fmt.Sprintf("agent exited with code %d", exitCode), http.StatusInternalServerError)
 		}

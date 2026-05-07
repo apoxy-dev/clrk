@@ -17,15 +17,11 @@ import (
 	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/proto/clrk/v1alpha1"
 )
 
-// statusHeartbeat is how often the WorkerStatusService emits an
-// empty heartbeat message when no real state change has fired. Drives
-// the controller-side dead-stream timeout (3× this value).
+// statusHeartbeat is the floor cadence at which the worker sends a
+// snapshot when the dispatcher's activeCounter notifier hasn't fired.
+// Doubles as the dead-stream-detect signal on the controller side
+// (3× this value).
 const statusHeartbeat = 5 * time.Second
-
-// statusFallbackPoll bounds how stale the warm-revision /
-// cached-image view can be when sandbox phase or image-cache changes
-// don't trip the dispatcher's activeCounter notifier.
-const statusFallbackPoll = 1 * time.Second
 
 // StatusService implements WorkerStatusServiceServer. It is fed by
 // the worker's SandboxManager (warm sandboxes), ImageStore (cached
@@ -69,37 +65,20 @@ func (s *StatusService) Watch(req *workerstatusv1alpha1.WatchRequest, stream wor
 		return err
 	}
 
-	pollTicker := time.NewTicker(statusFallbackPoll)
-	defer pollTicker.Stop()
-	heartbeatTicker := time.NewTicker(statusHeartbeat)
-	defer heartbeatTicker.Stop()
+	tick := time.NewTicker(statusHeartbeat)
+	defer tick.Stop()
 
-	var lastSent time.Time = time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-notify:
-			if err := s.sendSnapshot(stream, false); err != nil {
-				log.V(1).Info("Stream send failed", "err", err)
-				return err
-			}
-			lastSent = time.Now()
-		case <-pollTicker.C:
-			if err := s.sendSnapshot(stream, false); err != nil {
-				log.V(1).Info("Stream send failed", "err", err)
-				return err
-			}
-			lastSent = time.Now()
-		case <-heartbeatTicker.C:
-			if time.Since(lastSent) < statusHeartbeat {
-				continue
-			}
-			if err := s.sendHeartbeat(stream); err != nil {
-				log.V(1).Info("Heartbeat send failed", "err", err)
-				return err
-			}
-			lastSent = time.Now()
+			tick.Reset(statusHeartbeat)
+		case <-tick.C:
+		}
+		if err := s.sendSnapshot(stream, false); err != nil {
+			log.V(1).Info("Stream send failed", "err", err)
+			return err
 		}
 	}
 }
@@ -111,14 +90,6 @@ func (s *StatusService) sendSnapshot(stream workerstatusv1alpha1.WorkerStatusSer
 		WarmRevisions: s.warmRevisions(),
 		InFlight:      s.inFlight(),
 		CachedImages:  s.cachedImages(),
-	}
-	return stream.Send(msg)
-}
-
-func (s *StatusService) sendHeartbeat(stream workerstatusv1alpha1.WorkerStatusService_WatchServer) error {
-	msg := &workerstatusv1alpha1.WorkerStatus{
-		UpdateSeq: s.seq.Load(),
-		Heartbeat: true,
 	}
 	return stream.Send(msg)
 }
