@@ -87,6 +87,17 @@ func (r *TaskAgentCronReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// the reconciler running on the resulting status update would
 		// otherwise immediately overwrite it with the registration
 		// boilerplate, hiding fire outcomes from any post-hoc reader.
+		//
+		// Sibling reconcilers (revision, ingress) write status via
+		// MergeFrom which replaces the conditions array wholesale; if
+		// one races us with a stale base it can drop our Scheduled
+		// condition. Detect that here and reassert before the timing
+		// refresh — otherwise the condition would stay lost until spec
+		// change or the next fire.
+		if meta.FindStatusCondition(ta.Status.Conditions, condScheduled) == nil {
+			return ctrl.Result{}, r.patchScheduled(ctx, &ta, metav1.ConditionTrue, reasonScheduleRegistered,
+				fmt.Sprintf("Cron entry registered for %q", specSched))
+		}
 		return ctrl.Result{}, r.patchTiming(ctx, &ta)
 	}
 
