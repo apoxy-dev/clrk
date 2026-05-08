@@ -125,7 +125,7 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// the per-TA HTTPRoute.
 	pol := &egv1alpha1.EnvoyExtensionPolicy{ObjectMeta: metav1.ObjectMeta{Name: extProcPolicyName(&ta), Namespace: ta.Namespace}}
 	if err := createOrUpdateWithRetry(ctx, r.Client, pol, func() error {
-		desired := desiredExtProcPolicy(&ta)
+		desired := desiredExtProcPolicy(&ta, r.IngressExtProcPort)
 		pol.Labels = desired.Labels
 		pol.Spec = desired.Spec
 		return ctrl.SetControllerReference(&ta, pol, r.Scheme)
@@ -208,12 +208,16 @@ func desiredDynamicResolverBackend(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.Backe
 	}
 }
 
-func desiredExtProcPolicy(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.EnvoyExtensionPolicy {
+func desiredExtProcPolicy(ta *clrkv1alpha1.TaskAgent, extProcPort int32) *egv1alpha1.EnvoyExtensionPolicy {
 	beGroup := gwapiv1.Group(envoyGatewayGroup)
 	beKind := gwapiv1.Kind(egv1alpha1.KindBackend)
 	beName := gwapiv1.ObjectName(IngressExtProcBackendName)
 	beNs := gwapiv1.Namespace(ta.Namespace)
-	bePort := gwapiv1.PortNumber(0) // ignored for Backend kind
+	// EG's CRD validates port >= 1 even when Kind=Backend resolves the
+	// real endpoint internally. Stamp the controller-manager's ingress
+	// ext_proc port so the schema check passes; the value is otherwise
+	// not the source of truth (the Backend's FQDN.Port wins).
+	bePort := gwapiv1.PortNumber(extProcPort)
 
 	streamed := egv1alpha1.StreamedExtProcBodyProcessingMode
 
