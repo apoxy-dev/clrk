@@ -299,7 +299,7 @@ func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv
 	// nested Pod sub-spec) per envoy-gateway's API shape.
 	dep.InitContainers = append(dep.InitContainers, corev1.Container{
 		Name:    "clrk-trust-merge",
-		Image:   "docker.io/library/alpine:3.20",
+		Image:   "mirror.gcr.io/library/alpine:3.20",
 		Command: []string{"sh", "-c"},
 		Args: []string{
 			`cat ` + systemTrustPath + ` > ` + mergedPath + `/ca-certificates.crt && ` +
