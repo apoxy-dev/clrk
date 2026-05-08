@@ -18,8 +18,15 @@ const (
 )
 
 const (
-	defaultGatewayClassName = "envoy"
-	envoyGatewayGroup       = "gateway.envoyproxy.io"
+	// clrkTaskAgentGatewayClassName is the dedicated GatewayClass for
+	// per-TaskAgent ingress data planes. The class is reconciled by
+	// clrk's controller-manager (mirroring the EgressGateway pattern)
+	// and points at Envoy Gateway's controller; each TaskAgent gets
+	// its own EnvoyProxy + Service named "clrk-<ta>" so a misbehaving
+	// agent's data path can't blast-radius siblings.
+	clrkTaskAgentGatewayClassName = "clrk-taskagent"
+
+	envoyGatewayGroup = "gateway.envoyproxy.io"
 
 	maxRevisionHistory = 10
 )

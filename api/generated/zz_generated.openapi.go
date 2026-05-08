@@ -40,6 +40,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AIProviderRouteRule":                 schema_clrk_api_clrk_v1alpha1_AIProviderRouteRule(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AIProviderRouteSpec":                 schema_clrk_api_clrk_v1alpha1_AIProviderRouteSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AIProviderRouteStatus":               schema_clrk_api_clrk_v1alpha1_AIProviderRouteStatus(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentDelivery":                       schema_clrk_api_clrk_v1alpha1_AgentDelivery(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentEgressRef":                      schema_clrk_api_clrk_v1alpha1_AgentEgressRef(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentIdentity":                       schema_clrk_api_clrk_v1alpha1_AgentIdentity(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandbox":                        schema_clrk_api_clrk_v1alpha1_AgentSandbox(ref),
@@ -808,6 +809,26 @@ func schema_clrk_api_clrk_v1alpha1_AIProviderRouteStatus(ref common.ReferenceCal
 		},
 		Dependencies: []string{
 			"sigs.k8s.io/gateway-api/apis/v1.RouteParentStatus"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_AgentDelivery(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AgentDelivery selects the wire format used to hand a request off to the agent process.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Mode is Stdin (default) or Metadata.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -3604,12 +3625,18 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentSpec(ref common.ReferenceCallback) c
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState"),
 						},
 					},
+					"delivery": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Delivery selects how the request payload reaches the agent. Stdin (default) writes a CloudEvents structured-mode JSON envelope to the agent's stdin. Metadata closes stdin and exposes an IMDS-style HTTP server inside the sandbox; the agent fetches via $CLRK_METADATA_URL.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentDelivery"),
+						},
+					},
 				},
 				Required: []string{"template", "workerPoolRef"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentEgressRef", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentIdentity", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandboxRevisionTemplate", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentStreaming", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentDelivery", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentEgressRef", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentIdentity", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandboxRevisionTemplate", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentStreaming", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
 	}
 }
 

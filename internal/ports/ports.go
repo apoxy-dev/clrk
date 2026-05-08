@@ -33,9 +33,25 @@ const IngressExtProcBackendName = "clrk-ingress-extproc"
 // the worker dispatcher reads HeaderTaskAgent and writes HeaderExitCode
 // on the response.
 const (
-	HeaderTaskAgent       = "X-Clrk-TaskAgent"
-	HeaderTrigger         = "X-Clrk-Trigger"
-	HeaderExitCode        = "X-Clrk-Exit-Code"
-	HeaderExecutionID     = "X-Clrk-Execution-ID"
-	HeaderWorkerEndpoint  = "X-Clrk-Worker-Endpoint"
+	HeaderTaskAgent      = "X-Clrk-TaskAgent"
+	HeaderTrigger        = "X-Clrk-Trigger"
+	HeaderExitCode       = "X-Clrk-Exit-Code"
+	HeaderExecutionID    = "X-Clrk-Execution-ID"
+	HeaderWorkerEndpoint = "X-Clrk-Worker-Endpoint"
+)
+
+// Sandbox metadata service. The worker exposes a per-execution
+// IMDS-style HTTP server inside the sandbox netns, bound on link-
+// local addresses so agents can reach it at well-known endpoints
+// without configuration. Mirrors the AWS/GCP IMDS convention
+// (169.254.169.254:80) so existing CloudEvents-aware SDKs and
+// curl|wget recipes "just work" inside a clrk sandbox.
+//
+// The IPv6 address is the AWS IPv6 IMDS ULA. We don't run a full
+// IPv6 dual-stack inside sandboxes — only the metadata /128 is
+// reachable, via a peer route on the per-sandbox TAP.
+const (
+	MetadataAddrV4 = "169.254.169.254"
+	MetadataAddrV6 = "fd00:ec2::254"
+	MetadataPort   = 80
 )

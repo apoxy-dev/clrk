@@ -15,7 +15,16 @@ import (
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
+
+// imdsTapV6Self is a synthetic IPv6 address assigned to the
+// sandbox-side of the TAP so the kernel has a source address when
+// dialing the v6 IMDS. The address only needs to be unique within
+// the sandbox netns (each sandbox has its own netns, so this can be
+// a constant). It does not appear on the wire outside the TAP.
+const imdsTapV6Self = "fd00:ec2::ffff"
 
 // NetNSConfig holds the network namespace and TAP device configuration
 // for a single sandbox.
@@ -152,6 +161,44 @@ func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 		netns.Set(origNS)
 		netns.DeleteNamed(nsName)
 		return nil, fmt.Errorf("adding default route: %w", err)
+	}
+
+	// IPv6 IMDS reachability. The user asked for v6 support on the
+	// metadata service; we don't run a full v6 dual-stack inside
+	// sandboxes (no v6 egress, no v6 default), only the single IMDS
+	// /128 is reachable. Assign a synthetic ULA on the TAP so the
+	// kernel can pick a source address, then add a /128 route for the
+	// IMDS v6 address out the same TAP. The gVisor netstack on the
+	// other side answers because it has fd00:ec2::254 as a local
+	// protocol address.
+	tapV6 := netip.MustParseAddr(imdsTapV6Self)
+	imdsV6 := netip.MustParseAddr(ports.MetadataAddrV6)
+	v6Addr := &netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   tapV6.AsSlice(),
+			Mask: net.CIDRMask(128, 128),
+		},
+		Flags: unix.IFA_F_NODAD, // TUN is L3, no DAD needed.
+	}
+	if err := netlink.AddrAdd(tap, v6Addr); err != nil {
+		tapFD.Close()
+		netns.Set(origNS)
+		netns.DeleteNamed(nsName)
+		return nil, fmt.Errorf("adding v6 addr to TUN: %w", err)
+	}
+	v6Route := &netlink.Route{
+		LinkIndex: tap.Attrs().Index,
+		Dst: &net.IPNet{
+			IP:   imdsV6.AsSlice(),
+			Mask: net.CIDRMask(128, 128),
+		},
+		Scope: netlink.SCOPE_LINK,
+	}
+	if err := netlink.RouteAdd(v6Route); err != nil {
+		tapFD.Close()
+		netns.Set(origNS)
+		netns.DeleteNamed(nsName)
+		return nil, fmt.Errorf("adding v6 IMDS route: %w", err)
 	}
 
 	// Return to original netns.

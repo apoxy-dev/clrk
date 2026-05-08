@@ -47,9 +47,10 @@ type TaskAgentIngressReconciler struct {
 	IngressExtProcPort int32
 }
 
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends;envoyextensionpolicies,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends;envoyextensionpolicies;envoyproxies,verbs=get;list;watch;create;update;patch
 
 func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ta clrkv1alpha1.TaskAgent
@@ -60,6 +61,26 @@ func (r *TaskAgentIngressReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 	taStatusBase := ta.DeepCopy()
+
+	// Cluster-wide GatewayClass — reconciled out-of-band so a TA
+	// applied before the controller bootstraps still finds the class
+	// when it lands. Idempotent SSA, no owner ref.
+	if err := r.ensureGatewayClass(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling GatewayClass: %w", err)
+	}
+
+	// Per-TA EnvoyProxy with a Service-name override so the data
+	// plane is addressable as `clrk-<ta>.<ns>.svc`. Reconciled
+	// before the Gateway so the Gateway's parametersRef can resolve.
+	ep := &egv1alpha1.EnvoyProxy{ObjectMeta: metav1.ObjectMeta{Name: taskAgentEnvoyProxyName(&ta), Namespace: ta.Namespace}}
+	if err := createOrUpdateWithRetry(ctx, r.Client, ep, func() error {
+		desired := desiredEnvoyProxy(&ta)
+		ep.Labels = desired.Labels
+		ep.Spec = desired.Spec
+		return ctrl.SetControllerReference(&ta, ep, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling EnvoyProxy: %w", err)
+	}
 
 	gw := &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: ta.Name, Namespace: ta.Namespace}}
 	if err := createOrUpdateWithRetry(ctx, r.Client, gw, func() error {
@@ -185,11 +206,56 @@ func (r *TaskAgentIngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&gwapiv1.HTTPRoute{}).
 		Owns(&egv1alpha1.Backend{}).
 		Owns(&egv1alpha1.EnvoyExtensionPolicy{}).
+		Owns(&egv1alpha1.EnvoyProxy{}).
 		Complete(r)
 }
 
-func dynamicBackendName(ta *clrkv1alpha1.TaskAgent) string { return ta.Name + "-resolver" }
-func extProcPolicyName(ta *clrkv1alpha1.TaskAgent) string  { return ta.Name + "-ext-proc" }
+// ensureGatewayClass installs the cluster-scoped clrk-taskagent
+// GatewayClass that points at Envoy Gateway's controller. Idempotent;
+// the class survives across TA reconciles. No owner ref — the class
+// is shared by every TaskAgent in the cluster.
+func (r *TaskAgentIngressReconciler) ensureGatewayClass(ctx context.Context) error {
+	gc := &gwapiv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: clrkTaskAgentGatewayClassName}}
+	return createOrUpdateWithRetry(ctx, r.Client, gc, func() error {
+		gc.Spec.ControllerName = gwapiv1.GatewayController("gateway.envoyproxy.io/gatewayclass-controller")
+		return nil
+	})
+}
+
+func dynamicBackendName(ta *clrkv1alpha1.TaskAgent) string    { return ta.Name + "-resolver" }
+func extProcPolicyName(ta *clrkv1alpha1.TaskAgent) string     { return ta.Name + "-ext-proc" }
+func taskAgentEnvoyProxyName(ta *clrkv1alpha1.TaskAgent) string { return "clrk-" + ta.Name }
+
+// desiredEnvoyProxy materializes the per-TaskAgent EnvoyProxy. The
+// EnvoyService.Name override is what makes the data-plane Service
+// land as `clrk-<ta>` instead of EG's default
+// `envoy-<gateway-name>-<hash>` shape. mergeGateways=false is set
+// explicitly to defend against the cluster-wide default flipping.
+func desiredEnvoyProxy(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.EnvoyProxy {
+	svcType := egv1alpha1.ServiceTypeClusterIP
+	return &egv1alpha1.EnvoyProxy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskAgentEnvoyProxyName(ta),
+			Namespace: ta.Namespace,
+			Labels: map[string]string{
+				labelAgent:     ta.Name,
+				labelComponent: "ingress",
+			},
+		},
+		Spec: egv1alpha1.EnvoyProxySpec{
+			MergeGateways: ptr.To(false),
+			Provider: &egv1alpha1.EnvoyProxyProvider{
+				Type: egv1alpha1.ProviderTypeKubernetes,
+				Kubernetes: &egv1alpha1.EnvoyProxyKubernetesProvider{
+					EnvoyService: &egv1alpha1.KubernetesServiceSpec{
+						Name: ptr.To(taskAgentEnvoyProxyName(ta)),
+						Type: &svcType,
+					},
+				},
+			},
+		},
+	}
+}
 
 func desiredDynamicResolverBackend(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.Backend {
 	dr := egv1alpha1.BackendTypeDynamicResolver
@@ -283,12 +349,22 @@ func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
 			},
 		},
 		Spec: gwapiv1.GatewaySpec{
-			GatewayClassName: gwapiv1.ObjectName(defaultGatewayClassName),
+			GatewayClassName: gwapiv1.ObjectName(clrkTaskAgentGatewayClassName),
 			Listeners: []gwapiv1.Listener{
 				{
 					Name:     "http",
 					Port:     80,
 					Protocol: gwapiv1.HTTPProtocolType,
+				},
+			},
+			// Point at the per-TA EnvoyProxy so EG materializes the
+			// data plane as a dedicated Deployment + Service per TA
+			// (see desiredEnvoyProxy).
+			Infrastructure: &gwapiv1.GatewayInfrastructure{
+				ParametersRef: &gwapiv1.LocalParametersReference{
+					Group: gwapiv1.Group(envoyGatewayGroup),
+					Kind:  gwapiv1.Kind("EnvoyProxy"),
+					Name:  taskAgentEnvoyProxyName(ta),
 				},
 			},
 		},

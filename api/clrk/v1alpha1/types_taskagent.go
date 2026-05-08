@@ -84,7 +84,40 @@ type TaskAgentSpec struct {
 	// State configures persistent state across executions.
 	// +optional
 	State *AgentState `json:"state,omitempty"`
+
+	// Delivery selects how the request payload reaches the agent.
+	// Stdin (default) writes a CloudEvents structured-mode JSON
+	// envelope to the agent's stdin. Metadata closes stdin and
+	// exposes an IMDS-style HTTP server inside the sandbox; the
+	// agent fetches via $CLRK_METADATA_URL.
+	// +optional
+	Delivery *AgentDelivery `json:"delivery,omitempty"`
 }
+
+// AgentDelivery selects the wire format used to hand a request off
+// to the agent process.
+type AgentDelivery struct {
+	// Mode is Stdin (default) or Metadata.
+	// +kubebuilder:validation:Enum=Stdin;Metadata
+	// +kubebuilder:default=Stdin
+	// +optional
+	Mode AgentDeliveryMode `json:"mode,omitempty"`
+}
+
+// AgentDeliveryMode enumerates request delivery transports.
+type AgentDeliveryMode string
+
+const (
+	// AgentDeliveryStdin writes a structured-mode CloudEvents JSON
+	// envelope to the agent's stdin.
+	AgentDeliveryStdin AgentDeliveryMode = "Stdin"
+
+	// AgentDeliveryMetadata exposes an IMDS-style HTTP server in
+	// the sandbox; the agent fetches the request via
+	// $CLRK_METADATA_URL/event and posts the response body to
+	// $CLRK_METADATA_URL/response.
+	AgentDeliveryMetadata AgentDeliveryMode = "Metadata"
+)
 
 type TaskAgentStatus struct {
 	// Conditions represent the latest available observations of the TaskAgent's state.

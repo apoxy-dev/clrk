@@ -20,6 +20,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 const (
@@ -98,6 +100,34 @@ func NewSandboxStack(tapFD *os.File, gwAddr netip.Addr) (*SandboxStack, error) {
 		return nil, fmt.Errorf("adding gateway address: %v", tcpipErr)
 	}
 
+	// Bind the link-local IMDS metadata addresses on the same NIC so
+	// the per-execution metadata server can listen at well-known
+	// AWS/GCP-style endpoints inside the sandbox. Failure here is
+	// fatal: any agent using delivery.mode=Metadata depends on
+	// $CLRK_METADATA_URL resolving inside the netstack.
+	imdsV4, err := netip.ParseAddr(ports.MetadataAddrV4)
+	if err != nil {
+		return nil, fmt.Errorf("parsing IMDS v4 address: %w", err)
+	}
+	imdsV4Proto := tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFrom4(imdsV4.As4()).WithPrefix(),
+	}
+	if tcpipErr := ipstack.AddProtocolAddress(nicID, imdsV4Proto, stack.AddressProperties{}); tcpipErr != nil {
+		return nil, fmt.Errorf("adding IMDS v4 address: %v", tcpipErr)
+	}
+	imdsV6, err := netip.ParseAddr(ports.MetadataAddrV6)
+	if err != nil {
+		return nil, fmt.Errorf("parsing IMDS v6 address: %w", err)
+	}
+	imdsV6Proto := tcpip.ProtocolAddress{
+		Protocol:          ipv6.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFrom16(imdsV6.As16()).WithPrefix(),
+	}
+	if tcpipErr := ipstack.AddProtocolAddress(nicID, imdsV6Proto, stack.AddressProperties{}); tcpipErr != nil {
+		return nil, fmt.Errorf("adding IMDS v6 address: %v", tcpipErr)
+	}
+
 	pump := NewPacketPump(tapFD, linkEP, sandboxMTU)
 
 	return &SandboxStack{
@@ -117,6 +147,16 @@ func NewSandboxStack(tapFD *os.File, gwAddr netip.Addr) (*SandboxStack, error) {
 func (s *SandboxStack) DNSCache() *DNSCache {
 	return s.dnsCache
 }
+
+// Stack returns the underlying gVisor stack so callers can bind
+// their own gonet listeners (e.g. the per-sandbox IMDS metadata
+// server). Lifetime is tied to the SandboxStack — once Close is
+// called the stack is torn down.
+func (s *SandboxStack) Stack() *stack.Stack { return s.ipstack }
+
+// NICID returns the NIC ID that all sandbox traffic flows through.
+// Pair with Stack() to bind gonet listeners on the sandbox's NIC.
+func (s *SandboxStack) NICID() tcpip.NICID { return s.nicID }
 
 // Start enables packet forwarding and begins the TAP pump. It blocks until
 // ctx is cancelled or the pump encounters a fatal error.

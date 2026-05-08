@@ -33,6 +33,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/netstack"
+	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // Compile-time guard: *SandboxManager satisfies SandboxRuntime.
@@ -316,6 +317,14 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	// Prepend MITM trust env vars so that user-supplied env can override
 	// them if an agent explicitly wants a different trust store.
 	env := append([]string(nil), trustEnv("/etc/ssl/certs/ca-certificates.crt")...)
+	// IMDS metadata URLs are constants — same address for every
+	// sandbox (link-local IMDS convention). Set unconditionally
+	// regardless of delivery.mode: harmless for Stdin agents, and
+	// agents that don't care can ignore it.
+	env = append(env,
+		fmt.Sprintf("CLRK_METADATA_URL=http://%s/v1", ports.MetadataAddrV4),
+		fmt.Sprintf("CLRK_METADATA_URL_V6=http://[%s]/v1", ports.MetadataAddrV6),
+	)
 	env = append(env, envVarsToStrings(sb.Sandbox.Env)...)
 	// Ensure PATH is set.
 	hasPath := false

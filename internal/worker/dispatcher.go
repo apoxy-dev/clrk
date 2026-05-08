@@ -1,7 +1,10 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +22,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/cloudevents"
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/ports"
+	"github.com/apoxy-dev/clrk/internal/sandbox/metadata"
+)
+
+const (
+	// requestBodyLimit caps the buffered request body for envelope
+	// construction. Sized to handle the typical TaskAgent dispatch
+	// payload (a few KB to a few MB) plus generous headroom; agents
+	// that need streaming-larger payloads should opt for delivery
+	// mode Metadata where the body is served via /v1/event reads.
+	requestBodyLimit = 32 << 20 // 32 MiB
 )
 
 const (
@@ -326,41 +340,109 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve the delivery transport. Stdin (default) writes a CE
+	// JSON envelope to the agent's stdin; Metadata closes stdin and
+	// exposes the request via the per-sandbox IMDS HTTP service.
+	deliveryMode := clrkv1alpha1.AgentDeliveryStdin
+	if ta.Spec.Delivery != nil && ta.Spec.Delivery.Mode != "" {
+		deliveryMode = ta.Spec.Delivery.Mode
+	}
+
+	// CE attribute set is shared by both transports — Stdin folds it
+	// into the JSON envelope, Metadata serves it via /v1/event headers.
+	ceAttrs := cloudevents.AttrsFromRequest(r, &ta)
+	ceID := ceAttrs[cloudevents.AttrID]
+	wrapResponse := strings.EqualFold(r.Header.Get("Accept"), cloudevents.MediaType)
+
+	// Buffer the request body once. Both delivery modes need the
+	// payload in-memory to produce the envelope/serve it from /v1/event.
+	bodyBytes, err := readBodyBounded(r.Body, requestBodyLimit)
+	if err != nil {
+		log.Error(err, "Failed to read request body")
+		http.Error(w, "request body read failed", http.StatusBadRequest)
+		return
+	}
+
 	if err := d.sandboxMgr.Start(ctx, sandboxID); err != nil {
 		log.Error(err, "Failed to start sandbox")
 		http.Error(w, "sandbox start failed", http.StatusInternalServerError)
 		return
 	}
 
-	// Pump request body → sandbox stdin in the background; close stdin
-	// on EOF so the agent's read returns. errCh surfaces a copy error
-	// so we can attribute a 500 if the body wasn't fully delivered.
-	stdinErr := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(sb.Stdin, r.Body)
+	// Per-mode request delivery + response capture.
+	var (
+		mdEntry  *metadata.Entry
+		mdServer io.Closer
+	)
+	switch deliveryMode {
+	case clrkv1alpha1.AgentDeliveryMetadata:
+		mdEntry = metadata.NewEntry(ceID, r.Header.Get("Content-Type"), bodyBytes, ceAttrs)
+		srv, err := startMetadataServer(sb, mdEntry)
+		if err != nil {
+			log.Error(err, "Failed to start metadata server")
+			http.Error(w, "metadata server failed", http.StatusInternalServerError)
+			return
+		}
+		mdServer = srv
+		defer mdServer.Close()
+		// Close stdin immediately so an agent that mistakenly reads
+		// from it sees EOF rather than blocking forever.
 		_ = sb.Stdin.Close()
-		stdinErr <- err
-	}()
 
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	case clrkv1alpha1.AgentDeliveryStdin:
+		fallthrough
+	default:
+		// Build a structured-mode CE JSON envelope and stream it to
+		// stdin in the background; close stdin on EOF so the agent's
+		// read returns. stdinErr surfaces a write failure so a body
+		// half-delivery becomes a 500.
+		envelope := buildCEEnvelope(ceAttrs, r.Header.Get("Content-Type"), bodyBytes)
+		stdinErr := make(chan error, 1)
+		go func() {
+			_, werr := io.Copy(sb.Stdin, bytes.NewReader(envelope))
+			_ = sb.Stdin.Close()
+			stdinErr <- werr
+		}()
+		defer func() { <-stdinErr }()
 	}
-	w.Header().Set("Content-Type", contentType)
-	// Stream stdout to the response with explicit flushes so SSE / NDJSON
-	// agents work without any unix-socket plumbing. flusher may be nil
-	// on HTTP/1.0 or weird middleware — just skip flushing in that case.
-	//
-	// Run the pump in a goroutine so we can race it against waitOrStop:
-	// on ctx cancellation Wait returns first via Stop, the runtime
-	// closes child-stdout, and the pump observes EOF and returns.
+
+	// Response-side wiring depends on transport. In Stdin mode we
+	// stream stdout straight back (or, if wrapResponse, buffer it
+	// for re-encoding). In Metadata mode we wait for the agent's
+	// POST /v1/response and serve its body.
 	flusher, _ := w.(http.Flusher)
-	respCh := make(chan bool, 1)
-	go func() { respCh <- streamWithFlush(w, sb.Stdout, flusher) }()
+
+	var (
+		respCh         chan bool
+		stdoutBuf      *bytes.Buffer
+		stdoutBufErr   chan error
+	)
+	switch {
+	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && !wrapResponse:
+		// Hot path: stream stdout straight to the wire.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		respCh = make(chan bool, 1)
+		go func() { respCh <- streamWithFlush(w, sb.Stdout, flusher) }()
+
+	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && wrapResponse:
+		// Caller asked for CE response envelope; buffer stdout so we
+		// can re-encode after the agent exits with its full output.
+		stdoutBuf = &bytes.Buffer{}
+		stdoutBufErr = make(chan error, 1)
+		go func() {
+			_, copyErr := io.Copy(stdoutBuf, sb.Stdout)
+			stdoutBufErr <- copyErr
+		}()
+
+	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata:
+		// Drain stdout to the per-agent log only — we don't surface
+		// it to the caller. The agent's POST /v1/response is the
+		// response body. Discard avoids a goroutine leak when the
+		// agent writes anything to stdout.
+		go func() { _, _ = io.Copy(io.Discard, sb.Stdout) }()
+	}
 
 	state, waitErr := waitOrStop(ctx, d.sandboxMgr, sandboxID)
-	<-stdinErr // drain so we don't leak the stdin goroutine
-	wroteAnyBytes := <-respCh
 
 	exitCode := -1
 	success := false
@@ -370,6 +452,56 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			exitCode = 0
 		} else if ws, ok := state.Sys().(interface{ ExitStatus() int }); ok {
 			exitCode = ws.ExitStatus()
+		}
+	}
+
+	// Sandbox is gone; cancel any pending Metadata-mode response so
+	// downstream selects unblock.
+	if mdEntry != nil {
+		mdEntry.CancelIfPending()
+	}
+
+	wroteAnyBytes := false
+
+	switch {
+	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && !wrapResponse:
+		wroteAnyBytes = <-respCh
+
+	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && wrapResponse:
+		<-stdoutBufErr
+		w.Header().Set("Content-Type", cloudevents.MediaType)
+		respEnv := buildCEResponseEnvelope(ceID, "application/octet-stream", stdoutBuf.Bytes())
+		if _, werr := w.Write(respEnv); werr == nil {
+			wroteAnyBytes = true
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata:
+		respBody, respCT, delivered := mdEntry.Response()
+		if !delivered {
+			// Agent exited without posting a response. Fall through
+			// to the exit-code error path below.
+			break
+		}
+		if respCT == "" {
+			respCT = "application/octet-stream"
+		}
+		if wrapResponse {
+			w.Header().Set("Content-Type", cloudevents.MediaType)
+			env := buildCEResponseEnvelope(ceID, respCT, respBody)
+			if _, werr := w.Write(env); werr == nil {
+				wroteAnyBytes = true
+			}
+		} else {
+			w.Header().Set("Content-Type", respCT)
+			if _, werr := w.Write(respBody); werr == nil {
+				wroteAnyBytes = true
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 
@@ -392,7 +524,91 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// If we already streamed bytes, the response is whatever's on
 		// the wire — exit code lives in the (best-effort) header above.
+	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata && !wroteAnyBytes:
+		// Agent succeeded without posting a response in Metadata mode.
+		// Treat as a server-side bug — the agent should always POST.
+		http.Error(w, "agent did not post a response", http.StatusBadGateway)
 	}
+}
+
+// readBodyBounded reads up to limit bytes from r and returns them.
+// Anything beyond limit is rejected with an explicit error so we
+// fail loudly rather than silently truncate the agent's input.
+func readBodyBounded(r io.Reader, limit int64) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > limit {
+		return nil, fmt.Errorf("request body exceeds %d bytes", limit)
+	}
+	return buf, nil
+}
+
+// buildCEEnvelope produces a structured-mode CloudEvents JSON
+// envelope. JSON / text bodies inline as `data`; everything else
+// goes into `data_base64`.
+func buildCEEnvelope(attrs map[string]string, contentType string, body []byte) []byte {
+	env := map[string]any{
+		cloudevents.AttrSpecVersion: cloudevents.SpecVersion,
+	}
+	for k, v := range attrs {
+		env[k] = v
+	}
+	switch {
+	case len(body) == 0:
+		// no data field
+	case isCEJSONInlineable(contentType):
+		env["data"] = json.RawMessage(body)
+	case isCETextInlineable(contentType):
+		env["data"] = string(body)
+	default:
+		env["data_base64"] = base64.StdEncoding.EncodeToString(body)
+	}
+	out, _ := json.Marshal(env)
+	return out
+}
+
+// buildCEResponseEnvelope builds a CE response envelope with
+// ce-relationid pointing back at the request id.
+func buildCEResponseEnvelope(reqID, contentType string, body []byte) []byte {
+	env := map[string]any{
+		cloudevents.AttrSpecVersion:  cloudevents.SpecVersion,
+		cloudevents.AttrType:         cloudevents.TypeResponse,
+		cloudevents.AttrID:           reqID + ".response",
+		cloudevents.AttrTime:         time.Now().UTC().Format(time.RFC3339Nano),
+		cloudevents.AttrRelationID:   reqID,
+	}
+	if contentType != "" {
+		env[cloudevents.AttrDataContentType] = contentType
+	}
+	switch {
+	case len(body) == 0:
+		// no data field
+	case isCEJSONInlineable(contentType):
+		env["data"] = json.RawMessage(body)
+	case isCETextInlineable(contentType):
+		env["data"] = string(body)
+	default:
+		env["data_base64"] = base64.StdEncoding.EncodeToString(body)
+	}
+	out, _ := json.Marshal(env)
+	return out
+}
+
+func isCEJSONInlineable(ct string) bool {
+	mt := strings.SplitN(ct, ";", 2)[0]
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	return mt == "application/json" || strings.HasSuffix(mt, "+json")
+}
+
+func isCETextInlineable(ct string) bool {
+	mt := strings.SplitN(ct, ";", 2)[0]
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	return strings.HasPrefix(mt, "text/")
 }
 
 // streamWithFlush copies src → dst and flushes after each chunk.

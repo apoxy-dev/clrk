@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/cloudevents"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
@@ -131,28 +132,44 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 	// Rewrite :authority so EG's dynamic_forward_proxy cluster dials
 	// the picked pod IP:port. Also stamp the chosen endpoint into a
 	// header for telemetry / observability.
-	mutation := &extprocv3.HeaderMutation{
-		SetHeaders: []*corev3.HeaderValueOption{
-			{
-				Header: &corev3.HeaderValue{
-					Key:      ":authority",
-					RawValue: []byte(pick.Addr),
-				},
+	setHeaders := []*corev3.HeaderValueOption{
+		{
+			Header: &corev3.HeaderValue{
+				Key:      ":authority",
+				RawValue: []byte(pick.Addr),
 			},
-			{
-				Header: &corev3.HeaderValue{
-					Key:      "host",
-					RawValue: []byte(pick.Addr),
-				},
+		},
+		{
+			Header: &corev3.HeaderValue{
+				Key:      "host",
+				RawValue: []byte(pick.Addr),
 			},
-			{
-				Header: &corev3.HeaderValue{
-					Key:      ports.HeaderWorkerEndpoint,
-					RawValue: []byte(pick.Addr),
-				},
+		},
+		{
+			Header: &corev3.HeaderValue{
+				Key:      ports.HeaderWorkerEndpoint,
+				RawValue: []byte(pick.Addr),
 			},
 		},
 	}
+
+	// Stamp CloudEvents binary-mode `ce-*` headers. The worker
+	// dispatcher reads them off the request to construct the
+	// envelope (Stdin mode) or serve via /v1/event (Metadata mode).
+	// Existing ce-* headers from the caller win — passThrough is
+	// extracted from the request's existing ce-* headers.
+	passThrough := cloudevents.CEHeaderIterMap(cloudevents.HeaderMap(hdrs))
+	ceAttrs := cloudevents.AttrsFromHeaders(cloudevents.HeaderMap(hdrs), &ta, passThrough)
+	for k, v := range ceAttrs {
+		setHeaders = append(setHeaders, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{
+				Key:      "ce-" + k,
+				RawValue: []byte(v),
+			},
+		})
+	}
+
+	mutation := &extprocv3.HeaderMutation{SetHeaders: setHeaders}
 
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
