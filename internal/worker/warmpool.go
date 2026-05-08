@@ -57,7 +57,7 @@ const (
 //   - Spec changes that don't bump the revision (e.g. EgressRefs
 //     change without an image change) don't evict warm sandboxes.
 type WarmPool struct {
-	sandboxMgr *SandboxManager
+	sandboxMgr SandboxRuntime
 	client     client.Client
 	router     *egress.Router
 	notifier   *changeNotifier
@@ -79,7 +79,7 @@ type WarmPool struct {
 // immediately to the WorkerStatusService stream — same edge-trigger
 // pattern in-flight changes use today.
 func NewWarmPool(
-	sandboxMgr *SandboxManager,
+	sandboxMgr SandboxRuntime,
 	c client.Client,
 	router *egress.Router,
 	notifier *changeNotifier,
