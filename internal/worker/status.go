@@ -95,16 +95,13 @@ func (s *StatusService) sendSnapshot(stream workerstatusv1alpha1.WorkerStatusSer
 }
 
 func (s *StatusService) warmRevisions() []*workerstatusv1alpha1.WarmRevision {
-	type key struct {
-		ns, agent, revision string
-	}
-	counts := make(map[key]uint32)
+	counts := make(map[WarmKey]uint32)
 	for _, sb := range s.sandboxMgr.List() {
 		if sb.Phase != SandboxReady {
 			continue
 		}
-		k := key{ns: sb.Identity.Namespace, agent: sb.AgentRef, revision: sb.Identity.Revision}
-		if k.agent == "" || k.revision == "" {
+		k := WarmKey{Namespace: sb.Identity.Namespace, Agent: sb.AgentRef, Revision: sb.Identity.Revision}
+		if k.Agent == "" || k.Revision == "" {
 			continue
 		}
 		counts[k]++
@@ -112,9 +109,9 @@ func (s *StatusService) warmRevisions() []*workerstatusv1alpha1.WarmRevision {
 	out := make([]*workerstatusv1alpha1.WarmRevision, 0, len(counts))
 	for k, c := range counts {
 		out = append(out, &workerstatusv1alpha1.WarmRevision{
-			Namespace: k.ns,
-			Agent:     k.agent,
-			Revision:  k.revision,
+			Namespace: k.Namespace,
+			Agent:     k.Agent,
+			Revision:  k.Revision,
 			Count:     c,
 		})
 	}

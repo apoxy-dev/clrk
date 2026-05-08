@@ -50,6 +50,15 @@ type TaskAgentSpec struct {
 	// +optional
 	MaxConcurrent *int32 `json:"maxConcurrent,omitempty"`
 
+	// WarmPoolSize is the per-worker target for pre-Created sandboxes
+	// kept Ready (rootfs mounted, TAP+netns provisioned, libcontainer
+	// container created but agent process not yet started). A warm
+	// sandbox shaves cold-start off the request hot path. Defaults to
+	// 0 (no warm pool). Capped by the worker at MaxExecutionsPerWorker/2.
+	// +optional
+	// +kubebuilder:default=0
+	WarmPoolSize *int32 `json:"warmPoolSize,omitempty"`
+
 	// Schedule adds a cron trigger. Does NOT disable HTTP triggering.
 	// +optional
 	Schedule *string `json:"schedule,omitempty"`

@@ -2,8 +2,6 @@ package worker
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -104,6 +102,7 @@ func (c *activeCounter) Notifier() *changeNotifier { return c.notifier }
 type Dispatcher struct {
 	client     client.Client
 	sandboxMgr SandboxRuntime
+	warmPool   WarmAcquirer
 	router     *egress.Router
 	podName    string
 	namespace  string
@@ -115,6 +114,14 @@ type Dispatcher struct {
 	// across requests for the same agent, and resized lazily when the
 	// spec.maxConcurrent value changes.
 	semaphores sync.Map // types.NamespacedName -> *sema
+}
+
+// WarmAcquirer is the subset of *WarmPool the dispatcher uses on the
+// hot path. Defined as an interface so the linux-only WarmPool type
+// stays out of the platform-agnostic Dispatcher and tests can pass a
+// nil-or-fake.
+type WarmAcquirer interface {
+	Acquire(key WarmKey) *SandboxInstance
 }
 
 type sema struct {
@@ -135,6 +142,12 @@ func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podNam
 		active:     active,
 	}
 }
+
+// SetWarmPool installs the warm-pool acquirer used by the dispatcher's
+// hot path. Optional — a nil warmPool means every dispatch takes the
+// cold path (Create + Start). Call once during runtime startup before
+// the dispatcher accepts traffic.
+func (d *Dispatcher) SetWarmPool(w WarmAcquirer) { d.warmPool = w }
 
 // NewActiveCounter returns an empty activeCounter usable as the
 // `active` argument to NewDispatcher. Exported so tests can inspect
@@ -248,41 +261,60 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	suffix, err := randHex(4)
-	if err != nil {
-		log.Error(err, "Failed to generate sandbox id suffix")
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	sandboxID := SandboxID(fmt.Sprintf("ta-%s-%s-%s", ns, name, suffix))
+	identity := newAgentIdentity(proxyproto.AgentKindTask, ns, name, string(ta.UID), rev.Name)
 
-	identity := proxyproto.AgentIdentity{
-		Kind:      proxyproto.AgentKindTask,
-		Namespace: ns,
-		Name:      name,
-		UID:       string(ta.UID),
-		Revision:  rev.Name,
+	// Try the warm pool first. A warm sandbox already has the rootfs
+	// mounted, the libcontainer container Created, the TAP+netns
+	// provisioned, and the EG MITM CA staged into the rootfs — so we
+	// skip Purge + Create and go straight to egress wiring + Start.
+	// CA is captured at warm time; egress backends/policy are
+	// re-resolved here so spec changes that don't bump the revision
+	// (e.g. EgressRefs swap) still take effect at consume time.
+	var sb *SandboxInstance
+	var sandboxID SandboxID
+	warmHit := false
+	if d.warmPool != nil {
+		if warm := d.warmPool.Acquire(WarmKey{Namespace: ns, Agent: name, Revision: rev.Name}); warm != nil {
+			sb = warm
+			sandboxID = warm.ID
+			warmHit = true
+			log = log.WithValues("warm", true, "sandboxID", sandboxID)
+		}
 	}
 
 	caPEM, backends, policy, err := resolveEgressForExecution(ctx, d.client, d.router, ns, ta.Spec.EgressRefs)
 	if err != nil {
+		if warmHit {
+			// Cleanup the warm sandbox we already pulled — caller will
+			// retry, the warm pool will refill on next Acquire kick.
+			deleteSandboxBounded(d.sandboxMgr, sandboxID, log, "Failed to delete unused warm sandbox")
+		}
 		log.Error(err, "Failed to resolve egress for TaskAgent")
 		http.Error(w, "egress not ready", http.StatusServiceUnavailable)
 		return
 	}
 
-	d.sandboxMgr.Purge(ctx, sandboxID)
-	sb, err := d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, true)
-	if err != nil {
-		log.Error(err, "Failed to create sandbox")
-		http.Error(w, "sandbox create failed", http.StatusInternalServerError)
-		return
-	}
-	defer func() {
-		if err := d.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, ErrNotFound) {
-			log.Error(err, "Failed to delete sandbox")
+	if !warmHit {
+		sandboxID, err = newSandboxID(sandboxIDPrefixTask, ns, name)
+		if err != nil {
+			log.Error(err, "Failed to generate sandbox id")
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
-	}()
+		d.sandboxMgr.Purge(ctx, sandboxID)
+		sb, err = d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true)
+		if err != nil {
+			if errors.Is(err, ErrStateOverLimit) {
+				log.Info("Refusing dispatch — agent state over size limit", "err", err)
+				http.Error(w, "agent state over size limit", http.StatusInsufficientStorage)
+				return
+			}
+			log.Error(err, "Failed to create sandbox")
+			http.Error(w, "sandbox create failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	defer deleteSandboxBounded(d.sandboxMgr, sandboxID, log, "Failed to delete sandbox")
 	if len(backends) > 0 {
 		if err := d.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
 			log.Error(err, "Set egress backends failed")
@@ -408,16 +440,6 @@ func waitOrStop(ctx context.Context, mgr SandboxRuntime, id SandboxID) (*os.Proc
 		r := <-ch
 		return r.state, r.err
 	}
-}
-
-// randHex returns 2*n hex characters of crypto-random data, used to
-// disambiguate sandbox IDs across concurrent fires of the same TaskAgent.
-func randHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // resolveEgressForExecution loads the EG MITM CA, listener backends,

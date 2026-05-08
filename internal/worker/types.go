@@ -2,15 +2,84 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"time"
+
+	"github.com/go-logr/logr"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
+
+// Sandbox-ID prefixes. The prefix distinguishes the spawn path so
+// stray state directories from a previous worker incarnation can be
+// triaged at a glance and so warm vs. cold dispatches are
+// differentiable in libcontainer state listings.
+const (
+	sandboxIDPrefixTask = "ta"
+	sandboxIDPrefixWarm = "warm"
+)
+
+// WarmKey identifies a warm-pool slot: same (ns, agent) at different
+// revisions are different keys, so a revision bump cleanly evicts.
+// Lives in the platform-agnostic types file so the (also platform-
+// agnostic) Dispatcher can construct keys without depending on the
+// linux-only WarmPool implementation.
+type WarmKey struct {
+	Namespace string
+	Agent     string
+	Revision  string
+}
+
+func (k WarmKey) String() string {
+	return fmt.Sprintf("%s/%s@%s", k.Namespace, k.Agent, k.Revision)
+}
+
+// newSandboxID builds a sandbox ID of the form "<prefix>-<ns>-<name>-<hex>"
+// with 8 hex chars of entropy. Used by both the dispatcher (cold path)
+// and the warm pool to disambiguate IDs across concurrent fires.
+func newSandboxID(prefix, ns, name string) (SandboxID, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("random suffix: %w", err)
+	}
+	return SandboxID(fmt.Sprintf("%s-%s-%s-%s", prefix, ns, name, hex.EncodeToString(b))), nil
+}
+
+// newAgentIdentity stamps an AgentIdentity for PROXY v2 TLV egress
+// attribution. UID is the parent agent's K8s UID; revName is the
+// AgentSandboxRevision name.
+func newAgentIdentity(kind proxyproto.AgentKind, ns, name, uid, revName string) proxyproto.AgentIdentity {
+	return proxyproto.AgentIdentity{
+		Kind:      kind,
+		Namespace: ns,
+		Name:      name,
+		UID:       uid,
+		Revision:  revName,
+	}
+}
+
+// sandboxDeleteTimeout caps the deferred cleanup Delete in the
+// dispatcher and warm-pool paths. Without it a hung libcontainer
+// destroy would pin the calling goroutine indefinitely.
+const sandboxDeleteTimeout = 10 * time.Second
+
+// deleteSandboxBounded is the standard cleanup helper for one-shot
+// sandboxes: a bounded-context Delete that logs (but doesn't return)
+// errors except ErrNotFound, which is treated as already-gone.
+func deleteSandboxBounded(mgr SandboxRuntime, id SandboxID, log logr.Logger, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxDeleteTimeout)
+	defer cancel()
+	if err := mgr.Delete(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
+		log.Error(err, msg)
+	}
+}
 
 // SandboxRuntime is the subset of SandboxManager the dispatcher relies
 // on. Defined as an interface so unit tests can supply a fake runtime
@@ -29,6 +98,7 @@ type SandboxRuntime interface {
 		caPEM []byte,
 		sandbox clrkv1alpha1.AgentSandbox,
 		resources clrkv1alpha1.ExecutionResources,
+		state *clrkv1alpha1.AgentState,
 		stdio bool,
 	) (*SandboxInstance, error)
 	SetEgressBackends(id SandboxID, backends []egress.BackendListener) error
@@ -58,6 +128,10 @@ var (
 	ErrAlreadyExists = errors.New("sandbox already exists")
 	// ErrNotFound is returned when a sandbox with the given ID does not exist.
 	ErrNotFound = errors.New("sandbox not found")
+	// ErrStateOverLimit is returned by Create when a TaskAgent's persistent
+	// state directory's on-disk size already exceeds spec.state.sizeLimitMB.
+	// The dispatcher surfaces this as 507 Insufficient Storage.
+	ErrStateOverLimit = errors.New("agent state over size limit")
 )
 
 // SandboxInstance tracks the state of a single sandbox container.

@@ -32,8 +32,10 @@ func (r *Runtime) Start(ctx context.Context) error {
 		"namespace", r.Namespace,
 	)
 
-	// Create runtime directories.
-	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir, clrkLogsDir} {
+	// Create runtime directories. clrkStateHostRoot lives on the
+	// worker host (not tmpfs) — fail fast if the deployment didn't
+	// mount it writable.
+	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir, clrkLogsDir, clrkStateHostRoot} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("creating dir %s: %w", dir, err)
 		}
@@ -60,6 +62,17 @@ func (r *Runtime) Start(ctx context.Context) error {
 	active := NewActiveCounter()
 	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active)
 
+	// Warm pool shares the activeCounter's notifier so warm
+	// fills/evictions push deltas to the WorkerStatusService stream
+	// alongside in-flight changes.
+	warmPool := NewWarmPool(sandboxMgr, r.Client, router, active.Notifier(), r.PoolName, r.PodName, 0)
+	disp.SetWarmPool(warmPool)
+	go func() {
+		if err := warmPool.Run(ctx); err != nil {
+			log.Error(err, "Warm pool reconciler exited")
+		}
+	}()
+
 	// Set up SandboxState watcher. The dispatcher reference is no
 	// longer needed — ActiveExecutions accounting moved to the
 	// WorkerStatusService gRPC stream consumed by the controller.
@@ -85,11 +98,16 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Start heartbeat goroutine.
 	go watcher.heartbeatLoop(ctx, heartbeatInterval)
 
-	// Start the dispatcher HTTP server. Failures get logged; the
-	// daemon side stays up so DaemonAgents keep running even if the
-	// dispatcher port is busy or misconfigured.
+	// dispDone is closed when disp.Run returns so the shutdown
+	// sequence can wait for in-flight requests to drain (disp.Run's
+	// srv.Shutdown carries a 30s timeout) before SandboxManager
+	// teardown SIGTERMs the rest. Failures get logged; the daemon
+	// side stays up so DaemonAgents keep running even if the
+	// dispatcher port is busy.
 	dispatchAddr := fmt.Sprintf(":%d", ports.DispatchPort)
+	dispDone := make(chan struct{})
 	go func() {
+		defer close(dispDone)
 		if err := disp.Run(ctx, dispatchAddr); err != nil {
 			log.Error(err, "Dispatcher HTTP server exited", "addr", dispatchAddr)
 		}
@@ -111,30 +129,91 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Block until context is cancelled.
 	<-ctx.Done()
 
-	// Graceful shutdown — drain daemon loops first so they don't race with
-	// SandboxManager teardown. The dispatcher goroutine returns on its
-	// own once Shutdown completes (triggered by ctx cancellation).
+	// Order: stop warm fills → drain in-flight HTTP (bounded to 30s
+	// by disp.Run's srv.Shutdown) → drain daemons → destroy
+	// unconsumed warm sandboxes → SIGTERM + grace + Destroy on
+	// anything still running. DestroyAll runs after the dispatcher
+	// has stopped accepting requests so warm sandboxes are guaranteed
+	// to be unconsumed.
 	log.Info("Shutting down worker runtime")
+	warmPool.StopFill()
+	<-dispDone
 	daemonMgr.Shutdown()
+	warmPool.DestroyAll(context.Background())
 	shutdown(sandboxMgr)
 
 	return nil
 }
 
-// shutdown stops all running sandboxes and cleans up resources.
+// sandboxSIGTERMGrace caps the wait between SIGTERM and the
+// libcontainer Destroy that follows (which SIGKILLs whatever's
+// left). The wait short-circuits as soon as every sandbox has exited.
+const (
+	sandboxSIGTERMGrace = 5 * time.Second
+	sandboxExitPoll     = 100 * time.Millisecond
+)
+
+// shutdown stops every running sandbox, polls up to sandboxSIGTERMGrace
+// for them to exit cleanly, then Deletes all remaining (which
+// destroys the libcontainer container and SIGKILLs any leftover PIDs
+// via the cgroup).
 func shutdown(sandboxMgr *SandboxManager) {
 	log := ctrl.Log.WithName("worker-runtime")
+	shutdownCtx := context.Background()
+
+	all := sandboxMgr.List()
+	if len(all) == 0 {
+		return
+	}
+
+	signaled := false
+	for _, sb := range all {
+		if sb.Phase != SandboxRunning {
+			continue
+		}
+		log.Info("SIGTERM sandbox on shutdown", "sandboxID", sb.ID)
+		if err := sandboxMgr.Stop(shutdownCtx, sb.ID); err != nil {
+			log.Error(err, "Failed to stop sandbox", "sandboxID", sb.ID)
+			continue
+		}
+		signaled = true
+	}
+	if signaled {
+		waitForRunningExit(sandboxMgr, sandboxSIGTERMGrace)
+	}
 
 	for _, sb := range sandboxMgr.List() {
-		log.Info("Stopping sandbox on shutdown", "sandboxID", sb.ID)
-		shutdownCtx := context.Background()
-		if sb.Phase == SandboxRunning {
-			if err := sandboxMgr.Stop(shutdownCtx, sb.ID); err != nil {
-				log.Error(err, "Failed to stop sandbox", "sandboxID", sb.ID)
-			}
-		}
+		log.Info("Destroying sandbox on shutdown", "sandboxID", sb.ID)
 		if err := sandboxMgr.Delete(shutdownCtx, sb.ID); err != nil {
 			log.Error(err, "Failed to delete sandbox", "sandboxID", sb.ID)
 		}
+	}
+}
+
+// waitForRunningExit polls until no sandbox is in SandboxRunning or
+// the deadline elapses, whichever comes first. Lets a clean SIGTERM
+// shorten shutdown without giving up the SIGKILL fallback.
+func waitForRunningExit(sandboxMgr *SandboxManager, deadline time.Duration) {
+	end := time.Now().Add(deadline)
+	for {
+		anyRunning := false
+		for _, sb := range sandboxMgr.List() {
+			if sb.Phase == SandboxRunning {
+				anyRunning = true
+				break
+			}
+		}
+		if !anyRunning {
+			return
+		}
+		left := time.Until(end)
+		if left <= 0 {
+			return
+		}
+		sleep := sandboxExitPoll
+		if left < sleep {
+			sleep = left
+		}
+		time.Sleep(sleep)
 	}
 }

@@ -1912,6 +1912,11 @@ func (in *TaskAgentSpec) DeepCopyInto(out *TaskAgentSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.WarmPoolSize != nil {
+		in, out := &in.WarmPoolSize, &out.WarmPoolSize
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Schedule != nil {
 		in, out := &in.Schedule, &out.Schedule
 		*out = new(string)

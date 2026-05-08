@@ -123,6 +123,7 @@ func (m *SandboxManager) Create(
 	caPEM []byte,
 	sandbox clrkv1alpha1.AgentSandbox,
 	resources clrkv1alpha1.ExecutionResources,
+	state *clrkv1alpha1.AgentState,
 	stdio bool,
 ) (*SandboxInstance, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
@@ -188,6 +189,23 @@ func (m *SandboxManager) Create(
 		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
 	}
 	cfg.Mounts = append(cfg.Mounts, buildResolvMount(resolvPath))
+
+	// 5c. Persistent agent state — bind-mount /var/lib/clrk/state/<ns>/<agent>/
+	// into the sandbox at AgentState.MountPath. Pre-Create du-check
+	// against sizeLimitMB; over-cap returns ErrStateOverLimit which
+	// the dispatcher maps to 507. Per-(ns,agent) directory is shared
+	// across all executions for the same TaskAgent on this worker.
+	if state != nil {
+		hostPath, err := ensureStateDir(identity.Namespace, agentRef, state.SizeLimitMB)
+		if err != nil {
+			m.removeSandboxNetConfig(id)
+			m.removeAgentCA(id)
+			stack.Close()
+			TeardownNetNS(nsCfg)
+			return nil, err
+		}
+		cfg.Mounts = append(cfg.Mounts, buildStateMount(hostPath, state))
+	}
 
 	// 6. Create container (does NOT start it).
 	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)

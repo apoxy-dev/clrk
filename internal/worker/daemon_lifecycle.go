@@ -177,13 +177,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		sandboxID := SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, attempt))
 		log := log.WithValues("sandboxID", sandboxID, "attempt", attempt)
 
-		identity := proxyproto.AgentIdentity{
-			Kind:      proxyproto.AgentKindDaemon,
-			Namespace: da.Namespace,
-			Name:      da.Name,
-			UID:       string(da.UID),
-			Revision:  rev.Name,
-		}
+		identity := newAgentIdentity(proxyproto.AgentKindDaemon, da.Namespace, da.Name, string(da.UID), rev.Name)
 
 		// Resolve EG dependencies (CA, backend addresses, dialable
 		// backend) BEFORE creating any sandbox state. The EG
@@ -210,7 +204,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		// strands the state directory and every subsequent retry
 		// rejects with "container with given ID already exists".
 		m.sandboxMgr.Purge(ctx, sandboxID)
-		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources, false); err != nil {
+		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources, nil, false); err != nil {
 			log.Error(err, "Failed to create sandbox")
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return
