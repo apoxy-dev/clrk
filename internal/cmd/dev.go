@@ -575,6 +575,13 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			"--db=/var/lib/clrk/data.db",
 			"--bind-addr=0.0.0.0",
 			"--bind-port=8443",
+			// Auth is disabled in dev and the binary inside the container
+			// must bind 0.0.0.0 so docker -p 8443:8443 can reach it; ack
+			// the unauthenticated public bind so the apiserver guard lets
+			// us start. The guard refuses this combo without the ack to
+			// stop production deployments from accidentally exposing an
+			// unauthenticated control plane.
+			"--insecure-allow-public",
 			// Ingress reconciler is on (k3s has gateway-api installed);
 			// worker-deployment is off because clrk dev runs the worker
 			// directly via docker — a Deployment would create a duplicate

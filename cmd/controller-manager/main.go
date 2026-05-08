@@ -12,8 +12,8 @@ import (
 	"time"
 
 	envoytlsv3 "github.com/apoxy-dev/envoy-go/envoy/service/tls/v3"
-	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	egextpb "github.com/envoyproxy/gateway/proto/extension"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"k8s.io/client-go/rest"
@@ -21,16 +21,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/controller"
+	"github.com/apoxy-dev/clrk/internal/crds"
 	"github.com/apoxy-dev/clrk/internal/egcontrolplane"
 	"github.com/apoxy-dev/clrk/internal/egextension"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
-	"github.com/apoxy-dev/clrk/internal/apiserver"
-	"github.com/apoxy-dev/clrk/internal/crds"
 )
 
 const (
@@ -40,30 +40,31 @@ const (
 
 func main() {
 	var (
-		dbPath            = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
-		bindAddr          = flag.String("bind-addr", "0.0.0.0", "Apiserver bind address.")
-		bindPort          = flag.Int("bind-port", 8443, "Apiserver bind port.")
-		certDir           = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
-		leaderElection    = flag.Bool("leader-election", false, "Enable leader election.")
-		leaderID          = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
-		leaderNS          = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
-		metricsAddr       = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
+		dbPath           = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
+		bindAddr         = flag.String("bind-addr", "127.0.0.1", "Apiserver bind address. Defaults to loopback so the unauthenticated apiserver is not exposed by accident; pass --insecure-allow-public to bind a non-loopback address while auth remains disabled.")
+		bindPort         = flag.Int("bind-port", 8443, "Apiserver bind port.")
+		insecureAllowPub = flag.Bool("insecure-allow-public", false, "Acknowledge binding the unauthenticated apiserver to a non-loopback address. Required when --bind-addr is non-loopback (e.g. 0.0.0.0 inside a container with -p 8443:8443).")
+		certDir          = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
+		leaderElection   = flag.Bool("leader-election", false, "Enable leader election.")
+		leaderID         = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
+		leaderNS         = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
+		metricsAddr      = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
 		// Default :8082 to avoid colliding with the supervised
 		// envoy-gateway child whose controller-runtime manager hardcodes
 		// :8081 for its own healthz/probe endpoint.
-		healthAddr        = flag.String("health-addr", ":8082", "Controller-manager healthz bind address.")
-		ingressController = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
-		workerDeployment  = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
-		egController      = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
-		envoyImage        = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
-		grpcAddr          = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
-		grpcAdvertiseURI  = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
+		healthAddr           = flag.String("health-addr", ":8082", "Controller-manager healthz bind address.")
+		ingressController    = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
+		workerDeployment     = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
+		egController         = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
+		envoyImage           = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
+		grpcAddr             = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
+		grpcAdvertiseURI     = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
 		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.Listeners[*].BackendAddress entries are published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
-		envoyGatewayBinary = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
-		crdInstallMode    = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
-		ingressExtProcAddr = flag.String("ingress-extproc-addr", ":9444", "Bind address for the ingress (TaskAgent) ext_proc gRPC server. Per-TA EnvoyExtensionPolicy points at this server via a per-namespace Backend.")
-		ingressExtProcHost = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
-		ingressExtProcPort = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
+		envoyGatewayBinary   = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
+		crdInstallMode       = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
+		ingressExtProcAddr   = flag.String("ingress-extproc-addr", ":9444", "Bind address for the ingress (TaskAgent) ext_proc gRPC server. Per-TA EnvoyExtensionPolicy points at this server via a per-namespace Backend.")
+		ingressExtProcHost   = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
+		ingressExtProcPort   = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -88,6 +89,11 @@ func main() {
 		apiserver.WithSQLitePath(*dbPath),
 		apiserver.WithBindAddress(*bindAddr),
 		apiserver.WithBindPort(*bindPort),
+	}
+	if *insecureAllowPub {
+		opts = append(opts, apiserver.WithInsecureAllowPublic())
+	}
+	opts = append(opts,
 		apiserver.WithMetricsBindAddress(*metricsAddr),
 		apiserver.WithHealthBindAddress(*healthAddr),
 		apiserver.WithResources(
@@ -104,7 +110,7 @@ func main() {
 			&clrkv1alpha1.LoggingPolicy{},
 			&clrkv1alpha1.EgressDenyPolicy{},
 		),
-	}
+	)
 	if *certDir != "" {
 		opts = append(opts, apiserver.WithCertDir(*certDir))
 	}

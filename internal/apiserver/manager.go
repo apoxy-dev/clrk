@@ -36,19 +36,20 @@ import (
 type Option func(*options)
 
 type options struct {
-	sqlitePath      string
-	sqliteConnArgs  map[string]string
-	certDir         string
-	bindAddress     string
-	bindPort        int
-	resources       []resource.Object
-	clientConfig    *rest.Config
-	disableAuth     bool
-	leaderElection  bool
-	leaderElectID   string
-	leaderElectNS   string
-	metricsBindAddr string
-	healthBindAddr  string
+	sqlitePath          string
+	sqliteConnArgs      map[string]string
+	certDir             string
+	bindAddress         string
+	bindPort            int
+	resources           []resource.Object
+	clientConfig        *rest.Config
+	disableAuth         bool
+	insecureAllowPublic bool
+	leaderElection      bool
+	leaderElectID       string
+	leaderElectNS       string
+	metricsBindAddr     string
+	healthBindAddr      string
 }
 
 // WithSQLitePath sets the SQLite file path. Use "file::memory:" for in-memory.
@@ -68,7 +69,10 @@ func WithCertDir(dir string) Option {
 	return func(o *options) { o.certDir = dir }
 }
 
-// WithBindAddress sets the apiserver bind address. Defaults to 0.0.0.0.
+// WithBindAddress sets the apiserver bind address. Defaults to 127.0.0.1.
+// Binding to a non-loopback address while authentication is disabled (the
+// current default) requires WithInsecureAllowPublic — otherwise Start
+// refuses to launch a publicly reachable, unauthenticated apiserver.
 func WithBindAddress(addr string) Option {
 	return func(o *options) { o.bindAddress = addr }
 }
@@ -99,6 +103,16 @@ func WithDisableAuth() Option {
 	return func(o *options) { o.disableAuth = true }
 }
 
+// WithInsecureAllowPublic acknowledges that the apiserver is intentionally
+// being bound to a non-loopback address while authentication is disabled.
+// Without this, Start refuses such a configuration to prevent accidental
+// exposure of an unauthenticated control plane (e.g. a Service published
+// on a host network or a docker -p mapping). Required only when
+// disableAuth is true and bindAddress is non-loopback.
+func WithInsecureAllowPublic() Option {
+	return func(o *options) { o.insecureAllowPublic = true }
+}
+
 // WithLeaderElection enables controller-runtime leader election against the
 // embedded apiserver using the given lease name and namespace.
 func WithLeaderElection(id, namespace string) Option {
@@ -126,12 +140,27 @@ func defaultOptions() *options {
 			"_journal_mode": "WAL",
 			"_busy_timeout": "30000",
 		},
-		bindAddress:     "0.0.0.0",
+		bindAddress:     "127.0.0.1",
 		bindPort:        8443,
 		disableAuth:     true,
 		metricsBindAddr: "0",
 		healthBindAddr:  "0",
 	}
+}
+
+// isLoopbackBind reports whether the given bind address is loopback-only,
+// i.e. unreachable from any other host. The empty string is treated as
+// loopback because the apiserver later defaults it via SecureServingOptions.
+func isLoopbackBind(addr string) bool {
+	if addr == "" {
+		return true
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		// Hostname — assume non-loopback unless explicitly "localhost".
+		return strings.EqualFold(addr, "localhost")
+	}
+	return ip.IsLoopback()
 }
 
 func (o *options) loopbackHost() string {
@@ -189,6 +218,12 @@ func (m *Manager) Start(ctx context.Context, opts ...Option) error {
 		fn(o)
 	}
 	m.opts = o
+
+	if o.disableAuth && !isLoopbackBind(o.bindAddress) && !o.insecureAllowPublic {
+		err := fmt.Errorf("refusing to start: authentication is disabled and bind address %q is not loopback; pass WithInsecureAllowPublic (or --insecure-allow-public) to acknowledge exposing an unauthenticated apiserver", o.bindAddress)
+		m.ReadyCh <- err
+		return err
+	}
 
 	if err := m.startAPIServer(ctx); err != nil {
 		m.ReadyCh <- err
