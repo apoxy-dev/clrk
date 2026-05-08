@@ -353,21 +353,11 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 	return nil
 }
 
-// tarFileMode translates a POSIX mode integer from a tar header into a Go
-// os.FileMode. tar headers carry setuid/setgid/sticky in the 04000/02000/01000
-// octal bits; Go represents them as ModeSetuid/ModeSetgid/ModeSticky outside
-// ModePerm. *os.Root.{Mkdir,OpenFile} reject any bit outside the Go-defined
-// set with "unsupported file mode", so we must translate rather than cast.
+// tarFileMode extracts the 9 permission bits from a tar header mode.
+// *os.Root.{MkdirAll,OpenFile} reject any bit outside 0o777 with
+// "unsupported file mode" — including ModeSetuid/ModeSetgid/ModeSticky
+// (Go represents those as high bits, not the POSIX 0o4000/0o2000/0o1000).
+// The runtime layer doesn't preserve those special bits.
 func tarFileMode(m int64) os.FileMode {
-	mode := os.FileMode(m & 0o777)
-	if m&0o4000 != 0 {
-		mode |= os.ModeSetuid
-	}
-	if m&0o2000 != 0 {
-		mode |= os.ModeSetgid
-	}
-	if m&0o1000 != 0 {
-		mode |= os.ModeSticky
-	}
-	return mode
+	return os.FileMode(m & 0o777)
 }
