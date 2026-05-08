@@ -326,38 +326,69 @@ func (h *WorkerHealthChecker) Pick(pool types.NamespacedName, ns, agent, revisio
 		return PickResult{}, false
 	}
 
-	type candidate struct {
-		ip       string
-		warm     uint32
-		cached   bool
-		inFlight uint32
-	}
-	now := time.Now()
-	cands := make([]candidate, 0)
-	clusterInFlight := uint32(0)
-
 	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-
+	states := make([]CandidateState, 0, len(ps.workers))
 	for ip, ws := range ps.workers {
 		ws.mu.RLock()
 		snap := ws.snapshot
 		seen := ws.lastSeen
 		ws.mu.RUnlock()
-		if snap == nil {
+		states = append(states, CandidateState{PodIP: ip, Snapshot: snap, LastSeen: seen})
+	}
+	ps.mu.RUnlock()
+
+	return PickFromCandidates(states, ns, agent, revision, maxConcurrent, tieBreaker, time.Now())
+}
+
+// CandidateState is the per-worker input to PickFromCandidates. The
+// streaming Watch loop produces these in production; tests construct
+// them directly. Snapshot may be nil (no message received yet);
+// LastSeen zero means no message has been observed.
+type CandidateState struct {
+	PodIP    string
+	Snapshot *workerstatusv1alpha1.WorkerStatus
+	LastSeen time.Time
+}
+
+// PickFromCandidates applies the worker selection policy to a
+// caller-supplied slice. Same policy as Pick:
+//
+//   - drop snap==nil and stale (lastSeen older than healthcheckerDeadAfter
+//     relative to now);
+//   - if maxConcurrent > 0 and the (ns, agent) cluster-wide in-flight
+//     sum >= maxConcurrent, return {AlreadyAtCap: true}, false;
+//   - filter workers individually at maxConcurrent;
+//   - sort: workers with a warm sandbox first, then less in-flight,
+//     ties broken by FNV(tieBreaker, ip) so concurrent picks with the
+//     same tieBreaker pin to the same worker while different
+//     tieBreakers spread.
+//
+// Exported so unit tests can drive the policy without spinning up a
+// gRPC stream.
+func PickFromCandidates(states []CandidateState, ns, agent, revision string, maxConcurrent uint32, tieBreaker string, now time.Time) (PickResult, bool) {
+	type candidate struct {
+		ip       string
+		warm     uint32
+		inFlight uint32
+	}
+	cands := make([]candidate, 0, len(states))
+	clusterInFlight := uint32(0)
+
+	for _, st := range states {
+		if st.Snapshot == nil {
 			continue
 		}
-		if !seen.IsZero() && now.Sub(seen) > healthcheckerDeadAfter {
+		if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) > healthcheckerDeadAfter {
 			continue
 		}
-		c := candidate{ip: ip}
-		for _, w := range snap.GetWarmRevisions() {
+		c := candidate{ip: st.PodIP}
+		for _, w := range st.Snapshot.GetWarmRevisions() {
 			if w.GetNamespace() == ns && w.GetAgent() == agent && w.GetRevision() == revision {
 				c.warm = w.GetCount()
 				break
 			}
 		}
-		for _, f := range snap.GetInFlight() {
+		for _, f := range st.Snapshot.GetInFlight() {
 			if f.GetNamespace() == ns && f.GetAgent() == agent {
 				c.inFlight = f.GetCount()
 				clusterInFlight += f.GetCount()
