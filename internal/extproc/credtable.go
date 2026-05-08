@@ -130,11 +130,12 @@ func resolveCIP(ctx context.Context, c client.Client, cip *clrkv1alpha1.Credenti
 		return nil
 	}
 
-	secretNS := cip.Namespace
-	if spec.SecretRef.Namespace != nil && *spec.SecretRef.Namespace != "" {
-		secretNS = string(*spec.SecretRef.Namespace)
-	}
-	secretKey := types.NamespacedName{Namespace: secretNS, Name: string(spec.SecretRef.Name)}
+	// SecretRef.Namespace is intentionally ignored: a same-namespace
+	// constraint blocks a tenant who can author CIPs from pointing at
+	// any Secret in the cluster and exfiltrating it via header
+	// injection. Cross-namespace refs will gate on ReferenceGrant
+	// post-MVP (APO-577).
+	secretKey := types.NamespacedName{Namespace: cip.Namespace, Name: string(spec.SecretRef.Name)}
 	var secret corev1.Secret
 	if err := c.Get(ctx, secretKey, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -319,11 +320,8 @@ func CredPoliciesVersion(
 // fingerprint — a transient apiserver hiccup shouldn't keep the cache
 // stale forever; the next stream will retry.
 func secretVersion(ctx context.Context, c client.Client, cip *clrkv1alpha1.CredentialInjectionPolicy) string {
-	secretNS := cip.Namespace
-	if cip.Spec.SecretRef.Namespace != nil && *cip.Spec.SecretRef.Namespace != "" {
-		secretNS = string(*cip.Spec.SecretRef.Namespace)
-	}
-	key := types.NamespacedName{Namespace: secretNS, Name: string(cip.Spec.SecretRef.Name)}
+	// SecretRef.Namespace is intentionally ignored — see resolveCIP.
+	key := types.NamespacedName{Namespace: cip.Namespace, Name: string(cip.Spec.SecretRef.Name)}
 	var s corev1.Secret
 	if err := c.Get(ctx, key, &s); err != nil {
 		return "none"

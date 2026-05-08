@@ -43,7 +43,10 @@ type CredentialInjectionSpec struct {
 	//     no narrower policy claimed.
 	ParentRefs []gwapiv1.ParentReference `json:"parentRefs"`
 
-	// SecretRef points at a K8s Secret containing the credential.
+	// SecretRef points at a K8s Secret containing the credential. The
+	// `namespace` field is ignored: the Secret must live in the same
+	// namespace as the CredentialInjectionPolicy. Cross-namespace refs
+	// will gate on ReferenceGrant post-MVP.
 	SecretRef gwapiv1.SecretObjectReference `json:"secretRef"`
 
 	// SecretKey selects a key within the Secret. Defaults to "token".
