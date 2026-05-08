@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -59,6 +60,13 @@ func newDevWaitReadyCmd() *cobra.Command {
 	return cmd
 }
 
+// perCheckTimeout caps a single probe round. Combined with rest.Config's
+// own Timeout this makes every check fail-fast: if the apiserver TCP is
+// up but HTTPS hangs (orbstack pause/resume, controller-manager mid-
+// crash, certgen mid-flight), the whole poll loop still spins instead
+// of blocking on a single hung Dial.
+const perCheckTimeout = 3 * time.Second
+
 func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Duration) error {
 	// Wait for the kubeconfig file itself — clrk dev writes it once
 	// k3s has booted, so the file's absence is "still booting" not
@@ -77,6 +85,11 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 	if err != nil {
 		return fmt.Errorf("loading kubeconfig %s: %w", kubeconfigPath, err)
 	}
+	// rest.Config.Timeout caps every request the derived clients make,
+	// regardless of whether the API method takes a context. Belt-and-
+	// suspenders for client-go calls like Discovery().ServerVersion()
+	// that historically didn't accept a ctx.
+	cfg.Timeout = perCheckTimeout
 	core, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("kubernetes client: %w", err)
@@ -95,7 +108,11 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 		fn   func(context.Context) error
 	}{
 		{"k3s apiserver", func(c context.Context) error {
-			_, err := core.Discovery().ServerVersion()
+			// /livez is a context-aware probe that goes through the
+			// rest client (so cfg.Timeout applies). Avoids the legacy
+			// Discovery().ServerVersion() shape, which ignores ctx and
+			// can hang past the per-check deadline.
+			_, err := core.Discovery().RESTClient().Get().AbsPath("/livez").DoRaw(c)
 			return err
 		}},
 		{"clrk.apoxy.dev APIService Available", func(c context.Context) error {
@@ -126,25 +143,45 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 		}},
 	}
 
-	var lastErr error
+	// Once a check passes we never re-run it: every signal here is
+	// monotonic (Available stays Available, Secret keeps existing).
+	// This also makes progress visible — each green tick is a one-shot
+	// announcement instead of being lost in the polling churn.
+	passed := make(map[string]bool, len(checks))
+	round := 0
+	fmt.Fprintf(os.Stderr, "Waiting for clrk dev ready (kubeconfig=%s)...\n", kubeconfigPath)
 	for {
-		lastErr = nil
+		round++
+		var pending []string
 		for _, ch := range checks {
-			rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if passed[ch.name] {
+				continue
+			}
+			rctx, cancel := context.WithTimeout(ctx, perCheckTimeout)
 			err := ch.fn(rctx)
 			cancel()
-			if err != nil {
-				lastErr = fmt.Errorf("%s: %w", ch.name, err)
-				break
+			if err == nil {
+				passed[ch.name] = true
+				fmt.Fprintf(os.Stderr, "  ✓ %s\n", ch.name)
+				continue
 			}
+			pending = append(pending, fmt.Sprintf("%s: %v", ch.name, err))
 		}
-		if lastErr == nil {
+		if len(pending) == 0 {
 			fmt.Fprintln(os.Stdout, "clrk dev ready")
 			return nil
 		}
+		// Progress output once per second-ish (every 4 rounds at the
+		// default 250ms interval; once per round at 1s+). Flushes the
+		// "what is it stuck on" question without spamming.
+		if round == 1 || round%max(1, int(time.Second/interval)) == 0 {
+			for _, p := range pending {
+				fmt.Fprintf(os.Stderr, "  … %s\n", p)
+			}
+		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for clrk dev ready: %w", lastErr)
+			return fmt.Errorf("timed out waiting for clrk dev ready; pending: %s", strings.Join(pending, "; "))
 		case <-time.After(interval):
 		}
 	}
