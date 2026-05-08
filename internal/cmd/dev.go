@@ -587,6 +587,11 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			// directly via docker — a Deployment would create a duplicate
 			// worker pod inside k3s with broken nested-container semantics.
 			"--ingress-controller=true",
+			// EG-managed Envoy pods reach the controller-manager's ingress
+			// ext_proc port via the manually-managed Endpoints in
+			// clrk-system/clrk-controller-manager (same pattern as
+			// --grpc-advertise-uri above).
+			"--ingress-extproc-host=clrk-controller-manager.clrk-system.svc.cluster.local",
 			// EgressGateway reconciler is on.
 			"--egressgateway-controller=true",
 			// Advertise the bridge Service DNS so EG data plane Envoy pods

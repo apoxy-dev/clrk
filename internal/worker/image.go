@@ -308,7 +308,7 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := root.MkdirAll(name, os.FileMode(hdr.Mode)); err != nil {
+			if err := root.MkdirAll(name, tarFileMode(hdr.Mode)); err != nil {
 				return fmt.Errorf("creating directory %s: %w", name, err)
 			}
 		case tar.TypeReg:
@@ -319,7 +319,7 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 			// would otherwise follow a symlink left by a prior layer and
 			// truncate its (in-root) target instead of replacing the entry.
 			_ = root.Remove(name)
-			f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, tarFileMode(hdr.Mode))
 			if err != nil {
 				return fmt.Errorf("creating file %s: %w", name, err)
 			}
@@ -351,4 +351,23 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 		}
 	}
 	return nil
+}
+
+// tarFileMode translates a POSIX mode integer from a tar header into a Go
+// os.FileMode. tar headers carry setuid/setgid/sticky in the 04000/02000/01000
+// octal bits; Go represents them as ModeSetuid/ModeSetgid/ModeSticky outside
+// ModePerm. *os.Root.{Mkdir,OpenFile} reject any bit outside the Go-defined
+// set with "unsupported file mode", so we must translate rather than cast.
+func tarFileMode(m int64) os.FileMode {
+	mode := os.FileMode(m & 0o777)
+	if m&0o4000 != 0 {
+		mode |= os.ModeSetuid
+	}
+	if m&0o2000 != 0 {
+		mode |= os.ModeSetgid
+	}
+	if m&0o1000 != 0 {
+		mode |= os.ModeSticky
+	}
+	return mode
 }
