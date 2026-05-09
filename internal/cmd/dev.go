@@ -39,10 +39,8 @@ const devOtelPort = 14318
 // (envoy-gateway TLS Secret, per-Gateway data-plane Deployments). The
 // controller-manager binary is told to use this via POD_NAMESPACE so
 // its runtimeNamespace() resolves consistently with the bridge URIs
-// it advertises. Production uses `clrk` (per the binary's
-// defaultNamespace fallback / the deployment's downward API);
-// dev keeps `clrk-system` to match the existing flag values.
-const devClrkNamespace = "clrk-system"
+// it advertises. Same name in dev + prod: `clrk`.
+const devClrkNamespace = "clrk"
 
 type devOpts struct {
 	watch              bool
@@ -605,15 +603,15 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			"--ingress-controller=true",
 			// EG-managed Envoy pods reach the controller-manager's ingress
 			// ext_proc port via the manually-managed Endpoints in
-			// clrk-system/clrk-controller-manager (same pattern as
+			// clrk/clrk-controller-manager (same pattern as
 			// --grpc-advertise-uri above).
-			"--ingress-extproc-host=clrk-controller-manager.clrk-system.svc.cluster.local",
+			"--ingress-extproc-host=clrk-controller-manager.clrk.svc.cluster.local",
 			// EgressGateway reconciler is on.
 			"--egressgateway-controller=true",
 			// Advertise the bridge Service DNS so EG data plane Envoy pods
 			// dial the controller-manager via in-cluster coredns →
 			// manually-managed Endpoints → docker-network IP.
-			"--grpc-advertise-uri=clrk-controller-manager.clrk-system.svc.cluster.local:9443",
+			"--grpc-advertise-uri=clrk-controller-manager.clrk.svc.cluster.local:9443",
 			// Workers in clrk dev run on the docker network and can't
 			// route to k3s ClusterIPs, so the EgressGateway controller
 			// publishes Status.Listeners[*].BackendAddress as
