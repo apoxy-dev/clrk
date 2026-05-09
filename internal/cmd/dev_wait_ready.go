@@ -32,8 +32,8 @@ import (
 //   - clrk.apoxy.dev/v1alpha1 APIService is Available
 //   - Gateway API CRDs are installed (the in-process EG control plane
 //     would crash-loop without them)
-//   - envoy-gateway-system/envoy-gateway Secret exists (certgen ran;
-//     EG xDS server has the cert it needs to serve data-plane Envoys)
+//   - <clrk-ns>/envoy-gateway Secret exists (certgen ran; EG xDS
+//     server has the cert it needs to serve data-plane Envoys)
 func newDevWaitReadyCmd() *cobra.Command {
 	var (
 		timeout    time.Duration
@@ -135,9 +135,9 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 			return err
 		}},
 		{"EG xDS Secret materialized", func(c context.Context) error {
-			_, err := core.CoreV1().Secrets("envoy-gateway-system").Get(c, "envoy-gateway", metav1.GetOptions{})
+			_, err := core.CoreV1().Secrets(devClrkNamespace).Get(c, "envoy-gateway", metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
-				return errors.New("envoy-gateway-system/envoy-gateway not found yet")
+				return fmt.Errorf("%s/envoy-gateway not found yet", devClrkNamespace)
 			}
 			return err
 		}},

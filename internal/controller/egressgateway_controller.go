@@ -72,6 +72,15 @@ type EgressGatewayReconciler struct {
 	// because workers run on the docker network and can't route to k3s
 	// ClusterIPs.
 	DevBackendHost string
+
+	// EnvoyGatewayNamespace is the namespace EG provisions per-EG
+	// Envoy Deployments + Services into. Equal to the controller-
+	// manager's runtime namespace (mirrors EG's
+	// ENVOY_GATEWAY_NAMESPACE env var). Used here to mirror
+	// upstream-CA Secrets and to list EG-managed Services for
+	// listener status. Defaults to "envoy-gateway-system" so a
+	// zero-value reconciler still resolves.
+	EnvoyGatewayNamespace string
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch;update;patch
@@ -325,10 +334,11 @@ func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv
 
 // upstreamAdditionalTrustSecret returns the Secret name to mount as
 // the additional trust bundle, or "" when none is configured. The
-// returned name is the *mirror* secret in envoy-gateway-system that
-// ensureUpstreamTrustMirror creates from the user's source secret —
-// the EG-managed Envoy pod runs in envoy-gateway-system and the
-// kubelet needs the secret in that same namespace.
+// returned name is the *mirror* secret in the EG control-plane
+// namespace that ensureUpstreamTrustMirror creates from the user's
+// source secret — the EG-managed Envoy pod runs in the EG control-
+// plane namespace and the kubelet needs the secret in that same
+// namespace.
 func upstreamAdditionalTrustSecret(eg *clrkv1alpha1.EgressGateway) string {
 	if eg.Spec.UpstreamTLS == nil || eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef == nil {
 		return ""
@@ -337,17 +347,18 @@ func upstreamAdditionalTrustSecret(eg *clrkv1alpha1.EgressGateway) string {
 }
 
 // upstreamTrustMirrorName is the deterministic name for the mirrored
-// trust-bundle secret in envoy-gateway-system.
+// trust-bundle secret in the EG control-plane namespace.
 func upstreamTrustMirrorName(egName string) string {
 	return "clrk-eg-" + egName + "-upstream-ca"
 }
 
 // ensureUpstreamTrustMirror copies the Secret referenced by
 // EgressGatewaySpec.UpstreamTLS.AdditionalTrustBundleSecretRef from
-// the EG's namespace into envoy-gateway-system so the EG-managed
-// Envoy pod (which always runs there) can mount it. When the source
-// Secret is missing the function returns nil — the EG controller
-// reconciles on Secret events too, so we'll re-run when it appears.
+// the EG's namespace into the EG control-plane namespace
+// (r.EnvoyGatewayNamespace) so the EG-managed Envoy pod (which always
+// runs there) can mount it. When the source Secret is missing the
+// function returns nil — the EG controller reconciles on Secret
+// events too, so we'll re-run when it appears.
 //
 // Cross-namespace reference is allowed without a ReferenceGrant gate
 // today: the source must live in the EG's own namespace (we don't
@@ -375,7 +386,7 @@ func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context,
 	mirror := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      upstreamTrustMirrorName(eg.Name),
-			Namespace: envoyGatewayNamespace,
+			Namespace: r.envoyGatewayNamespace(),
 		},
 	}
 	err := createOrUpdateWithRetry(ctx, r.Client, mirror, func() error {
@@ -613,7 +624,15 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 
 func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egName }
 
-const envoyGatewayNamespace = "envoy-gateway-system"
+// envoyGatewayNamespace returns the EG control-plane namespace. Falls
+// back to upstream's "envoy-gateway-system" default when the field
+// isn't set (zero-value reconciler in tests).
+func (r *EgressGatewayReconciler) envoyGatewayNamespace() string {
+	if r.EnvoyGatewayNamespace == "" {
+		return "envoy-gateway-system"
+	}
+	return r.EnvoyGatewayNamespace
+}
 
 // updateStatus refreshes Status.Conditions[Ready] from the EG-managed
 // Gateway's Programmed condition and Status.Listeners[*].BackendAddress
@@ -682,7 +701,7 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) ([]clrkv1alpha1.EgressListenerStatus, bool, error) {
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs,
-		client.InNamespace(envoyGatewayNamespace),
+		client.InNamespace(r.envoyGatewayNamespace()),
 		client.MatchingLabels{
 			"gateway.envoyproxy.io/owning-gateway-name":      gwName,
 			"gateway.envoyproxy.io/owning-gateway-namespace": eg.Namespace,

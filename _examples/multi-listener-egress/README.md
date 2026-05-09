@@ -32,10 +32,11 @@ capture is the point, not the auth outcome).
   names `egress-mitm--tls-terminate` and `egress-tcp--tcp` (the
   shape suffix is what the egextension reads to choose the chain
   rewrite).
-- `kubectl get svc -n envoy-gateway-system -l
+- `kubectl get svc -n clrk-system -l
   gateway.envoyproxy.io/owning-gateway-name=clrk-eg-multi-listener-egress`
-  — the EG-managed Service has TWO ports (18080 + 18081), each with
-  its own NodePort.
+  — the EG-managed Service (in clrk dev's `clrk-system` namespace;
+  `clrk` in production) has TWO ports (18080 + 18081), each with its
+  own NodePort.
 - The TUI's `otel-logs` pane shows two record shapes alternating
   every loop iteration:
   ```

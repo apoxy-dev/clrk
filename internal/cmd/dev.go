@@ -34,6 +34,16 @@ import (
 // it conflicts with another tool we'll expose --otel-port.
 const devOtelPort = 14318
 
+// devClrkNamespace is the in-cluster namespace the dev environment
+// uses for clrk's bridge Services + the EG control-plane resources
+// (envoy-gateway TLS Secret, per-Gateway data-plane Deployments). The
+// controller-manager binary is told to use this via POD_NAMESPACE so
+// its runtimeNamespace() resolves consistently with the bridge URIs
+// it advertises. Production uses `clrk` (per the binary's
+// defaultNamespace fallback / the deployment's downward API);
+// dev keeps `clrk-system` to match the existing flag values.
+const devClrkNamespace = "clrk-system"
+
 type devOpts struct {
 	watch              bool
 	controllerImage    string
@@ -469,7 +479,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			if err := bootstrapClrkAPIService(gctx, state.k3s, cmIP, 8443); err != nil {
 				return fmt.Errorf("registering clrk APIService: %w", err)
 			}
-			if err := state.k3s.ApplyControllerManagerBridge(gctx, cmIP, 9443, 9444, 18000); err != nil {
+			if err := state.k3s.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 18000); err != nil {
 				return fmt.Errorf("bridging controller-manager: %w", err)
 			}
 			slog.Info("Controller-manager registered + bridged", "backend", cmIP)
@@ -552,6 +562,12 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 		// imports go-control-plane's TLS types. Matches the pattern
 		// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
 		"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
+		// Tell the controller-manager its runtime namespace so the
+		// supervised envoy-gateway child gets ENVOY_GATEWAY_NAMESPACE
+		// pointing at the dev bridge ns (matches the --grpc-advertise-uri
+		// + --ingress-extproc-host flags below). Production sets this
+		// via downward API from the Deployment manifest.
+		"POD_NAMESPACE": devClrkNamespace,
 	}
 	if o.otelEndpoint != "" {
 		// Default OTLP target for any EgressGateway whose Spec.OTLP.Endpoint

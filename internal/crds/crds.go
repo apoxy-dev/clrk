@@ -55,18 +55,6 @@ func init() {
 	envoyGatewayYAML = b
 }
 
-// envoyGatewayNamespaceYAML is the envoy-gateway-system namespace EG
-// expects to exist (it stores its OIDC HMAC secret + provisions Envoy
-// data-plane Deployments there). Upstream's install.yaml ships this as
-// part of the operator bundle; we run the operator in-process so we
-// create the namespace ourselves.
-const envoyGatewayNamespaceYAML = `
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: envoy-gateway-system
-`
-
 // Mode controls how Install handles CRDs already present in the cluster.
 type Mode int
 
@@ -170,11 +158,6 @@ func Install(ctx context.Context, cfg *rest.Config, opts InstallOptions) error {
 		return err
 	}
 
-	// Apply non-CRD bootstrap (envoy-gateway-system namespace). SSA so
-	// re-applies are idempotent and don't fight any user-applied labels.
-	if _, _, err := resource.Apply(ctx, dynClient, mapper, []byte(envoyGatewayNamespaceYAML), applyOpts); err != nil {
-		return fmt.Errorf("applying envoy-gateway-system namespace: %w", err)
-	}
 	slog.Info("CRD install complete", "applied", applied.Load(), "skipped", skipped.Load(), "mode", modeString(opts.Mode))
 	return nil
 }

@@ -327,24 +327,27 @@ subsets:
 
 // ApplyControllerManagerBridge wires two selectorless Services to the
 // clrk-controller-manager docker container so in-cluster pods can dial
-// it by DNS name:
+// it by DNS name. Both bridges live in clrkNS — the controller-
+// manager's runtime namespace — to match the in-cluster shape where
+// EG provisions all data-plane resources alongside the controller via
+// `ENVOY_GATEWAY_NAMESPACE`.
 //
-//  1. clrk-system/clrk-controller-manager:{grpcPort,extProcPort} —
+//  1. <clrkNS>/clrk-controller-manager:{grpcPort,extProcPort} —
 //     clrk's gRPC services. grpcPort fronts the extension hooks +
 //     cert provider; extProcPort fronts the TaskAgent ingress
 //     ExternalProcessor consumed by the per-TA EG. Multiple named
 //     ports on a single Service so EG extension config and the
 //     per-namespace `clrk-ingress-extproc` Backend (FQDN.Port=9444)
 //     resolve through one bridge.
-//  2. envoy-gateway-system/envoy-gateway:xdsPort — the EG xDS server.
-//     EG hardcodes "envoy-gateway.envoy-gateway-system.svc:18000" into
-//     the data-plane bootstrap, so the Service has to live under that
-//     exact name.
-func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, cmIP string, grpcPort, extProcPort, xdsPort int32) error {
-	yaml := multiPortServiceBridge("clrk-system", "clrk-controller-manager", cmIP, []bridgePort{
+//  2. <clrkNS>/envoy-gateway:xdsPort — the EG xDS server. EG's data-
+//     plane bootstrap dials `envoy-gateway.${ENVOY_GATEWAY_NAMESPACE}.svc:18000`,
+//     so this Service name is fixed; only the namespace floats with
+//     the runtime ns.
+func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, clrkNS, cmIP string, grpcPort, extProcPort, xdsPort int32) error {
+	yaml := multiPortServiceBridge(clrkNS, "clrk-controller-manager", cmIP, []bridgePort{
 		{Name: "grpc", Port: grpcPort},
 		{Name: "extproc", Port: extProcPort},
-	}) + serviceBridge("envoy-gateway-system", "envoy-gateway", cmIP, xdsPort)
+	}) + serviceBridge(clrkNS, "envoy-gateway", cmIP, xdsPort)
 	return d.KubectlApply(ctx, "-", []byte(yaml))
 }
 

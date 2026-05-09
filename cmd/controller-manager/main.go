@@ -36,9 +36,27 @@ import (
 const (
 	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:665aebbf"
 	defaultGRPCPort   = 9443
+	// defaultNamespace is the controller-manager's fallback runtime
+	// namespace when POD_NAMESPACE is unset (e.g. `go run`,
+	// out-of-cluster invocations). Production runs in-cluster set
+	// POD_NAMESPACE via downward API. Used to redirect EG's control
+	// plane (`ENVOY_GATEWAY_NAMESPACE`) and every clrk-side reference
+	// that previously hardcoded "envoy-gateway-system".
+	defaultNamespace = "clrk"
 )
 
+// runtimeNamespace returns the namespace this process is running in,
+// from POD_NAMESPACE (downward API) or the fallback constant. Same
+// pattern as cmd/worker/main.go.
+func runtimeNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return defaultNamespace
+}
+
 func main() {
+	runtimeNS := runtimeNamespace()
 	var (
 		dbPath           = flag.String("db", defaultDBPath(), "SQLite database path for the embedded apiserver.")
 		bindAddr         = flag.String("bind-addr", "127.0.0.1", "Apiserver bind address. Defaults to loopback so the unauthenticated apiserver is not exposed by accident; pass --insecure-allow-public to bind a non-loopback address while auth remains disabled.")
@@ -47,7 +65,7 @@ func main() {
 		certDir          = flag.String("cert-dir", "", "TLS cert directory; empty means self-signed in-memory.")
 		leaderElection   = flag.Bool("leader-election", false, "Enable leader election.")
 		leaderID         = flag.String("leader-election-id", "clrk-controller-manager", "Leader election lease name.")
-		leaderNS         = flag.String("leader-election-namespace", "default", "Leader election lease namespace.")
+		leaderNS         = flag.String("leader-election-namespace", runtimeNS, "Leader election lease namespace.")
 		metricsAddr      = flag.String("metrics-addr", "0", "Controller-manager metrics bind address (0 disables).")
 		// Default :8082 to avoid colliding with the supervised
 		// envoy-gateway child whose controller-runtime manager hardcodes
@@ -58,7 +76,7 @@ func main() {
 		egController         = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
 		envoyImage           = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
 		grpcAddr             = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
-		grpcAdvertiseURI     = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.default.svc:%d", defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
+		grpcAdvertiseURI     = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.%s.svc:%d", runtimeNS, defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
 		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.Listeners[*].BackendAddress entries are published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
 		envoyGatewayBinary   = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
 		crdInstallMode       = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
@@ -228,10 +246,11 @@ func main() {
 	}
 	if *egController {
 		if err := (&controller.EgressGatewayReconciler{
-			Client:         cm.GetClient(),
-			Scheme:         cm.GetScheme(),
-			EnvoyImage:     *envoyImage,
-			DevBackendHost: *devEgressBackendHost,
+			Client:                cm.GetClient(),
+			Scheme:                cm.GetScheme(),
+			EnvoyImage:            *envoyImage,
+			DevBackendHost:        *devEgressBackendHost,
+			EnvoyGatewayNamespace: runtimeNS,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGateway")
 			os.Exit(1)
@@ -298,11 +317,12 @@ func main() {
 		host, port := splitGRPCAddr(*grpcAddr, defaultGRPCPort)
 		go func() {
 			egErrCh <- egcontrolplane.Run(ctx, egcontrolplane.Config{
-				BinaryPath:    *envoyGatewayBinary,
-				Kubeconfig:    kubeconfig,
-				RestConfig:    clusterCfg,
-				ExtensionHost: host,
-				ExtensionPort: port,
+				BinaryPath:          *envoyGatewayBinary,
+				Kubeconfig:          kubeconfig,
+				RestConfig:          clusterCfg,
+				ExtensionHost:       host,
+				ExtensionPort:       port,
+				ControllerNamespace: runtimeNS,
 			})
 		}()
 	}
