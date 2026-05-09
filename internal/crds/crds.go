@@ -6,6 +6,7 @@ package crds
 import (
 	"context"
 	_ "embed"
+	"embed"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,13 +24,36 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/apoxy-dev/apoxy/pkg/cmd/resource"
+
+	"github.com/apoxy-dev/clrk/internal/eg"
 )
 
 //go:embed gateway-api/experimental-install-v1.2.1.yaml
 var gatewayAPIYAML []byte
 
-//go:embed envoy-gateway/crds-v1.4.0.yaml
+// envoyGatewayCRDsFS embeds the entire envoy-gateway/ subdirectory; the
+// active bundle filename is derived from eg.Version at init time so
+// bumping the EG version requires editing only that constant + dropping
+// the new YAML next to the old one(s). go:embed needs a literal path
+// pattern, hence the dir-level embed.
+//
+//go:embed envoy-gateway/*.yaml
+var envoyGatewayCRDsFS embed.FS
+
 var envoyGatewayYAML []byte
+
+func init() {
+	name := "envoy-gateway/crds-" + eg.Version + ".yaml"
+	b, err := envoyGatewayCRDsFS.ReadFile(name)
+	if err != nil {
+		// A bump that updated eg.Version without dropping the matching
+		// CRD bundle next to it lands here; better to fail at process
+		// start than to install a stale CRD set against a newer EG
+		// binary.
+		panic(fmt.Sprintf("clrk: embedded EG CRD bundle %q missing — bump internal/eg/version.go and drop the matching crds-<Version>.yaml under internal/crds/envoy-gateway/: %v", name, err))
+	}
+	envoyGatewayYAML = b
+}
 
 // envoyGatewayNamespaceYAML is the envoy-gateway-system namespace EG
 // expects to exist (it stores its OIDC HMAC secret + provisions Envoy

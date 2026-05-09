@@ -962,8 +962,23 @@ func buildOriginalDstCluster() (*clusterv3.Cluster, error) {
 // DFP resolves it to the per-TA Envoy Service IP itself, and the
 // request loops back through Envoy until DC.
 //
-// EG 1.4 doesn't expose `mutation_rules` on EnvoyExtensionPolicy,
-// so we patch it here in the post-listener-modify hook.
+// **Why a translator hook and not the EG API.** EG v1.4's
+// `EnvoyExtensionPolicy.spec.extProc[*]` exposes only
+// {BackendCluster, MessageTimeout, FailOpen, ProcessingMode,
+// Metadata} (api/v1alpha1/ext_proc_types.go). There is no
+// `mutationRules` / `allowAllRouting` knob, and v1.5+ hasn't added
+// one either. The only knobs EG offers are at the route level
+// (`HostRewrite` / `URLRewrite` HTTPRouteFilters), which take a
+// static value — useless here because the upstream pod IP comes
+// from the picker on every request.
+//
+// Patching at the xDS translator post hook is the cheapest correct
+// option until upstream EG exposes the field. Idempotent + harmless
+// for the egress filter we build ourselves (it already needs
+// :authority mutation for the DFP host rewrite).
+//
+// See apoxy-cloud//docs/clrk-envoy-gateway.md for the full EG ↔ clrk
+// extension-hook contract.
 func allowExtProcRoutingMutation(l *listenerv3.Listener) int {
 	if l == nil {
 		return 0

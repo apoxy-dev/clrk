@@ -285,9 +285,13 @@ func newKubeClient(cfg Config) (kubernetes.Interface, error) {
 func runCertgen(ctx context.Context, cfg Config) error {
 	c, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	// EG v1.4+ certgen also patches a topology-injector mutating
-	// webhook by default. clrk doesn't install that webhook, so skip
-	// the patch step.
+	// EG ≥ v1.4 certgen also patches a topology-injector mutating
+	// webhook ("envoy-gateway-topology-injector") with the freshly
+	// rotated EG CA bundle. clrk doesn't install that webhook (see
+	// renderConfig in config.go and apoxy-cloud//docs/clrk-envoy-gateway.md
+	// for why), and without this flag certgen fails with a
+	// `MutatingWebhookConfiguration "..." not found` error — the only
+	// webhook surface clrk uses on the EG operator is "none".
 	cmd := exec.CommandContext(c, cfg.BinaryPath, "certgen", "--disable-topology-injector")
 	cmd.Env = os.Environ()
 	if cfg.Kubeconfig != "" {

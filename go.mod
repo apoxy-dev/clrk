@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.2.2+incompatible
 	github.com/dpeckett/contextio v0.5.1
-	github.com/envoyproxy/gateway v1.4.0
+	github.com/envoyproxy/gateway v1.4.0 // KEEP IN SYNC: internal/eg.Version + internal/crds/envoy-gateway/crds-vX.Y.Z.yaml + apoxy-cloud//clrk/BUILD.bazel EG_IMAGE_REF — see apoxy-cloud//docs/clrk-envoy-gateway.md
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/k3s-io/kine v0.14.11
 	github.com/mattn/go-sqlite3 v1.14.42
