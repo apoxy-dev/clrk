@@ -144,6 +144,14 @@ func AttrsFromHeaders(h HeaderLookup, ta *clrkv1alpha1.TaskAgent, passThrough ma
 	if _, ok := out[AttrType]; !ok {
 		out[AttrType] = TypeInvoke
 	}
+	if _, ok := out[AttrSpecVersion]; !ok {
+		// CloudEvents HTTP binding 1.0 requires ce-specversion on
+		// every binary-mode envelope. The dispatcher's structured
+		// envelope already stamps it, but the ext_proc binary-mode
+		// header set must too — agents reading binary mode (Metadata
+		// delivery via /v1/event) need it to dispatch on the version.
+		out[AttrSpecVersion] = SpecVersion
+	}
 	if _, ok := out[AttrTime]; !ok {
 		out[AttrTime] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
