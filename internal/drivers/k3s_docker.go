@@ -329,17 +329,30 @@ subsets:
 // clrk-controller-manager docker container so in-cluster pods can dial
 // it by DNS name:
 //
-//  1. clrk-system/clrk-controller-manager:grpcPort — clrk's gRPC
-//     services (extension hooks, cert provider, ext_proc). The EG
-//     extension programs this DNS into the data-plane Envoy config.
+//  1. clrk-system/clrk-controller-manager:{grpcPort,extProcPort} —
+//     clrk's gRPC services. grpcPort fronts the extension hooks +
+//     cert provider; extProcPort fronts the TaskAgent ingress
+//     ExternalProcessor consumed by the per-TA EG. Multiple named
+//     ports on a single Service so EG extension config and the
+//     per-namespace `clrk-ingress-extproc` Backend (FQDN.Port=9444)
+//     resolve through one bridge.
 //  2. envoy-gateway-system/envoy-gateway:xdsPort — the EG xDS server.
 //     EG hardcodes "envoy-gateway.envoy-gateway-system.svc:18000" into
 //     the data-plane bootstrap, so the Service has to live under that
 //     exact name.
-func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, cmIP string, grpcPort, xdsPort int32) error {
-	yaml := serviceBridge("clrk-system", "clrk-controller-manager", cmIP, grpcPort) +
-		serviceBridge("envoy-gateway-system", "envoy-gateway", cmIP, xdsPort)
+func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, cmIP string, grpcPort, extProcPort, xdsPort int32) error {
+	yaml := multiPortServiceBridge("clrk-system", "clrk-controller-manager", cmIP, []bridgePort{
+		{Name: "grpc", Port: grpcPort},
+		{Name: "extproc", Port: extProcPort},
+	}) + serviceBridge("envoy-gateway-system", "envoy-gateway", cmIP, xdsPort)
 	return d.KubectlApply(ctx, "-", []byte(yaml))
+}
+
+// bridgePort names a single port-and-targetPort entry on a multi-
+// port serviceBridge.
+type bridgePort struct {
+	Name string
+	Port int32
 }
 
 // serviceBridge renders a Namespace + selectorless Service +
@@ -347,6 +360,26 @@ func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, cmIP strin
 // an in-cluster DNS name. Always uses port==targetPort and a single
 // "grpc" port name; the bridge has no other use cases today.
 func serviceBridge(ns, name, ip string, port int32) string {
+	return multiPortServiceBridge(ns, name, ip, []bridgePort{{Name: "grpc", Port: port}})
+}
+
+// multiPortServiceBridge is serviceBridge for the case where the
+// remote container exposes multiple named ports under one DNS name.
+// Endpoints needs every port enumerated for kube-proxy / coredns to
+// route correctly.
+func multiPortServiceBridge(ns, name, ip string, ports []bridgePort) string {
+	var svcPorts, epPorts string
+	for _, p := range ports {
+		svcPorts += fmt.Sprintf(`    - name: %s
+      port: %d
+      protocol: TCP
+      targetPort: %d
+`, p.Name, p.Port, p.Port)
+		epPorts += fmt.Sprintf(`      - name: %s
+        port: %d
+        protocol: TCP
+`, p.Name, p.Port)
+	}
 	return fmt.Sprintf(`apiVersion: v1
 kind: Namespace
 metadata:
@@ -359,11 +392,7 @@ metadata:
   namespace: %s
 spec:
   ports:
-    - name: grpc
-      port: %d
-      protocol: TCP
-      targetPort: %d
----
+%s---
 apiVersion: v1
 kind: Endpoints
 metadata:
@@ -373,9 +402,6 @@ subsets:
   - addresses:
       - ip: %s
     ports:
-      - name: grpc
-        port: %d
-        protocol: TCP
----
-`, ns, name, ns, port, port, name, ns, ip, port)
+%s---
+`, ns, name, ns, svcPorts, name, ns, ip, epPorts)
 }
