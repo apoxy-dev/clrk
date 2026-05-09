@@ -61,6 +61,21 @@ const (
 	// AttrClrkIdentity holds joined audiences from spec.identity
 	// (comma-separated). Empty if the TaskAgent has no identity.
 	AttrClrkIdentity = "clrkidentity"
+
+	// HTTP-binding extension attributes per the CloudEvents `http`
+	// extension. We carry these so an agent receiving the envelope can
+	// distinguish e.g. GET /webhook vs POST / vs DELETE /sessions/X
+	// — without them, the envelope is method/path agnostic and the
+	// agent has no way to act on the request line.
+	//
+	// httpmethod : original request method (GET, POST, DELETE, …).
+	// httpurl    : path-only (no scheme/host); query string lives in
+	//              httpquery so each piece round-trips through the
+	//              CE binary-mode header form without escaping.
+	// httpquery  : raw query string ("a=1&b=2"), no leading "?".
+	AttrHTTPMethod = "httpmethod"
+	AttrHTTPURL    = "httpurl"
+	AttrHTTPQuery  = "httpquery"
 )
 
 const (
@@ -86,7 +101,26 @@ const (
 // mode keys, no `ce-` prefix) for an HTTP request and TaskAgent.
 // Convenience wrapper around AttrsFromHeaders.
 func AttrsFromRequest(r *http.Request, ta *clrkv1alpha1.TaskAgent) map[string]string {
-	return AttrsFromHeaders(HTTPHeader(r.Header), ta, ceHeaderIter(r.Header))
+	passThrough := ceHeaderIter(r.Header)
+	// HTTP-extension attrs come from the request line, not headers —
+	// fold them into the passThrough map so AttrsFromHeaders treats
+	// them as already-resolved (and any caller-set ce-httpmethod /
+	// ce-httpurl / ce-httpquery still wins, mirroring the precedence
+	// rule for the rest of the attrs).
+	if r.Method != "" {
+		if _, ok := passThrough[AttrHTTPMethod]; !ok {
+			passThrough[AttrHTTPMethod] = r.Method
+		}
+	}
+	if r.URL != nil {
+		if _, ok := passThrough[AttrHTTPURL]; !ok && r.URL.Path != "" {
+			passThrough[AttrHTTPURL] = r.URL.Path
+		}
+		if _, ok := passThrough[AttrHTTPQuery]; !ok && r.URL.RawQuery != "" {
+			passThrough[AttrHTTPQuery] = r.URL.RawQuery
+		}
+	}
+	return AttrsFromHeaders(HTTPHeader(r.Header), ta, passThrough)
 }
 
 // AttrsFromHeaders is the shared construction path used by both
@@ -131,6 +165,26 @@ func AttrsFromHeaders(h HeaderLookup, ta *clrkv1alpha1.TaskAgent, passThrough ma
 	if _, ok := out[AttrClrkIdentity]; !ok && ta != nil && ta.Spec.Identity != nil {
 		if aud := identityAudiences(ta.Spec.Identity); aud != "" {
 			out[AttrClrkIdentity] = aud
+		}
+	}
+	// HTTP-binding extension attrs: ext_proc has the request line in
+	// the HTTP/2 pseudo-headers (`:method`, `:path`). The dispatcher
+	// path pre-populates these into passThrough from r.Method / r.URL,
+	// so this branch is the ext_proc fallback.
+	if _, ok := out[AttrHTTPMethod]; !ok {
+		if m := h.Get(":method"); m != "" {
+			out[AttrHTTPMethod] = m
+		}
+	}
+	if _, ok := out[AttrHTTPURL]; !ok {
+		if p := h.Get(":path"); p != "" {
+			path, query, _ := strings.Cut(p, "?")
+			out[AttrHTTPURL] = path
+			if query != "" {
+				if _, qok := out[AttrHTTPQuery]; !qok {
+					out[AttrHTTPQuery] = query
+				}
+			}
 		}
 	}
 	return out
