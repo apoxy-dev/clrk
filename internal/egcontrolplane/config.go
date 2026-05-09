@@ -24,6 +24,8 @@ provider:
   kubernetes:
     leaderElection:
       disable: true
+    proxyTopologyInjector:
+      disabled: true
 extensionApis:
   enableBackend: true
 extensionManager:

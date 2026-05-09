@@ -285,7 +285,10 @@ func newKubeClient(cfg Config) (kubernetes.Interface, error) {
 func runCertgen(ctx context.Context, cfg Config) error {
 	c, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(c, cfg.BinaryPath, "certgen")
+	// EG v1.4+ certgen also patches a topology-injector mutating
+	// webhook by default. clrk doesn't install that webhook, so skip
+	// the patch step.
+	cmd := exec.CommandContext(c, cfg.BinaryPath, "certgen", "--disable-topology-injector")
 	cmd.Env = os.Environ()
 	if cfg.Kubeconfig != "" {
 		cmd.Env = append(cmd.Env, "KUBECONFIG="+cfg.Kubeconfig)

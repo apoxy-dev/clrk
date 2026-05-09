@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -100,10 +101,12 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 		if apierrors.IsNotFound(err) {
 			return immediateResponse(typev3.StatusCode_NotFound, "clrk: TaskAgent not found")
 		}
+		slog.Error("ingress ext_proc: TaskAgent lookup failed", "ns", ns, "name", name, "err", err)
 		return immediateResponse(typev3.StatusCode_InternalServerError, "clrk: TaskAgent lookup failed")
 	}
 
 	if ta.Status.LatestReadyRevisionName == "" {
+		slog.Warn("ingress ext_proc: TaskAgent has no ready revision", "ns", ns, "name", name)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: TaskAgent has no ready revision")
 	}
 
@@ -124,8 +127,10 @@ func (s *Server) handleRequestHeaders(ctx context.Context, in *extprocv3.HttpHea
 	pick, ok := s.picker.Pick(pool, ns, name, ta.Status.LatestReadyRevisionName, maxConcurrent, tieBreaker)
 	if !ok {
 		if pick.AlreadyAtCap {
+			slog.Warn("ingress ext_proc: TaskAgent at MaxConcurrent", "ns", ns, "name", name)
 			return immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: TaskAgent at MaxConcurrent across the cluster")
 		}
+		slog.Warn("ingress ext_proc: no ready worker", "ns", ns, "name", name, "pool", pool, "revision", ta.Status.LatestReadyRevisionName)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: no ready worker for TaskAgent")
 	}
 

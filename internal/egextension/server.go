@@ -24,6 +24,7 @@ import (
 
 	pb "github.com/envoyproxy/gateway/proto/extension"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	mutationrulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -227,6 +228,17 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 	listener := req.GetListener()
 	if listener == nil {
 		return &pb.PostHTTPListenerModifyResponse{Listener: listener}, nil
+	}
+
+	// Unconditionally allow ext_proc to mutate routing pseudo-headers
+	// (`:authority`, `host`). Envoy's default disallows mutation of
+	// system headers, which silently drops the per-TA ingress ext_proc's
+	// `:authority` rewrite to the picked worker pod IP. EG 1.4 doesn't
+	// expose `mutation_rules` on EnvoyExtensionPolicy, so we patch it
+	// here. Idempotent + harmless for the egress filter we build
+	// ourselves.
+	if n := allowExtProcRoutingMutation(listener); n > 0 {
+		logger.V(1).Info("Patched ext_proc filter(s) with allow_all_routing", "listener", listener.GetName(), "patched", n)
 	}
 
 	egKey, ok := egressGatewayFromListener(listener)
@@ -935,4 +947,81 @@ func buildOriginalDstCluster() (*clusterv3.Cluster, error) {
 			Type: clusterv3.Cluster_ORIGINAL_DST,
 		},
 	}, nil
+}
+
+// allowExtProcRoutingMutation walks every HCM filter chain on the
+// listener and patches each ext_proc HTTP filter's typed_config to
+// set `mutation_rules.allow_all_routing: true`. Returns the number
+// of ext_proc filters patched.
+//
+// Envoy's default `mutation_rules` for ext_proc disallows mutation
+// of routing pseudo-headers (`:authority`, `host`, `:scheme`,
+// `:path`, `:method`). Without this flag set the per-TA ingress
+// ext_proc's `:authority` rewrite to the picked worker pod IP is
+// silently dropped — Envoy keeps the original Service hostname,
+// DFP resolves it to the per-TA Envoy Service IP itself, and the
+// request loops back through Envoy until DC.
+//
+// EG 1.4 doesn't expose `mutation_rules` on EnvoyExtensionPolicy,
+// so we patch it here in the post-listener-modify hook.
+func allowExtProcRoutingMutation(l *listenerv3.Listener) int {
+	if l == nil {
+		return 0
+	}
+	chains := append([]*listenerv3.FilterChain{}, l.GetFilterChains()...)
+	if dfc := l.GetDefaultFilterChain(); dfc != nil {
+		chains = append(chains, dfc)
+	}
+	patched := 0
+	for _, fc := range chains {
+		for _, f := range fc.GetFilters() {
+			if f.GetName() != hcmFilterName {
+				continue
+			}
+			tc := f.GetTypedConfig()
+			if tc == nil {
+				continue
+			}
+			hcm := &hcmv3.HttpConnectionManager{}
+			if err := tc.UnmarshalTo(hcm); err != nil {
+				continue
+			}
+			changed := false
+			for _, hf := range hcm.GetHttpFilters() {
+				if !strings.HasPrefix(hf.GetName(), extProcFilterName) {
+					continue
+				}
+				htc := hf.GetTypedConfig()
+				if htc == nil {
+					continue
+				}
+				ep := &extprocv3.ExternalProcessor{}
+				if err := htc.UnmarshalTo(ep); err != nil {
+					continue
+				}
+				if ep.MutationRules == nil {
+					ep.MutationRules = &mutationrulesv3.HeaderMutationRules{}
+				}
+				if ep.MutationRules.AllowAllRouting.GetValue() {
+					continue
+				}
+				ep.MutationRules.AllowAllRouting = wrapperspb.Bool(true)
+				newAny, err := anypb.New(ep)
+				if err != nil {
+					continue
+				}
+				hf.ConfigType = &hcmv3.HttpFilter_TypedConfig{TypedConfig: newAny}
+				patched++
+				changed = true
+			}
+			if changed {
+				newHCMAny, err := anypb.New(hcm)
+				if err != nil {
+					continue
+				}
+				f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: newHCMAny}
+			}
+		}
+	}
+	return patched
 }
