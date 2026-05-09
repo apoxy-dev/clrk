@@ -8,6 +8,12 @@ import (
 // renderConfig produces the EnvoyGateway YAML the child reads via
 // --config-path. Leader election is disabled: one supervised child per
 // pod means the lease buys nothing and would need pre-created RBAC.
+//
+// extensionApis.enableBackend=true is required because the
+// per-TaskAgent HTTPRoute backendRef is an EG `Backend{type:
+// DynamicResolver}` (not a core Service). Without the toggle, EG
+// flags the route as ResolvedRefs=False / UnsupportedValue and the
+// data plane returns 500 on every request.
 func renderConfig(cfg Config) string {
 	return fmt.Sprintf(`apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyGateway
@@ -18,6 +24,8 @@ provider:
   kubernetes:
     leaderElection:
       disable: true
+extensionApis:
+  enableBackend: true
 extensionManager:
   hooks:
     xdsTranslator:
