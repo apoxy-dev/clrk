@@ -32,11 +32,20 @@ const IngressExtProcBackendName = "clrk-ingress-extproc"
 // stamps HeaderWorkerEndpoint with the picked pod IP for telemetry;
 // the worker dispatcher reads HeaderTaskAgent and writes HeaderExitCode
 // on the response.
+//
+// HeaderInvocationID is generated (or accepted from HeaderExecutionID)
+// at the ingress edge and forwarded to the worker so the dispatcher
+// can use it as the per-sandbox PROXY v2 invocation.id TLV. That same
+// id is the key the egress ext_proc uses to look up the inbound
+// trace parent in the controller-manager-local invocationctx store —
+// it's how the inbound traceparent reaches outbound LLM/MCP calls
+// without requiring agent-side instrumentation.
 const (
 	HeaderTaskAgent      = "X-Clrk-TaskAgent"
 	HeaderTrigger        = "X-Clrk-Trigger"
 	HeaderExitCode       = "X-Clrk-Exit-Code"
 	HeaderExecutionID    = "X-Clrk-Execution-ID"
+	HeaderInvocationID   = "X-Clrk-Invocation-ID"
 	HeaderWorkerEndpoint = "X-Clrk-Worker-Endpoint"
 )
 

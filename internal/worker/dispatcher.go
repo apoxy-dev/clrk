@@ -275,7 +275,17 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
+	// Per-invocation id is stamped on the sandbox identity (and thus on
+	// every PROXY v2 frame the IdentityDialer emits) so the egress
+	// ext_proc can look up the inbound traceparent in the
+	// invocationctx store on each outbound LLM/MCP call. Resolution
+	// order favors what ingress already stamped, falling back to the
+	// caller's idempotency key, Envoy's auto-injected x-request-id,
+	// and finally a fresh UUID for direct-to-dispatcher invocations
+	// that bypass the ingress edge.
+	invocationID := resolveInvocationID(r.Header)
 	identity := newAgentIdentity(proxyproto.AgentKindTask, ns, name, string(ta.UID), rev.Name)
+	identity.InvocationID = invocationID
 
 	// Try the warm pool first. A warm sandbox already has the rootfs
 	// mounted, the libcontainer container Created, the TAP+netns
@@ -292,7 +302,12 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sb = warm
 			sandboxID = warm.ID
 			warmHit = true
-			log = log.WithValues("warm", true, "sandboxID", sandboxID)
+			// Warm sandboxes were created with no invocation-id (the
+			// fill happens before any specific request exists). Stamp
+			// the per-request id now, before Start builds the
+			// IdentityDialer off sb.Identity.
+			sb.Identity.InvocationID = invocationID
+			log = log.WithValues("warm", true, "sandboxID", sandboxID, "invocationID", invocationID)
 		}
 	}
 
@@ -416,9 +431,9 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 
 	var (
-		respCh         chan bool
-		stdoutBuf      *bytes.Buffer
-		stdoutBufErr   chan error
+		respCh       chan bool
+		stdoutBuf    *bytes.Buffer
+		stdoutBufErr chan error
 	)
 	switch {
 	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && !wrapResponse:
@@ -534,6 +549,19 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// resolveInvocationID returns the per-request invocation id used as
+// the PROXY v2 invocation.id TLV value. Ingress stamps
+// HeaderInvocationID on every request it forwards; we fall back to
+// the caller-supplied execution-id, Envoy's auto-injected
+// x-request-id, and finally a fresh UUID so direct-to-dispatcher
+// invocations (cron, in-cluster bypass) still have a unique id.
+func resolveInvocationID(h http.Header) string {
+	if v := h.Get(ports.HeaderInvocationID); v != "" {
+		return v
+	}
+	return cloudevents.ResolveID(cloudevents.HTTPHeader(h))
+}
+
 // readBodyBounded reads up to limit bytes from r and returns them.
 // Anything beyond limit is rejected with an explicit error so we
 // fail loudly rather than silently truncate the agent's input.
@@ -581,11 +609,11 @@ func buildCEEnvelope(attrs map[string]string, contentType string, body []byte) [
 // ce-relationid pointing back at the request id.
 func buildCEResponseEnvelope(reqID, contentType string, body []byte) []byte {
 	env := map[string]any{
-		cloudevents.AttrSpecVersion:  cloudevents.SpecVersion,
-		cloudevents.AttrType:         cloudevents.TypeResponse,
-		cloudevents.AttrID:           reqID + ".response",
-		cloudevents.AttrTime:         time.Now().UTC().Format(time.RFC3339Nano),
-		cloudevents.AttrRelationID:   reqID,
+		cloudevents.AttrSpecVersion: cloudevents.SpecVersion,
+		cloudevents.AttrType:        cloudevents.TypeResponse,
+		cloudevents.AttrID:          reqID + ".response",
+		cloudevents.AttrTime:        time.Now().UTC().Format(time.RFC3339Nano),
+		cloudevents.AttrRelationID:  reqID,
 	}
 	if contentType != "" {
 		env[cloudevents.AttrDataContentType] = contentType

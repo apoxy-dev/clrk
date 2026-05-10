@@ -16,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -24,6 +23,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 )
 
 // Attribute keys clrk publishes that don't live in OTel semconv.
@@ -87,9 +87,8 @@ const (
 // Both signals share one OTLP/HTTP endpoint today (see APO-554 for
 // per-signal endpoint splitting).
 type otlpSink struct {
-	logger     otellog.Logger
-	tracer     oteltrace.Tracer
-	propagator propagation.TextMapPropagator
+	logger otellog.Logger
+	tracer oteltrace.Tracer
 }
 
 func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink, func(context.Context) error, error) {
@@ -130,9 +129,8 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 	)
 
 	sink := &otlpSink{
-		logger:     logsProvider.Logger("github.com/apoxy-dev/clrk/internal/extproc"),
-		tracer:     tracesProvider.Tracer("github.com/apoxy-dev/clrk/internal/extproc"),
-		propagator: propagation.TraceContext{},
+		logger: logsProvider.Logger("github.com/apoxy-dev/clrk/internal/extproc"),
+		tracer: tracesProvider.Tracer("github.com/apoxy-dev/clrk/internal/extproc"),
 	}
 	shutdown := func(ctx context.Context) error {
 		var errs []string
@@ -307,7 +305,7 @@ func (s *otlpSink) EmitL4(r L4Record) {
 // emitSpan returns the un-Ended span; caller stamps end after emitLog
 // so the back-link log carries the matching trace_id/span_id.
 func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
-	parentCtx := s.extractParent(context.Background(), r.RequestHeaders)
+	parentCtx := tracectx.Extract(context.Background(), r.RequestHeaders)
 	spanName := spanNameFor(r, d)
 
 	attrs := append(agentAttrs(r),
@@ -472,16 +470,6 @@ func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 	return append(dst, aprAttrs(r)...)
 }
 
-// extractParent threads any inbound W3C traceparent through as the
-// span's parent. We never rewrite traceparent on the wire — the
-// upstream sees whatever the agent emitted unchanged.
-func (s *otlpSink) extractParent(ctx context.Context, headers map[string]string) context.Context {
-	if _, ok := headers["traceparent"]; !ok {
-		return ctx
-	}
-	return s.propagator.Extract(ctx, propagation.MapCarrier(headers))
-}
-
 // agentAttrs returns the identity sub-slice common to span + log.
 func agentAttrs(r Record) []attribute.KeyValue {
 	return []attribute.KeyValue{
@@ -544,14 +532,15 @@ func durationMillis(r Record) int {
 
 // headerAttrs produces one attribute per header, prefixed for direction.
 // Header keys are pre-lowercased by headersToMap, so we don't re-lower
-// them here (and isSensitiveHeader operates on the same lowercase form).
+// them here (and tracectx.IsSensitiveHeader operates on the same
+// lowercase form).
 func headerAttrs(prefix string, headers map[string]string) []attribute.KeyValue {
 	if len(headers) == 0 {
 		return nil
 	}
 	out := make([]attribute.KeyValue, 0, len(headers))
 	for k, v := range headers {
-		if isSensitiveHeader(k) {
+		if tracectx.IsSensitiveHeader(k) {
 			v = "[redacted]"
 		}
 		out = append(out, attribute.String(prefix+k, v))
@@ -565,25 +554,6 @@ func bodyAttrs(body []byte, truncated bool) []attribute.KeyValue {
 		attribute.Bool(attrBodyTruncated, truncated),
 		attribute.String(attrBodyB64, base64.StdEncoding.EncodeToString(body)),
 	}
-}
-
-// sensitiveHeaders is the conservative redact list. Keys are lowercase
-// to match headersToMap. Extend cautiously — over-redacting silently
-// hides telemetry operators may need.
-var sensitiveHeaders = map[string]struct{}{
-	"authorization":       {},
-	"proxy-authorization": {},
-	"cookie":              {},
-	"set-cookie":          {},
-	"x-api-key":           {},
-	"x-auth-token":        {},
-	"openai-api-key":      {},
-	"anthropic-api-key":   {},
-}
-
-func isSensitiveHeader(name string) bool {
-	_, ok := sensitiveHeaders[name]
-	return ok
 }
 
 func severityFor(status int) otellog.Severity {

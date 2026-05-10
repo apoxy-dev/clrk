@@ -193,26 +193,34 @@ func applyInjections(existing *extprocv3.HeaderMutation, injs []credInjection) *
 	if len(injs) == 0 {
 		return existing
 	}
+	for _, inj := range injs {
+		existing = setHeaderMut(existing, inj.headerName, inj.headerValue)
+	}
+	return existing
+}
+
+// setHeaderMut appends an OVERWRITE-flavored SetHeaders entry on
+// existing (allocating one if nil). Two non-obvious choices live here
+// so both callers (credential injection, traceparent injection) get
+// them right:
+//
+//  1. RawValue, not Value: Envoy 1.36 ext_proc mutation_utils reads
+//     only RawValue. Setting Value silently sets the header to empty.
+//  2. OVERWRITE_IF_EXISTS_OR_ADD, not the default APPEND: APPEND
+//     concatenates onto any agent-supplied value with a comma,
+//     breaking auth schemes that don't tolerate multi-value headers
+//     and (for traceparent) producing a malformed W3C header.
+func setHeaderMut(existing *extprocv3.HeaderMutation, name, value string) *extprocv3.HeaderMutation {
 	if existing == nil {
 		existing = &extprocv3.HeaderMutation{}
 	}
-	for _, inj := range injs {
-		existing.SetHeaders = append(existing.SetHeaders, &corev3.HeaderValueOption{
-			Header: &corev3.HeaderValue{
-				Key: inj.headerName,
-				// Envoy 1.36 ext_proc mutation_utils reads only RawValue
-				// and silently ignores Value. Setting Value here gets the
-				// header set to empty string, so credential injection
-				// becomes a no-op.
-				RawValue: []byte(inj.headerValue),
-			},
-			// Always overwrite any agent-supplied value (smuggle defense).
-			// Default is APPEND_IF_EXISTS_OR_ADD which would concatenate
-			// to the agent value with a comma, breaking auth schemes that
-			// don't tolerate multi-value headers.
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		})
-	}
+	existing.SetHeaders = append(existing.SetHeaders, &corev3.HeaderValueOption{
+		Header: &corev3.HeaderValue{
+			Key:      name,
+			RawValue: []byte(value),
+		},
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+	})
 	return existing
 }
 

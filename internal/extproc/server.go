@@ -30,7 +30,9 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
+	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 )
 
 // MetadataNamespace is the dynamic-metadata key carrying clrk PROXY v2 TLV
@@ -138,6 +140,17 @@ func WithSinkOverride(sink Sink) ServerOption {
 	return func(s *Server) { s.sinkOverride = sink }
 }
 
+// WithInvocationContext threads the controller-manager-local store
+// that carries an invocation's W3C trace parent context from ingress
+// to egress. The egress filter consults it on every stream's
+// RequestHeaders phase to (a) parent the egress span on the inbound
+// trace and (b) inject `traceparent` on the outbound request when
+// the agent didn't set one — see the package doc on
+// internal/extproc/invocationctx.
+func WithInvocationContext(store *invocationctx.Store) ServerOption {
+	return func(s *Server) { s.invocations = store }
+}
+
 // Server implements ExternalProcessorServer.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
@@ -145,8 +158,9 @@ type Server struct {
 	client       client.Client
 	sinkOverride Sink
 
-	registry *sinkRegistry
-	budget   *budgetStore
+	registry    *sinkRegistry
+	budget      *budgetStore
+	invocations *invocationctx.Store
 }
 
 // New constructs an ext_proc server. The client is used to look up
@@ -295,6 +309,13 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// Done here, before the dfp HTTP filter, so dfp parses the
 			// rewritten value. Filter order is ext_proc → dfp → router.
 			mut := authorityPortMutation(rec.RequestHeaders[":authority"])
+			// Inject the inbound W3C trace parent on the outbound
+			// request when the agent didn't set one. The lookup is
+			// keyed by invocation.id (carried via PROXY v2 TLV →
+			// dynamic metadata → rec.InvocationID). Honors any
+			// agent-set traceparent so deliberately instrumented
+			// agents continue to drive their own context.
+			mut = applyTraceparentInjection(mut, s.invocations, rec.InvocationID, rec.RequestHeaders)
 			// Inject credentials from any CredentialInjectionPolicy
 			// attached to the matched APR or to the EG itself. This is
 			// the architectural enforcement that API keys never live
@@ -683,6 +704,43 @@ func decodeAgentKind(raw string) string {
 		return clrkv1alpha1.AgentKindTask
 	}
 	return raw
+}
+
+// applyTraceparentInjection mutates the outbound request to carry the
+// inbound trace parent on the wire when the agent didn't set one.
+// The lookup is keyed by invocation.id (carried as a PROXY v2 TLV
+// from the sandbox's IdentityDialer), recovered from the
+// invocationctx store the ingress filter populates. No-op when:
+//
+//   - the store isn't wired (tests, init order),
+//   - the invocation has no recorded parent (direct-dispatcher path),
+//   - the agent already set traceparent (we honor instrumented
+//     callers; respect their context).
+//
+// The captured rec.RequestHeaders map is also updated so OTLP span
+// emission later parents off the same context.
+func applyTraceparentInjection(existing *extprocv3.HeaderMutation, store *invocationctx.Store, invocationID string, headers map[string]string) *extprocv3.HeaderMutation {
+	if store == nil || invocationID == "" {
+		return existing
+	}
+	if _, agentSet := headers[tracectx.HeaderTraceparent]; agentSet {
+		return existing
+	}
+	parent, ok := store.Get(invocationID)
+	if !ok || !parent.IsValid() {
+		return existing
+	}
+	traceparent, tracestate := tracectx.Inject(parent)
+	if traceparent == "" {
+		return existing
+	}
+	existing = setHeaderMut(existing, tracectx.HeaderTraceparent, traceparent)
+	headers[tracectx.HeaderTraceparent] = traceparent
+	if tracestate != "" {
+		existing = setHeaderMut(existing, tracectx.HeaderTracestate, tracestate)
+		headers[tracectx.HeaderTracestate] = tracestate
+	}
+	return existing
 }
 
 // authorityPortRE matches a trailing :NN port suffix on a host. We don't

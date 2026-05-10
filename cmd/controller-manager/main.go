@@ -30,6 +30,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
+	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
 )
 
@@ -262,12 +263,21 @@ func main() {
 		log.Error(err, "Unable to bind gRPC listener", "addr", *grpcAddr)
 		os.Exit(1)
 	}
+	// invocations carries the inbound W3C trace parent context from
+	// the ingress ext_proc to the egress ext_proc, keyed by the per-
+	// invocation id we stamp on every TaskAgent request. Both servers
+	// share the same store; the reaper runs for the controller-
+	// manager's lifetime.
+	invocations := invocationctx.NewStore()
+	go invocations.Run(ctx)
+	defer invocations.Close()
+
 	grpcSrv := grpc.NewServer(
 		grpc.UnaryInterceptor(egidentity.UnaryServerInterceptor()),
 		grpc.StreamInterceptor(egidentity.StreamServerInterceptor()),
 	)
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
-	extprocSrv := extproc.New(cm.GetClient())
+	extprocSrv := extproc.New(cm.GetClient(), extproc.WithInvocationContext(invocations))
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extprocSrv)
 	// L4 ext_proc service shares the same gRPC endpoint, EG identity
 	// resolution, and per-EG sink registry as the HTTP path. Records
@@ -303,7 +313,7 @@ func main() {
 		os.Exit(1)
 	}
 	ingressGRPC := grpc.NewServer()
-	extprocv3.RegisterExternalProcessorServer(ingressGRPC, ingressextproc.New(cm.GetClient(), healthChecker))
+	extprocv3.RegisterExternalProcessorServer(ingressGRPC, ingressextproc.New(cm.GetClient(), healthChecker, invocations))
 	go func() {
 		slog.Info("Serving ingress ext_proc gRPC", "addr", ingressLis.Addr().String())
 		if err := ingressGRPC.Serve(ingressLis); err != nil {

@@ -76,6 +76,16 @@ const (
 	AttrHTTPMethod = "httpmethod"
 	AttrHTTPURL    = "httpurl"
 	AttrHTTPQuery  = "httpquery"
+
+	// CloudEvents distributed-tracing extension attributes
+	// (https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/distributed-tracing.md).
+	// Carry the W3C parent context the ingress edge captured (or
+	// synthesized) so an agent reading the envelope can resume the
+	// trace in-process. The egress MITM injects the same value on
+	// outbound LLM/MCP calls, so trace continuity holds even for
+	// agents that never look at the envelope.
+	AttrTraceparent = "traceparent"
+	AttrTracestate  = "tracestate"
 )
 
 const (
@@ -193,6 +203,20 @@ func AttrsFromHeaders(h HeaderLookup, ta *clrkv1alpha1.TaskAgent, passThrough ma
 					out[AttrHTTPQuery] = query
 				}
 			}
+		}
+	}
+	// CloudEvents distributed-tracing extension: lift the inbound W3C
+	// trace context (set by the ingress ext_proc) onto the envelope.
+	// Empty values are omitted so an un-traced request doesn't leave
+	// stub keys in the JSON.
+	if _, ok := out[AttrTraceparent]; !ok {
+		if tp := h.Get("traceparent"); tp != "" {
+			out[AttrTraceparent] = tp
+		}
+	}
+	if _, ok := out[AttrTracestate]; !ok {
+		if ts := h.Get("tracestate"); ts != "" {
+			out[AttrTracestate] = ts
 		}
 	}
 	return out
