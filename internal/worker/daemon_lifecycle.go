@@ -347,11 +347,11 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 // cancellation triggers a sandbox Stop and lets Wait return. If
 // SIGTERM doesn't unblock Wait within sigtermGrace (e.g. the
 // container's PID 1 is a `while true` loop that doesn't propagate
-// signals), escalate to Delete which Destroys the cgroup and
-// SIGKILLs every PID — Wait then returns and run() unwinds. Without
-// this escalation a non-cooperating sandbox strands its supervisor
-// goroutine forever, blocking GCMissing/Stop callers and ultimately
-// the heartbeat loop.
+// signals), escalate to Kill (SIGKILL via libcontainer; init's death
+// reaps the rest of the PID namespace). Wait then returns and run()
+// unwinds. Without this escalation a non-cooperating sandbox strands
+// its supervisor goroutine forever, blocking GCMissing/Stop callers
+// and ultimately the heartbeat loop.
 func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID) (*os.ProcessState, error) {
 	type waitResult struct {
 		state *os.ProcessState
@@ -372,7 +372,7 @@ func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID)
 		case r := <-ch:
 			return r.state, r.err
 		case <-time.After(sigtermGrace):
-			_ = m.sandboxMgr.Delete(context.Background(), id)
+			_ = m.sandboxMgr.Kill(context.Background(), id)
 			r := <-ch
 			return r.state, r.err
 		}

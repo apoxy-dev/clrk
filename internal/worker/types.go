@@ -106,6 +106,7 @@ type SandboxRuntime interface {
 	SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error
 	Start(ctx context.Context, id SandboxID) error
 	Stop(ctx context.Context, id SandboxID) error
+	Kill(ctx context.Context, id SandboxID) error
 	Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error)
 	Delete(ctx context.Context, id SandboxID) error
 }

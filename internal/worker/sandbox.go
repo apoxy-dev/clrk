@@ -565,6 +565,32 @@ func (m *SandboxManager) Stop(ctx context.Context, id SandboxID) error {
 	return nil
 }
 
+// Kill sends SIGKILL to the container's init via libcontainer. With a
+// private PID namespace, killing init reaps every process in the
+// namespace; with a shared one, libcontainer falls back to walking
+// the cgroup. Used as the SIGTERM-escalation path for daemons whose
+// PID 1 ignores SIGTERM (e.g. a bash `while true` loop).
+func (m *SandboxManager) Kill(ctx context.Context, id SandboxID) error {
+	m.mu.Lock()
+	_, ok := m.sandboxes[id]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+
+	ctr, err := libcontainer.Load(m.stateDir, string(id))
+	if err == libcontainer.ErrNotExist {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("loading container: %w", err)
+	}
+	if err := ctr.Signal(syscall.SIGKILL); err != nil {
+		return fmt.Errorf("SIGKILL container: %w", err)
+	}
+	return nil
+}
+
 // Delete destroys the container, tears down the network namespace, and
 // removes the sandbox from tracking.
 func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
