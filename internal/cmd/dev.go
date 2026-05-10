@@ -452,6 +452,14 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		slog.Warn("Failed to register dev context in ~/.clrk/config", "err", err)
 	}
 
+	// Materialize the controller-manager's runtime namespace before the
+	// container starts — the supervised envoy-gateway certgen writes
+	// its TLS Secret to clrk/envoy-gateway as its very first action
+	// and crash-loops if the namespace doesn't exist.
+	if err := state.k3s.EnsureNamespace(ctx, devClrkNamespace); err != nil {
+		return state, fmt.Errorf("ensuring %q namespace: %w", devClrkNamespace, err)
+	}
+
 	state.cm = drivers.NewControllerManagerDriver()
 	cmOpts, err := controllerManagerOpts(o)
 	if err != nil {
