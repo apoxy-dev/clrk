@@ -323,7 +323,7 @@ func (w *WarmPool) fillOne(ctx context.Context, key WarmKey) (*SandboxInstance, 
 	identity := newAgentIdentity(proxyproto.AgentKindTask, key.Namespace, key.Agent, string(ta.UID), rev.Name)
 
 	w.sandboxMgr.Purge(ctx, sandboxID)
-	sb, err := w.sandboxMgr.Create(ctx, sandboxID, key.Agent, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true)
+	sb, err := w.sandboxMgr.Create(ctx, sandboxID, key.Agent, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true, 0)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox Create: %w", err)
 	}

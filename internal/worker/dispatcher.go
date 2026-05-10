@@ -331,7 +331,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.sandboxMgr.Purge(ctx, sandboxID)
-		sb, err = d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true)
+		sb, err = d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true, 0)
 		if err != nil {
 			if errors.Is(err, ErrStateOverLimit) {
 				log.Info("Refusing dispatch — agent state over size limit", "err", err)

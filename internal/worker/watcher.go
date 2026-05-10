@@ -35,7 +35,17 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	var rev clrkv1alpha1.AgentSandboxRevision
 	if err := w.Get(ctx, req.NamespacedName, &rev); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// Revision gone — controller-runtime won't deliver a
+			// second event for it, and the in-process daemon
+			// supervisor only learns about deletions via this
+			// reconcile path. Tear it down explicitly so the
+			// sandbox doesn't leak. Safe no-op for TaskAgent
+			// revisions: daemonMgr only holds DaemonAgent loops.
+			w.daemonMgr.StopByRevision(req.Namespace, req.Name)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	log.Info("Reconciling AgentSandboxRevision")
@@ -202,6 +212,18 @@ func (w *sandboxWatcher) heartbeatLoop(ctx context.Context, interval time.Durati
 				log.Error(err, "Failed to list AgentSandboxRevisions")
 				continue
 			}
+
+			// GC any daemon loops whose revisions no longer
+			// exist. Catches missed delete events from
+			// controller-runtime informer reconnects /
+			// resyncs that would otherwise leave orphan
+			// sandboxes hammering deleted egress gateways.
+			liveRevs := make(map[types.NamespacedName]struct{}, len(revList.Items))
+			for i := range revList.Items {
+				r := &revList.Items[i]
+				liveRevs[types.NamespacedName{Namespace: r.Namespace, Name: r.Name}] = struct{}{}
+			}
+			w.daemonMgr.GCMissing(liveRevs)
 
 			now := metav1.NewTime(time.Now())
 			for i := range revList.Items {

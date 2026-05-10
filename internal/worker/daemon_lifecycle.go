@@ -140,6 +140,47 @@ func (m *daemonLifecycleManager) Stop(key types.NamespacedName) {
 	<-loop.done
 }
 
+// StopByRevision stops the loop, if any, whose current revision matches
+// (namespace, revName). The loops map is keyed by DaemonAgent
+// namespaced-name; once a revision is deleted its labels are gone, so
+// the watcher can no longer recover the agent name from the revision.
+// Scan the loops map by stored revName instead.
+func (m *daemonLifecycleManager) StopByRevision(namespace, revName string) {
+	m.mu.Lock()
+	var key types.NamespacedName
+	found := false
+	for k, loop := range m.loops {
+		if k.Namespace == namespace && loop.revName == revName {
+			key = k
+			found = true
+			break
+		}
+	}
+	m.mu.Unlock()
+	if found {
+		m.Stop(key)
+	}
+}
+
+// GCMissing stops any loop whose current revision isn't present in
+// liveRevs. Caller must pass the authoritative set of revisions
+// targeting this worker's pool from a successful List(); a partial
+// list would falsely GC live loops.
+func (m *daemonLifecycleManager) GCMissing(liveRevs map[types.NamespacedName]struct{}) {
+	m.mu.Lock()
+	var stale []types.NamespacedName
+	for k, loop := range m.loops {
+		revKey := types.NamespacedName{Namespace: k.Namespace, Name: loop.revName}
+		if _, ok := liveRevs[revKey]; !ok {
+			stale = append(stale, k)
+		}
+	}
+	m.mu.Unlock()
+	for _, k := range stale {
+		m.Stop(k)
+	}
+}
+
 // Shutdown cancels every loop and waits for them all to exit.
 func (m *daemonLifecycleManager) Shutdown() {
 	m.mu.Lock()
@@ -204,7 +245,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		// strands the state directory and every subsequent retry
 		// rejects with "container with given ID already exists".
 		m.sandboxMgr.Purge(ctx, sandboxID)
-		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources, nil, false); err != nil {
+		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources, nil, false, attempt); err != nil {
 			log.Error(err, "Failed to create sandbox")
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return

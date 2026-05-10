@@ -52,6 +52,7 @@ type SandboxManager struct {
 	stateDir   string // libcontainer state dir (e.g. /run/clrk/state).
 	rootDir    string // Per-sandbox rootfs overlay dir (e.g. /run/clrk/rootfs).
 	logsDir    string // Per-agent stdio log files (e.g. /run/clrk/logs).
+	podName    string // Worker pod name; stamped on every sandbox's libcontainer Labels.
 	imageStore *ImageStore
 	dialer     netstack.Dialer // Egress dialer for sandbox netstacks.
 	// workerResolvers is the worker container's own DNS server list.
@@ -88,11 +89,12 @@ type sandboxLogs struct {
 }
 
 // NewSandboxManager creates a new SandboxManager.
-func NewSandboxManager(stateDir, rootDir, logsDir string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
+func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
 	return &SandboxManager{
 		stateDir:        stateDir,
 		rootDir:         rootDir,
 		logsDir:         logsDir,
+		podName:         podName,
 		imageStore:      imageStore,
 		dialer:          dialer,
 		workerResolvers: readWorkerResolvers(),
@@ -126,6 +128,7 @@ func (m *SandboxManager) Create(
 	resources clrkv1alpha1.ExecutionResources,
 	state *clrkv1alpha1.AgentState,
 	stdio bool,
+	attempt int32,
 ) (*SandboxInstance, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
@@ -163,6 +166,11 @@ func (m *SandboxManager) Create(
 
 	// 5. Build libcontainer config.
 	cfg := baseConfig(string(id), sandboxRootFS, resources)
+	// Stamp API lineage as libcontainer Labels so the on-disk
+	// state.json carries it. Surfaces via `runc state <id>` and
+	// becomes the basis for future restart-time recovery /
+	// stale-revision GC paths.
+	cfg.Labels = BuildSandboxLabels(identity, m.podName, attempt)
 
 	// 5a. Stage the agent's MITM CA and bind-mount it over every well-known
 	// system trust path that exists in the sandbox rootfs. The rootfs is

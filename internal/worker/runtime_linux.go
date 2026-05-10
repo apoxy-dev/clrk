@@ -46,7 +46,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 
 	// Initialize components.
 	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, imageStore, router)
+	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, router)
 
 	// Clean up orphaned containers from previous incarnation.
 	if err := sandboxMgr.Cleanup(ctx); err != nil {

@@ -100,6 +100,7 @@ type SandboxRuntime interface {
 		resources clrkv1alpha1.ExecutionResources,
 		state *clrkv1alpha1.AgentState,
 		stdio bool,
+		attempt int32,
 	) (*SandboxInstance, error)
 	SetEgressBackends(id SandboxID, backends []egress.BackendListener) error
 	SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error
