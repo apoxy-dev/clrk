@@ -394,8 +394,11 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		// Build a structured-mode CE JSON envelope and stream it to
 		// stdin in the background; close stdin on EOF so the agent's
-		// read returns. stdinErr surfaces a write failure so a body
-		// half-delivery becomes a 500.
+		// read returns. The envelope carries the request body (inline
+		// for JSON/text, base64 for everything else) plus all CE
+		// attributes including httpmethod/httpurl/httpquery — so a
+		// body-less GET still reaches the agent with the request line
+		// intact, which a raw-body pipe could not represent.
 		envelope := buildCEEnvelope(ceAttrs, r.Header.Get("Content-Type"), bodyBytes)
 		stdinErr := make(chan error, 1)
 		go func() {
@@ -550,7 +553,9 @@ func readBodyBounded(r io.Reader, limit int64) ([]byte, error) {
 
 // buildCEEnvelope produces a structured-mode CloudEvents JSON
 // envelope. JSON / text bodies inline as `data`; everything else
-// goes into `data_base64`.
+// goes into `data_base64`. Empty bodies emit no `data`/`data_base64`
+// field at all so the agent can distinguish "no payload" from
+// "empty payload".
 func buildCEEnvelope(attrs map[string]string, contentType string, body []byte) []byte {
 	env := map[string]any{
 		cloudevents.AttrSpecVersion: cloudevents.SpecVersion,

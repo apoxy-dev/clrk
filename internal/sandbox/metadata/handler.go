@@ -90,7 +90,10 @@ func buildStructuredEnvelope(e *Entry) map[string]any {
 		env[k] = v
 	}
 	switch {
-	case isJSONContentType(e.ContentType) && len(e.Body) > 0:
+	case len(e.Body) == 0:
+		// Empty body — leave data / data_base64 unset entirely so
+		// agents can distinguish "no payload" from "empty payload".
+	case isJSONContentType(e.ContentType):
 		env["data"] = json.RawMessage(e.Body)
 	case isTextContentType(e.ContentType):
 		env["data"] = string(e.Body)
