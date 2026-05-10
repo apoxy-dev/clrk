@@ -166,6 +166,12 @@ func (m *daemonLifecycleManager) StopByRevision(namespace, revName string) {
 // liveRevs. Caller must pass the authoritative set of revisions
 // targeting this worker's pool from a successful List(); a partial
 // list would falsely GC live loops.
+//
+// Stops are dispatched in goroutines: Stop blocks on loop.done, and
+// the heartbeat caller must not stall on a single supervisor that's
+// slow to unwind (e.g. waiting on a SIGTERM-resistant sandbox to
+// exit). Stop already removes the map entry atomically, so a
+// subsequent GCMissing tick won't re-fire for the same key.
 func (m *daemonLifecycleManager) GCMissing(liveRevs map[types.NamespacedName]struct{}) {
 	m.mu.Lock()
 	var stale []types.NamespacedName
@@ -177,7 +183,7 @@ func (m *daemonLifecycleManager) GCMissing(liveRevs map[types.NamespacedName]str
 	}
 	m.mu.Unlock()
 	for _, k := range stale {
-		m.Stop(k)
+		go m.Stop(k)
 	}
 }
 
@@ -338,12 +344,20 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 }
 
 // waitOrCancel blocks on the sandbox's exit, but races against ctx so a
-// cancellation triggers a sandbox Stop and lets Wait return.
+// cancellation triggers a sandbox Stop and lets Wait return. If
+// SIGTERM doesn't unblock Wait within sigtermGrace (e.g. the
+// container's PID 1 is a `while true` loop that doesn't propagate
+// signals), escalate to Delete which Destroys the cgroup and
+// SIGKILLs every PID — Wait then returns and run() unwinds. Without
+// this escalation a non-cooperating sandbox strands its supervisor
+// goroutine forever, blocking GCMissing/Stop callers and ultimately
+// the heartbeat loop.
 func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID) (*os.ProcessState, error) {
 	type waitResult struct {
 		state *os.ProcessState
 		err   error
 	}
+	const sigtermGrace = 5 * time.Second
 	ch := make(chan waitResult, 1)
 	go func() {
 		s, e := m.sandboxMgr.Wait(context.Background(), id)
@@ -354,8 +368,14 @@ func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID)
 		return r.state, r.err
 	case <-ctx.Done():
 		_ = m.sandboxMgr.Stop(context.Background(), id)
-		r := <-ch
-		return r.state, r.err
+		select {
+		case r := <-ch:
+			return r.state, r.err
+		case <-time.After(sigtermGrace):
+			_ = m.sandboxMgr.Delete(context.Background(), id)
+			r := <-ch
+			return r.state, r.err
+		}
 	}
 }
 
