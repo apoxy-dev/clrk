@@ -145,6 +145,12 @@ func parentRefIsClrkEgressGateway(ref gwapiv1.ParentReference) bool {
 // rule's provider is "", the rule is skipped — a misconfigured route
 // without a provider clause shouldn't silently match everything.
 //
+// reqPath is the HTTP/2 :path pseudo-header, which can include a query
+// string. The endpoint globs are documented as path-only patterns, so
+// we strip "?..." before matching; otherwise a literal endpoint like
+// "/v1/messages" silently fails to match SDK-emitted paths like
+// "/v1/messages?beta=true" (Claude Code, OpenAI SDKs).
+//
 // Callers that don't yet know the model (pre-flight, before body
 // buffering) pass model="" and rely on matchesGlobAny treating an
 // empty value against a non-empty model glob as no-match. Today
@@ -152,6 +158,9 @@ func parentRefIsClrkEgressGateway(ref gwapiv1.ParentReference) bool {
 // won't be used for pre-flight enforcement — that's intentional: a
 // model gate can't fire until we've parsed the body.
 func (t *routeTable) match(provider, reqPath, model string) *routeRule {
+	if i := strings.IndexByte(reqPath, '?'); i >= 0 {
+		reqPath = reqPath[:i]
+	}
 	for i := range t.rules {
 		rr := &t.rules[i]
 		if rr.provider == "" {
