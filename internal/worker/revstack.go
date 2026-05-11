@@ -41,9 +41,11 @@ type revStackEntry struct {
 	// SlotLookup keyed by the connection's source IP.
 	dialer *egress.IdentityDialer
 
-	mu      sync.Mutex
+	// mu guards slots and closing. Read-heavy on the dial / IMDS
+	// hot paths (lookupDial/lookupEntry); writes only on Attach /
+	// Detach / scheduleClose.
+	mu      sync.RWMutex
 	slots   map[netip.Addr]*sandboxSlot
-	refs    int
 	closing *time.Timer
 }
 
@@ -102,7 +104,6 @@ func NewRevisionStackManager(baseDialer netstack.Dialer, workerResolvers []netip
 // IdentityDialer. The InvocationID field is ignored here — per-
 // dispatch InvocationID is delivered via SetInvocation on the slot.
 func (m *RevisionStackManager) Attach(
-	ctx context.Context,
 	identity proxyproto.AgentIdentity,
 	tapFD *os.File,
 	gw, sandboxIP netip.Addr,
@@ -112,7 +113,7 @@ func (m *RevisionStackManager) Attach(
 	m.mu.Lock()
 	entry, ok := m.entries[key]
 	if !ok {
-		built, err := m.buildEntry(ctx, key, identity)
+		built, err := m.buildEntry(key, identity)
 		if err != nil {
 			m.mu.Unlock()
 			return nil, err
@@ -120,8 +121,6 @@ func (m *RevisionStackManager) Attach(
 		entry = built
 		m.entries[key] = entry
 	}
-	// Cancel any pending grace-period close — a new attach revives
-	// the stack.
 	if entry.closing != nil {
 		entry.closing.Stop()
 		entry.closing = nil
@@ -136,7 +135,6 @@ func (m *RevisionStackManager) Attach(
 
 	entry.mu.Lock()
 	entry.slots[sandboxIP] = &sandboxSlot{nicID: nicID}
-	entry.refs++
 	entry.mu.Unlock()
 
 	return &RevisionStackHandle{
@@ -150,7 +148,7 @@ func (m *RevisionStackManager) Attach(
 // buildEntry assembles a fresh revStackEntry: gVisor stack, dialer,
 // IMDS server. Called under m.mu so concurrent Attaches for the
 // same key dedupe to a single stack.
-func (m *RevisionStackManager) buildEntry(ctx context.Context, key WarmKey, identity proxyproto.AgentIdentity) (*revStackEntry, error) {
+func (m *RevisionStackManager) buildEntry(key WarmKey, identity proxyproto.AgentIdentity) (*revStackEntry, error) {
 	stk, err := netstack.NewRevisionStack()
 	if err != nil {
 		return nil, fmt.Errorf("creating revision netstack: %w", err)
@@ -188,22 +186,19 @@ func (m *RevisionStackManager) buildEntry(ctx context.Context, key WarmKey, iden
 }
 
 // Detach removes the handle's NIC from its RevisionStack and clears
-// the slot. When the stack's refcount hits zero it stays alive for
+// the slot. When the last sandbox detaches the stack stays alive for
 // revStackGrace so the next dispatch (warm-pool refill, follow-up
 // request) doesn't have to rebuild the IMDS listener / DNS cache /
 // forwarders. Idempotent — repeat calls are safe.
 func (h *RevisionStackHandle) Detach() {
-	if h == nil || h.entry == nil {
+	if h.entry == nil {
 		return
 	}
 	entry := h.entry
 
 	entry.mu.Lock()
 	delete(entry.slots, h.sandboxIP)
-	if entry.refs > 0 {
-		entry.refs--
-	}
-	idle := entry.refs == 0
+	idle := len(entry.slots) == 0
 	entry.mu.Unlock()
 
 	_ = entry.stack.Detach(h.nicID)
@@ -223,9 +218,6 @@ func (h *RevisionStackHandle) SandboxIP() netip.Addr { return h.sandboxIP }
 // slot. Concurrent dispatches against the same revision keep their
 // own backend snapshots — re-resolved per dispatch at the dispatcher.
 func (h *RevisionStackHandle) SetEgressBackends(backends []egress.BackendListener) {
-	if h == nil || h.entry == nil {
-		return
-	}
 	slot := h.entry.getSlot(h.sandboxIP)
 	if slot == nil {
 		return
@@ -238,9 +230,6 @@ func (h *RevisionStackHandle) SetEgressBackends(backends []egress.BackendListene
 // SetEgressPolicy writes the per-sandbox SandboxPolicy handle into
 // the slot.
 func (h *RevisionStackHandle) SetEgressPolicy(policy *egress.SandboxPolicy) {
-	if h == nil || h.entry == nil {
-		return
-	}
 	slot := h.entry.getSlot(h.sandboxIP)
 	if slot == nil {
 		return
@@ -251,14 +240,9 @@ func (h *RevisionStackHandle) SetEgressPolicy(policy *egress.SandboxPolicy) {
 }
 
 // SetInvocationID stamps the per-dispatch InvocationID into the
-// slot. Called once per dispatch — cold and warm path alike — so
-// warm reruns get a fresh ID for proxyproto TLVs (fixes the latent
-// staleness bug where the old per-sandbox dialer captured the
-// first dispatch's InvocationID for the sandbox's lifetime).
+// slot. Rewritten on every dispatch — cold and warm alike — so warm
+// reruns pick up a fresh id for proxyproto TLVs.
 func (h *RevisionStackHandle) SetInvocationID(invocationID string) {
-	if h == nil || h.entry == nil {
-		return
-	}
 	slot := h.entry.getSlot(h.sandboxIP)
 	if slot == nil {
 		return
@@ -274,9 +258,6 @@ func (h *RevisionStackHandle) SetInvocationID(invocationID string) {
 // teardown runs — leaving the slot itself intact (the sandbox may
 // be reused on a warm-pool path).
 func (h *RevisionStackHandle) RegisterMetadataEntry(entry *metadata.Entry) func() {
-	if h == nil || h.entry == nil {
-		return func() {}
-	}
 	slot := h.entry.getSlot(h.sandboxIP)
 	if slot == nil {
 		return func() {}
@@ -296,9 +277,9 @@ func (h *RevisionStackHandle) RegisterMetadataEntry(entry *metadata.Entry) func(
 // lookupDial implements egress.SlotLookupFunc — resolves the dial-
 // time per-sandbox config from the connection's source IP.
 func (e *revStackEntry) lookupDial(srcIP netip.Addr) (egress.DialSlot, bool) {
-	e.mu.Lock()
+	e.mu.RLock()
 	slot := e.slots[srcIP]
-	e.mu.Unlock()
+	e.mu.RUnlock()
 	if slot == nil {
 		return egress.DialSlot{}, false
 	}
@@ -311,9 +292,9 @@ func (e *revStackEntry) lookupDial(srcIP netip.Addr) (egress.DialSlot, bool) {
 // *Entry for an inbound /v1/event or /v1/response request by
 // connection source IP.
 func (e *revStackEntry) lookupEntry(srcIP netip.Addr) *metadata.Entry {
-	e.mu.Lock()
+	e.mu.RLock()
 	slot := e.slots[srcIP]
-	e.mu.Unlock()
+	e.mu.RUnlock()
 	if slot == nil {
 		return nil
 	}
@@ -326,8 +307,8 @@ func (e *revStackEntry) lookupEntry(srcIP netip.Addr) *metadata.Entry {
 // sandbox is attached. Callers hold the returned slot's own mutex
 // for state mutations; the entry-level mu only guards the map.
 func (e *revStackEntry) getSlot(srcIP netip.Addr) *sandboxSlot {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.slots[srcIP]
 }
 
@@ -336,9 +317,9 @@ func (e *revStackEntry) getSlot(srcIP netip.Addr) *sandboxSlot {
 // stack is still idle, the manager tears the entry down.
 func (m *RevisionStackManager) scheduleClose(key WarmKey) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	entry, ok := m.entries[key]
 	if !ok {
-		m.mu.Unlock()
 		return
 	}
 	if entry.closing != nil {
@@ -347,11 +328,10 @@ func (m *RevisionStackManager) scheduleClose(key WarmKey) {
 	entry.closing = time.AfterFunc(revStackGrace, func() {
 		m.closeIfIdle(key)
 	})
-	m.mu.Unlock()
 }
 
-// closeIfIdle tears down the entry for key if its refcount is still
-// zero. Triggered by the grace-period timer.
+// closeIfIdle tears down the entry for key if no sandbox is still
+// attached. Triggered by the grace-period timer.
 func (m *RevisionStackManager) closeIfIdle(key WarmKey) {
 	m.mu.Lock()
 	entry, ok := m.entries[key]
@@ -359,9 +339,9 @@ func (m *RevisionStackManager) closeIfIdle(key WarmKey) {
 		m.mu.Unlock()
 		return
 	}
-	entry.mu.Lock()
-	stillIdle := entry.refs == 0
-	entry.mu.Unlock()
+	entry.mu.RLock()
+	stillIdle := len(entry.slots) == 0
+	entry.mu.RUnlock()
 	if !stillIdle {
 		m.mu.Unlock()
 		return
@@ -385,9 +365,9 @@ func (m *RevisionStackManager) releaseIfUnused(key WarmKey) {
 		m.mu.Unlock()
 		return
 	}
-	entry.mu.Lock()
-	idle := entry.refs == 0 && len(entry.slots) == 0
-	entry.mu.Unlock()
+	entry.mu.RLock()
+	idle := len(entry.slots) == 0
+	entry.mu.RUnlock()
 	if !idle {
 		m.mu.Unlock()
 		return
@@ -424,7 +404,3 @@ func (m *RevisionStackManager) Shutdown() {
 		_ = e.stack.Close()
 	}
 }
-
-// ensureContext keeps godoc happy that we use ctx (unused field
-// today — passed in case future Attach paths need an early cancel).
-var _ = func(_ context.Context) {}

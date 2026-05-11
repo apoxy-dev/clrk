@@ -32,17 +32,11 @@ type DialSlot struct {
 // semantics.
 type SlotLookupFunc func(srcIP netip.Addr) (DialSlot, bool)
 
-// IdentityDialer wraps a base netstack Dialer. It is constructed
-// once per (TaskAgent, revision) by the worker's RevisionStackManager
-// and shared across every concurrent sandbox of that revision —
-// per-dispatch state (InvocationID, Backends, Policy) is resolved
-// per-dial via SlotLookup, keyed by the intercepted connection's
-// source IP (threaded through ctx by the TCP forwarder).
-//
-// Sharing the dialer fixes a latent staleness bug in the old
-// per-sandbox model where InvocationID was captured on the dialer
-// at sandbox Start and never refreshed for subsequent warm
-// dispatches.
+// IdentityDialer wraps a base netstack Dialer. One instance per
+// (TaskAgent, revision) is shared across every concurrent sandbox of
+// that revision; per-dispatch state (InvocationID, Backends, Policy)
+// is resolved per-dial via SlotLookup, keyed by the intercepted
+// connection's source IP (threaded through ctx by the TCP forwarder).
 type IdentityDialer struct {
 	Base     netstack.Dialer
 	Identity proxyproto.AgentIdentity

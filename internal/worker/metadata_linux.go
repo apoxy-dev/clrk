@@ -15,11 +15,6 @@ import (
 // io.Closer clears the slot's Entry when the dispatch teardown runs
 // — leaving the slot itself intact (the sandbox may be reused on a
 // warm-pool path).
-//
-// Replaces the pre-refactor startMetadataServer which stood up a
-// fresh dual-listener http.Server per dispatch on the per-sandbox
-// gVisor stack. The listener is now bound once per RevisionStack at
-// stack construction; this call is pure slot-table mutation.
 func registerMetadataEntry(sb *SandboxInstance, entry *metadata.Entry) (io.Closer, error) {
 	handle, ok := sb.stack.(*RevisionStackHandle)
 	if !ok || handle == nil {

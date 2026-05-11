@@ -163,7 +163,7 @@ func (m *SandboxManager) Create(
 	// attach for (ns, agent, revision) and ref-counts attachments;
 	// the IMDS listener, IdentityDialer, and DNS cache are all
 	// per-revision rather than per-sandbox.
-	revAttach, err := m.revStackMgr.Attach(ctx, identity, nsCfg.TAPFD, nsCfg.GW, nsCfg.IP)
+	revAttach, err := m.revStackMgr.Attach(identity, nsCfg.TAPFD, nsCfg.GW, nsCfg.IP)
 	if err != nil {
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("attaching sandbox to revision netstack: %w", err)
