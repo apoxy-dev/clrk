@@ -19,28 +19,21 @@ is whatever the agent prints on stdout.
 | Egress story               | one POST per second   | Anthropic round-trip per request    |
 | Verified output            | no                    | yes (shell runs jq + returns result)|
 
-## Build the image
-
-```bash
-docker build --platform=linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-  -t ghcr.io/<your-org>/clrk-jq-bot:latest _examples/jq-bot/
-docker push ghcr.io/<your-org>/clrk-jq-bot:latest
-```
-
-Edit `manifests/taskagent.yaml` and set:
-
-- `spec.template.spec.image` → your pushed image ref.
-- `spec.template.spec.env[ANTHROPIC_API_KEY].value` → your real key,
-  OR keep it as a placeholder and wire up the
-  `egressgateway.yaml`/`aiproviderroute.yaml`/`credentialinjectionpolicy.yaml`
-  manifests (commented-out by default; see "Wiring credential
-  injection" below).
-
 ## Run
 
+A prebuilt multi-arch image is published at
+`us-west1-docker.pkg.dev/apoxy-dev/public/clrk-jq-bot:latest` (linux/amd64,
+linux/arm64) and `manifests/taskagent.yaml` already points at it. Just
+apply:
+
 ```bash
-kubectl apply -f _examples/jq-bot/manifests/taskagent.yaml
+kubectl apply -f _examples/jq-bot/manifests/
 ```
+
+The supplied manifests also wire the egress MITM (see "Credential
+injection" below) so the real `ANTHROPIC_API_KEY` lives only in the
+`anthropic-credentials` Secret and is injected by Envoy on outbound
+`/v1/messages` calls.
 
 Wait for the per-TA Gateway to come up:
 
@@ -48,6 +41,20 @@ Wait for the per-TA Gateway to come up:
 clrk dev wait-ready
 kubectl get gateway jq-bot   # PROGRAMMED=True
 ```
+
+### Building your own image
+
+If you want to fork the agent, rebuild from the Dockerfile and push
+somewhere your worker pool can pull from:
+
+```bash
+docker buildx build \
+  --platform=linux/amd64,linux/arm64 \
+  -t <your-registry>/clrk-jq-bot:latest --push _examples/jq-bot/
+```
+
+Then edit `manifests/taskagent.yaml`'s `spec.template.spec.image` and
+re-apply.
 
 ## Invoke
 

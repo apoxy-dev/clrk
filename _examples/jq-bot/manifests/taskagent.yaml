@@ -13,8 +13,10 @@ spec:
   timeout: 100s
   template:
     spec:
-      # Replace with the registry path you pushed _examples/jq-bot/Dockerfile to.
-      image: ghcr.io/apoxy-dev/clrk-jq-bot:latest
+      # Prebuilt multi-arch image (linux/amd64, linux/arm64). To use
+      # your own fork, rebuild from _examples/jq-bot/Dockerfile and
+      # push to a registry your worker pool can pull from.
+      image: us-west1-docker.pkg.dev/apoxy-dev/public/clrk-jq-bot:latest
       env:
         # Placeholder. The CredentialInjectionPolicy rewrites x-api-key
         # on the egress side; this value never reaches Anthropic.
