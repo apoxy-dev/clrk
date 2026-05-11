@@ -41,7 +41,7 @@ const (
 
 const (
 	// hardTimeoutCap is the absolute upper bound on a single execution,
-	// regardless of TaskAgent.spec.timeoutSeconds. Matches the cron
+	// regardless of TaskAgent.spec.timeout. Matches the cron
 	// invoker's per-fire cap so cron and HTTP share the same ceiling.
 	hardTimeoutCap = 5 * time.Minute
 )
@@ -266,11 +266,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timeout := hardTimeoutCap
-	if ta.Spec.TimeoutSeconds != nil && *ta.Spec.TimeoutSeconds > 0 {
-		t := time.Duration(*ta.Spec.TimeoutSeconds) * time.Second
-		if t < timeout {
-			timeout = t
-		}
+	if ta.Spec.Timeout != nil && ta.Spec.Timeout.Duration > 0 && ta.Spec.Timeout.Duration < timeout {
+		timeout = ta.Spec.Timeout.Duration
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
@@ -771,7 +768,7 @@ func (d *Dispatcher) Run(ctx context.Context, addr string) error {
 		Addr:    addr,
 		Handler: d,
 		// No read/write timeouts: per-execution deadlines are enforced
-		// inside ServeHTTP via spec.timeoutSeconds, and streaming
+		// inside ServeHTTP via spec.timeout, and streaming
 		// responses can run as long as the agent does (up to the cap).
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctrl.LoggerInto(context.Background(), ctrl.Log.WithName("dispatch"))

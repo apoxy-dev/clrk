@@ -30,7 +30,7 @@ type Entry struct {
 	ContentType string
 
 	// Body is the buffered request body served from GET /v1/event.
-	// Sized by the original Content-Length / spec.timeoutSeconds; we
+	// Sized by the original Content-Length / spec.timeout; we
 	// trust the dispatcher to enforce sane bounds.
 	Body []byte
 

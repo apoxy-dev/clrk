@@ -1918,9 +1918,9 @@ func (in *TaskAgentSpec) DeepCopyInto(out *TaskAgentSpec) {
 	*out = *in
 	in.Template.DeepCopyInto(&out.Template)
 	in.Resources.DeepCopyInto(&out.Resources)
-	if in.TimeoutSeconds != nil {
-		in, out := &in.TimeoutSeconds, &out.TimeoutSeconds
-		*out = new(int32)
+	if in.Timeout != nil {
+		in, out := &in.Timeout, &out.Timeout
+		*out = new(metav1.Duration)
 		**out = **in
 	}
 	if in.MaxConcurrent != nil {

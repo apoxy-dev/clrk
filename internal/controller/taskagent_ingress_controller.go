@@ -386,6 +386,12 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 	beKind := gwapiv1.Kind("Backend")
 	beName := gwapiv1.ObjectName(dynamicBackendName(ta))
 
+	// Peg the route timeout to spec.timeout so cold-start LLM agents
+	// (Claude Code, etc.) don't get cut off by Envoy's 15s HTTPRoute
+	// default. The API server defaults Timeout via the +kubebuilder
+	// tag, so it's always set by the time reconcile observes the object.
+	routeTimeout := gwapiv1.Duration(ta.Spec.Timeout.Duration.String())
+
 	return &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ta.Name,
@@ -405,6 +411,10 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 			},
 			Rules: []gwapiv1.HTTPRouteRule{
 				{
+					Timeouts: &gwapiv1.HTTPRouteTimeouts{
+						Request:        &routeTimeout,
+						BackendRequest: &routeTimeout,
+					},
 					Matches: []gwapiv1.HTTPRouteMatch{
 						{
 							Path: &gwapiv1.HTTPPathMatch{

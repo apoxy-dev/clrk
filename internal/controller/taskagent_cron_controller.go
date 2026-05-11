@@ -32,7 +32,7 @@ const (
 	// minute-resolution so 1 Hz is well under user-expressible granularity.
 	tickInterval = time.Second
 	// invokeTimeoutCap upper-bounds the per-fire HTTP call so a wedged
-	// backend can't pin a fire goroutine forever. spec.timeoutSeconds caps
+	// backend can't pin a fire goroutine forever. spec.timeout caps
 	// from below.
 	invokeTimeoutCap = 5 * time.Minute
 )
@@ -308,10 +308,8 @@ func (r *TaskAgentCronReconciler) fire(parent context.Context, key types.Namespa
 	}
 
 	timeout := invokeTimeoutCap
-	if ta.Spec.TimeoutSeconds != nil && *ta.Spec.TimeoutSeconds > 0 {
-		if d := time.Duration(*ta.Spec.TimeoutSeconds) * time.Second; d < timeout {
-			timeout = d
-		}
+	if ta.Spec.Timeout != nil && ta.Spec.Timeout.Duration > 0 && ta.Spec.Timeout.Duration < timeout {
+		timeout = ta.Spec.Timeout.Duration
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()

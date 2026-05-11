@@ -40,10 +40,11 @@ type TaskAgentSpec struct {
 	// +optional
 	Resources ExecutionResources `json:"resources,omitempty"`
 
-	// TimeoutSeconds caps how long a single execution can run.
-	// +kubebuilder:default=300
+	// Timeout caps how long a single execution can run. Accepts a Go
+	// duration string ("100s", "5m", "1h30m"). Defaults to 100s.
+	// +kubebuilder:default="100s"
 	// +optional
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
 	// MaxConcurrent caps how many executions of this agent can run
 	// simultaneously across all workers. 0 = unlimited.

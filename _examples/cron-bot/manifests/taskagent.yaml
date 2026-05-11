@@ -15,9 +15,9 @@ spec:
     greeting: "hello from cron"
     iteration: 0
   # Per-execution wall-clock cap. The cron firer also bounds each
-  # POST at min(timeoutSeconds, 5min) so a wedged sandbox doesn't
-  # pin the ticker goroutine across slots.
-  timeoutSeconds: 30
+  # POST at min(timeout, 5min) so a wedged sandbox doesn't pin the
+  # ticker goroutine across slots.
+  timeout: 30s
   template:
     spec:
       # Minimal agent: print the trigger body and exit. The

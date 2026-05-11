@@ -3559,11 +3559,10 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentSpec(ref common.ReferenceCallback) c
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources"),
 						},
 					},
-					"timeoutSeconds": {
+					"timeout": {
 						SchemaProps: spec.SchemaProps{
-							Description: "TimeoutSeconds caps how long a single execution can run.",
-							Type:        []string{"integer"},
-							Format:      "int32",
+							Description: "Timeout caps how long a single execution can run. Accepts a Go duration string (\"100s\", \"5m\", \"1h30m\"). Defaults to 100s.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
 						},
 					},
 					"maxConcurrent": {
@@ -3636,7 +3635,7 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentSpec(ref common.ReferenceCallback) c
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentDelivery", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentEgressRef", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentIdentity", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandboxRevisionTemplate", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentStreaming", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentDelivery", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentEgressRef", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentIdentity", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandboxRevisionTemplate", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentStreaming", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
 	}
 }
 

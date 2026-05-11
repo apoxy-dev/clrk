@@ -31,7 +31,7 @@ import (
 )
 
 // DefaultTTL bounds an invocation's parent-context lifetime in the
-// store. Longer than the longest TaskAgent.spec.timeoutSeconds the
+// store. Longer than the longest TaskAgent.spec.timeout the
 // dispatcher caps at (5 min today) so an in-flight invocation always
 // finds its parent on every outbound call. The reaper drops entries
 // past TTL on its next pass.

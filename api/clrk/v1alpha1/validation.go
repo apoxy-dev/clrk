@@ -100,9 +100,9 @@ func (ta *TaskAgent) Validate(_ context.Context) field.ErrorList {
 		errs = append(errs, field.Required(specPath.Child("workerPoolRef"), "workerPoolRef is required"))
 	}
 
-	if ta.Spec.TimeoutSeconds != nil && *ta.Spec.TimeoutSeconds <= 0 {
-		errs = append(errs, field.Invalid(specPath.Child("timeoutSeconds"), *ta.Spec.TimeoutSeconds,
-			"timeoutSeconds must be > 0"))
+	if ta.Spec.Timeout != nil && ta.Spec.Timeout.Duration <= 0 {
+		errs = append(errs, field.Invalid(specPath.Child("timeout"), ta.Spec.Timeout.Duration.String(),
+			"timeout must be > 0"))
 	}
 
 	if ta.Spec.MaxConcurrent != nil && *ta.Spec.MaxConcurrent < 0 {
