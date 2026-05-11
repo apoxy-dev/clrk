@@ -257,9 +257,7 @@ func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv
 		dep.Container = &egv1alpha1.KubernetesContainerSpec{Image: &image}
 	}
 
-	if patch := upstreamHostAliasesPatch(eg); patch != nil {
-		dep.Patch = patch
-	}
+	dep.Patch = envoyDeploymentPatch(eg)
 
 	bundleSecret := upstreamAdditionalTrustSecret(eg)
 	if bundleSecret == "" {
@@ -414,30 +412,41 @@ func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context,
 	return nil
 }
 
-// upstreamHostAliasesPatch returns a strategic-merge KubernetesPatchSpec
-// that programs `spec.template.spec.hostAliases` on the EG-managed
-// Deployment, or nil when no aliases are configured. envoy-gateway's
-// KubernetesPodSpec doesn't surface hostAliases natively, so we use
-// the Deployment-level Patch field — the EG controller applies it as a
-// strategic-merge over the generated Deployment.
-func upstreamHostAliasesPatch(eg *clrkv1alpha1.EgressGateway) *egv1alpha1.KubernetesPatchSpec {
-	if eg.Spec.UpstreamTLS == nil || len(eg.Spec.UpstreamTLS.HostAliases) == 0 {
-		return nil
+// envoyDeploymentPatch returns the strategic-merge patch applied to the
+// EG-managed Envoy Deployment. It always overrides the Envoy container's
+// startup/readiness probes so per-EG cold start isn't gated on EG's
+// default `periodSeconds: 10` startupProbe (kubelet won't run the first
+// probe until t = periodSeconds, so the default holds the pod NotReady
+// for ~10 s even though Envoy /ready is live within ~1 s). When the EG
+// also pins `spec.upstreamTLS.hostAliases`, those land in the same patch
+// (KubernetesDeploymentSpec.Patch is single-valued — there's only one
+// merge slot on the parent EnvoyProxy). Returns nil if no patch is
+// needed, which today never happens because the probe override is
+// unconditional.
+func envoyDeploymentPatch(eg *clrkv1alpha1.EgressGateway) *egv1alpha1.KubernetesPatchSpec {
+	// Strategic-merge by container name. EG ships two containers in the
+	// proxy pod (`envoy` + `shutdown-manager`), both defaulted to
+	// `periodSeconds: 10` probes; pod readiness is AND-over-containers,
+	// so failing to override either holds the pod NotReady for ~10 s.
+	podSpec := map[string]any{
+		"containers": []any{
+			fastProbeContainer("envoy", "/ready", 19003),
+			fastProbeContainer("shutdown-manager", "/healthz", 19002),
+		},
 	}
+	if eg.Spec.UpstreamTLS != nil && len(eg.Spec.UpstreamTLS.HostAliases) > 0 {
+		podSpec["hostAliases"] = eg.Spec.UpstreamTLS.HostAliases
+	}
+
 	patch := map[string]any{
 		"spec": map[string]any{
 			"template": map[string]any{
-				"spec": map[string]any{
-					"hostAliases": eg.Spec.UpstreamTLS.HostAliases,
-				},
+				"spec": podSpec,
 			},
 		},
 	}
 	raw, err := json.Marshal(patch)
 	if err != nil {
-		// HostAlias is JSON-marshalable; this would only fire on a
-		// schema bug. Better to drop the patch than to surface a
-		// reconcile error that would block the whole rollout.
 		return nil
 	}
 	mt := egv1alpha1.StrategicMerge

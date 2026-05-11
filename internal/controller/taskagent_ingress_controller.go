@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -251,8 +253,66 @@ func desiredEnvoyProxy(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.EnvoyProxy {
 						Name: ptr.To(taskAgentEnvoyProxyName(ta)),
 						Type: &svcType,
 					},
+					EnvoyDeployment: &egv1alpha1.KubernetesDeploymentSpec{
+						Patch: fastEnvoyProbesPatch(),
+					},
 				},
 			},
+		},
+	}
+}
+
+// fastEnvoyProbesPatch returns a strategic-merge patch on the
+// EG-generated Envoy Deployment that collapses the data-plane cold
+// start. EG ships the proxy pod with TWO containers — `envoy` and the
+// `shutdown-manager` sidecar — both with `periodSeconds: 10` startup
+// and readiness probes. Pod readiness is AND-over-containers, so even
+// when Envoy binds /ready within ~1 s the pod stays NotReady for the
+// full ~10 s while kubelet waits for the next probe tick on either
+// container. Tightening every probe to `periodSeconds: 1` pulls per-TA
+// ingress cold start from ~11 s to ~2 s. failureThreshold is kept
+// high enough on startup probes (~30 s grace) that a slow first xDS
+// push still doesn't trip a restart.
+func fastEnvoyProbesPatch() *egv1alpha1.KubernetesPatchSpec {
+	patch := map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						fastProbeContainer("envoy", "/ready", 19003),
+						fastProbeContainer("shutdown-manager", "/healthz", 19002),
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(patch)
+	if err != nil {
+		return nil
+	}
+	mt := egv1alpha1.StrategicMerge
+	return &egv1alpha1.KubernetesPatchSpec{Type: &mt, Value: apiextv1.JSON{Raw: raw}}
+}
+
+// fastProbeContainer is a strategic-merge container fragment that
+// only overrides startup + readiness probes — strategic-merge uses
+// `name` as the merge key on the containers list, so anything not
+// named here on the patch container is preserved from the EG-defaulted
+// Deployment (image, command, env, etc.).
+func fastProbeContainer(name, probePath string, probePort int) map[string]any {
+	return map[string]any{
+		"name": name,
+		"startupProbe": map[string]any{
+			"httpGet":          map[string]any{"path": probePath, "port": probePort, "scheme": "HTTP"},
+			"periodSeconds":    1,
+			"failureThreshold": 30,
+			"timeoutSeconds":   1,
+		},
+		"readinessProbe": map[string]any{
+			"httpGet":          map[string]any{"path": probePath, "port": probePort, "scheme": "HTTP"},
+			"periodSeconds":    1,
+			"failureThreshold": 1,
+			"timeoutSeconds":   1,
 		},
 	}
 }
