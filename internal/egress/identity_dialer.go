@@ -1,5 +1,3 @@
-//go:build linux
-
 package egress
 
 import (
@@ -14,20 +12,40 @@ import (
 	"github.com/apoxy-dev/clrk/internal/netstack"
 )
 
-// IdentityDialer wraps a base netstack Dialer. When an EgressGateway
-// backend is configured it redirects every dial to one of the
-// configured backend listeners and prepends a PROXY v2 frame so Envoy
-// can attribute the connection to this sandbox's agent. With no
-// backends it delegates directly to the wrapped dialer.
+// DialSlot bundles the per-sandbox, per-dispatch state the
+// IdentityDialer needs at dial time: the InvocationID stamped into
+// proxyproto TLVs, the EG backend listeners this sandbox can be
+// steered to, and the policy handle that decides allow/deny. The
+// RevisionStack owns a map keyed by per-sandbox source IP; the
+// dispatcher writes the slot fields between Acquire and Start and
+// clears them on dispatch teardown.
+type DialSlot struct {
+	InvocationID string
+	Backends     []BackendListener
+	Policy       *SandboxPolicy
+}
+
+// SlotLookupFunc resolves the live DialSlot for a sandbox identified
+// by its per-NIC source IP on the shared RevisionStack. Returns
+// (zero, false) when no sandbox is attached for that source — falls
+// through to a direct-dial-no-policy path that matches DaemonAgent
+// semantics.
+type SlotLookupFunc func(srcIP netip.Addr) (DialSlot, bool)
+
+// IdentityDialer wraps a base netstack Dialer. It is constructed
+// once per (TaskAgent, revision) by the worker's RevisionStackManager
+// and shared across every concurrent sandbox of that revision —
+// per-dispatch state (InvocationID, Backends, Policy) is resolved
+// per-dial via SlotLookup, keyed by the intercepted connection's
+// source IP (threaded through ctx by the TCP forwarder).
+//
+// Sharing the dialer fixes a latent staleness bug in the old
+// per-sandbox model where InvocationID was captured on the dialer
+// at sandbox Start and never refreshed for subsequent warm
+// dispatches.
 type IdentityDialer struct {
 	Base     netstack.Dialer
 	Identity proxyproto.AgentIdentity
-
-	// Backends are the EG listeners this sandbox can be steered to.
-	// Multiple entries cover the protocol-split listener model:
-	// e.g. one tls-terminate listener + one tcp listener on
-	// distinct ports. Empty slice = direct-dial only (no MITM).
-	Backends []BackendListener
 
 	// DNSResolvers, when non-empty, redirects every :53 dial to the
 	// first entry. Required because the sandbox's resolv.conf points at
@@ -41,27 +59,26 @@ type IdentityDialer struct {
 	// DNSCache supplies the DNS-bound destination name per dial:
 	// emitted as PROXY v2 TLVDstName (Backend mode) and threaded
 	// into ctx for Router hostname matching (passthrough mode).
-	// Nil-safe; direct-IP / expired lookups return "".
+	// Shared per-revision; entries are keyed by resolved IP so
+	// cross-sandbox sharing is correctness-safe.
 	DNSCache *netstack.DNSCache
 
-	// Policy is the per-sandbox authorization decision plane,
-	// compiled from the bound EgressGateway's DefaultPolicy and the
-	// EgressL4Routes that target it. Consulted before backend
-	// selection so default-deny denies even traffic that would
-	// otherwise have matched a backend listener. Nil means no
-	// enforcement (e.g. agents with no EgressRefs).
-	Policy *SandboxPolicy
+	// SlotLookup resolves the per-sandbox, per-dispatch state from
+	// the connection's source IP. Nil-safe — a nil lookup falls
+	// through to direct-dial with no proxyproto framing (the path
+	// DaemonAgents take today).
+	SlotLookup SlotLookupFunc
 }
 
 // pickBackend selects the best-matching configured listener for the
 // sandbox's destination port. Most-specific wins (MatchPort-constrained
 // before catch-all); within a tie, BackendListener.Priority decides.
 // Returns nil when no listener matches or all matches have empty Addr.
-func (d *IdentityDialer) pickBackend(dstPort uint16) *BackendListener {
+func (d *IdentityDialer) pickBackend(backends []BackendListener, dstPort uint16) *BackendListener {
 	var best *BackendListener
 	bestSpecific := false
-	for i := range d.Backends {
-		b := &d.Backends[i]
+	for i := range backends {
+		b := &backends[i]
 		if b.Addr == "" {
 			continue
 		}
@@ -85,6 +102,22 @@ func (d *IdentityDialer) pickBackend(dstPort uint16) *BackendListener {
 }
 
 var _ netstack.Dialer = (*IdentityDialer)(nil)
+
+// resolveSlot reads the per-dispatch slot for the source IP carried
+// in ctx by the TCP forwarder. Returns (zero, false) when no slot is
+// registered — DaemonAgent dials and dials originating outside the
+// RevisionStack flow take this path and direct-dial without
+// proxyproto framing.
+func (d *IdentityDialer) resolveSlot(ctx context.Context) (DialSlot, bool) {
+	if d.SlotLookup == nil {
+		return DialSlot{}, false
+	}
+	src := netstack.SourceAddrFromContext(ctx)
+	if !src.IsValid() {
+		return DialSlot{}, false
+	}
+	return d.SlotLookup(src)
+}
 
 // DialContext satisfies netstack.Dialer. Every dial is logged with the
 // owning agent's identity and the original sandbox destination, so even
@@ -111,25 +144,27 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 		dstName = d.DNSCache.Lookup(origDst.Addr())
 	}
 
+	slot, slotOK := d.resolveSlot(ctx)
+
 	// Policy check before backend selection. Applies to both the EG
 	// backend path and the direct-dial fall-through, so default-deny
 	// denies even traffic that would otherwise match a listener.
 	// DNS rewrites bypass: the rewrite target is a worker-internal
 	// resolver, not the agent's intended destination — denying it
 	// would break name resolution for permitted destinations.
-	if !dnsRewrite && parseErr == nil && d.Policy != nil {
+	if !dnsRewrite && parseErr == nil && slotOK && slot.Policy != nil {
 		proto := l4ProtocolFromNetwork(network)
-		if !d.Policy.Allow(origDst, proto, dstName) {
-			d.logDeny(network, origAddr, dstName)
+		if !slot.Policy.Allow(origDst, proto, dstName) {
+			d.logDeny(slot, network, origAddr, dstName)
 			return nil, fmt.Errorf("connection to %s denied by egress policy", origAddr)
 		}
 	}
 
 	var backend *BackendListener
-	if !dnsRewrite && parseErr == nil {
-		backend = d.pickBackend(origDst.Port())
+	if !dnsRewrite && parseErr == nil && slotOK {
+		backend = d.pickBackend(slot.Backends, origDst.Port())
 	}
-	d.logDial(network, origAddr, addr, dnsRewrite, backend)
+	d.logDial(slot, network, origAddr, addr, dnsRewrite, backend)
 
 	// DNS dials must bypass the egress-gateway path — the EG listener is
 	// HTTPS-only and would silently drop UDP/53 packets wrapped in PROXY
@@ -150,7 +185,9 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 	}
 
 	src := sanitizedSrc(conn.LocalAddr(), origDst)
-	hdr, err := proxyproto.EncodeHeader(src, origDst, d.Identity, dstName)
+	id := d.Identity
+	id.InvocationID = slot.InvocationID
+	hdr, err := proxyproto.EncodeHeader(src, origDst, id, dstName)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("encoding PROXY v2: %w", err)
@@ -169,7 +206,7 @@ func (d *IdentityDialer) DialContext(ctx context.Context, network, addr string) 
 //
 // origDst is what the sandbox addressed; effDst is what we actually
 // dial out (differs only when DNS rewrite kicks in).
-func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite bool, backend *BackendListener) {
+func (d *IdentityDialer) logDial(slot DialSlot, network, origDst, effDst string, dnsRewrite bool, backend *BackendListener) {
 	mode := "direct"
 	backendAddr := ""
 	backendName := ""
@@ -186,7 +223,7 @@ func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite boo
 		"agent.name", d.Identity.Name,
 		"agent.uid", d.Identity.UID,
 		"agent.revision", d.Identity.Revision,
-		"invocation.id", d.Identity.InvocationID,
+		"invocation.id", slot.InvocationID,
 		"network", network,
 		"dst", origDst,
 		"effective_dst", effDst,
@@ -200,10 +237,10 @@ func (d *IdentityDialer) logDial(network, origDst, effDst string, dnsRewrite boo
 // logDeny emits a structured slog line on a policy-denied dial. Same
 // shape as logDial so log consumers can join allow/deny on the agent
 // identity tuple.
-func (d *IdentityDialer) logDeny(network, origDst, dstName string) {
+func (d *IdentityDialer) logDeny(slot DialSlot, network, origDst, dstName string) {
 	defaultPolicy := ""
-	if d.Policy != nil {
-		defaultPolicy = string(d.Policy.DefaultPolicy())
+	if slot.Policy != nil {
+		defaultPolicy = string(slot.Policy.DefaultPolicy())
 	}
 	slog.Info("egress dial denied",
 		"agent.kind", d.Identity.Kind,
@@ -211,7 +248,7 @@ func (d *IdentityDialer) logDeny(network, origDst, dstName string) {
 		"agent.name", d.Identity.Name,
 		"agent.uid", d.Identity.UID,
 		"agent.revision", d.Identity.Revision,
-		"invocation.id", d.Identity.InvocationID,
+		"invocation.id", slot.InvocationID,
 		"network", network,
 		"dst", origDst,
 		"dst.name", dstName,

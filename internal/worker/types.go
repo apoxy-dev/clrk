@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"time"
 
@@ -81,6 +82,19 @@ func deleteSandboxBounded(mgr SandboxRuntime, id SandboxID, log logr.Logger, msg
 	}
 }
 
+// revisionStackAttachment is the platform-agnostic view of one
+// sandbox's slot on the (TaskAgent, revision) shared RevisionStack.
+// The linux-only *RevisionStackHandle in revstack.go implements it;
+// non-linux builds get a no-op stub from revstack_other.go so the
+// cross-platform types.go compiles everywhere.
+type revisionStackAttachment interface {
+	SandboxIP() netip.Addr
+	SetEgressBackends(backends []egress.BackendListener)
+	SetEgressPolicy(policy *egress.SandboxPolicy)
+	SetInvocationID(invocationID string)
+	Detach()
+}
+
 // SandboxRuntime is the subset of SandboxManager the dispatcher relies
 // on. Defined as an interface so unit tests can supply a fake runtime
 // (the linux-only libcontainer plumbing makes the concrete manager
@@ -104,6 +118,7 @@ type SandboxRuntime interface {
 	) (*SandboxInstance, error)
 	SetEgressBackends(id SandboxID, backends []egress.BackendListener) error
 	SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error
+	SetInvocationID(id SandboxID, invocationID string) error
 	Start(ctx context.Context, id SandboxID) error
 	Stop(ctx context.Context, id SandboxID) error
 	Kill(ctx context.Context, id SandboxID) error
@@ -142,11 +157,19 @@ type SandboxInstance struct {
 	AgentRef  string
 	Namespace string
 	Phase     SandboxPhase
-	NetNS     string    // /run/netns/run-<id>
-	TAPName   string    // TAP device name in the netns.
-	TAPFD     *os.File  // Host-side TAP fd for netstack (APO-536).
-	RootFS    string    // Extracted rootfs path.
-	Stack     io.Closer // Per-sandbox netstack (*netstack.SandboxStack on linux).
+	NetNS     string     // /run/netns/run-<id>
+	TAPName   string     // TAP device name in the netns.
+	TAPFD     *os.File   // Host-side TAP fd for netstack (APO-536).
+	RootFS    string     // Extracted rootfs path.
+	SandboxIP netip.Addr // Per-NIC source IP on the shared RevisionStack.
+
+	// stack is the (TaskAgent, revision) shared netstack attachment
+	// for this sandbox: holds the NIC ID + sandbox IP and routes
+	// per-dispatch setters (Backends, Policy, InvocationID, IMDS
+	// Entry) into the shared slot table. Untyped at this level so the
+	// platform-agnostic types.go doesn't depend on the linux-only
+	// RevisionStackHandle.
+	stack revisionStackAttachment
 
 	// Stdin/Stdout/Stderr are populated when the sandbox was Created with
 	// stdio=true. The dispatcher uses these to stream the HTTP request

@@ -4,9 +4,11 @@ package netstack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,29 +35,58 @@ const (
 	channelSize = 4096
 )
 
-// SandboxStack is a per-sandbox userspace TCP/IP stack built on gVisor. It
-// reads raw packets from a TAP fd and forwards intercepted connections via
-// the provided Dialer.
-type SandboxStack struct {
+// RevisionStack is a per-(TaskAgent, revision) userspace TCP/IP stack
+// built on gVisor. One *stack.Stack hosts N NICs — one per sandbox of
+// the revision on this worker — so the protocol-state cost (channel
+// rings, forwarders, DNS cache, IMDS listener) is paid once per
+// revision instead of once per sandbox.
+//
+// Lifecycle: NewRevisionStack constructs the empty stack; Start
+// installs TCP/UDP forwarders with the supplied dialer; Attach adds
+// one NIC per sandbox; Detach removes one; Close tears everything
+// down. The dialer hands every intercepted connection's source IP
+// into ctx via WithSourceAddr so a shared IdentityDialer can
+// attribute per-dial state to the originating sandbox.
+type RevisionStack struct {
 	ipstack  *stack.Stack
-	ep       *channel.Endpoint
 	ipt      *IPTables
-	nicID    tcpip.NICID
-	tapFD    *os.File
-	pump     *PacketPump
 	dnsCache *DNSCache
-	closed   atomic.Bool
+
+	startOnce sync.Once
+	started   atomic.Bool
+	closed    atomic.Bool
+
+	mu   sync.Mutex
+	nics map[tcpip.NICID]*nicAttachment
 }
 
-// NewSandboxStack creates a gVisor network stack for a single sandbox.
-// gwAddr is the gateway IP assigned to this sandbox's /30 subnet (used for SNAT).
-// The returned stack is not yet running; call Start to begin packet processing.
-func NewSandboxStack(tapFD *os.File, gwAddr netip.Addr) (*SandboxStack, error) {
-	// Build SNAT address.
-	gwV4 := tcpip.AddrFrom4(gwAddr.As4())
-	// No IPv6 gateway assigned by current IP allocator; leave as invalid.
-	var gwV6 tcpip.Address
-	ipt := newIPTables(gwV4, gwV6)
+// nicAttachment is one sandbox's slot on a shared RevisionStack: the
+// TAP fd, the channel endpoint feeding gVisor, and the per-NIC packet
+// pump. Detach closes them in reverse order so the pump exits cleanly
+// before the endpoint is destroyed.
+type nicAttachment struct {
+	nicID     tcpip.NICID
+	ep        *channel.Endpoint
+	tapFD     *os.File
+	pump      *PacketPump
+	pumpDone  chan struct{}
+	sandboxIP netip.Addr
+	gwIP      netip.Addr
+}
+
+// NewRevisionStack constructs an empty multi-NIC gVisor stack ready
+// for Start + Attach. IMDS addresses are not bound here — they're
+// installed on each per-sandbox NIC by Attach so packets destined for
+// 169.254.169.254 from any sandbox route into the shared stack and
+// reach the single metadata listener bound by the caller.
+func NewRevisionStack() (*RevisionStack, error) {
+	// SNAT is mostly a no-op on this path because TCP/UDP traffic is
+	// intercepted by the in-process forwarders and never leaves
+	// through a NIC. Construct the iptables config with a zero gateway
+	// (snatTarget.Action passes through when addr.Len() == 0) so we
+	// don't accidentally rewrite a per-NIC source to a single shared
+	// address — each sandbox NIC carries its own /30 gateway today.
+	ipt := newIPTables(tcpip.Address{}, tcpip.Address{})
 
 	opts := stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -72,131 +103,215 @@ func NewSandboxStack(tapFD *os.File, gwAddr netip.Addr) (*SandboxStack, error) {
 	}
 
 	ipstack := stack.New(opts)
-
-	// TCP tuning — ported from apoxy-cli.
 	if err := setTCPOptions(ipstack); err != nil {
 		return nil, err
 	}
 
-	nicID := ipstack.NextNICID()
-	linkEP := channel.New(channelSize, uint32(sandboxMTU), "")
+	// Per-NIC routes are appended in Attach as each sandbox joins.
+	// Without a NIC-scoped default route, gVisor's UDP forwarder
+	// can't allocate a local endpoint for an incoming packet
+	// (CreateEndpoint does a route lookup against the destination
+	// address). Initialize empty; Attach builds the table up.
+	ipstack.SetRouteTable(nil)
 
-	if tcpipErr := ipstack.CreateNIC(nicID, linkEP); tcpipErr != nil {
-		return nil, fmt.Errorf("creating NIC: %v", tcpipErr)
-	}
-
-	// Route all traffic through this NIC.
-	ipstack.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: nicID},
-		{Destination: header.IPv6EmptySubnet, NIC: nicID},
-	})
-
-	// Add the gateway address to the stack so SNAT works.
-	protoAddr := tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: gwV4.WithPrefix(),
-	}
-	if tcpipErr := ipstack.AddProtocolAddress(nicID, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
-		return nil, fmt.Errorf("adding gateway address: %v", tcpipErr)
-	}
-
-	// Bind the link-local IMDS metadata addresses on the same NIC so
-	// the per-execution metadata server can listen at well-known
-	// AWS/GCP-style endpoints inside the sandbox. Failure here is
-	// fatal: any agent using delivery.mode=Metadata depends on
-	// $CLRK_METADATA_URL resolving inside the netstack.
-	imdsV4, err := netip.ParseAddr(ports.MetadataAddrV4)
-	if err != nil {
-		return nil, fmt.Errorf("parsing IMDS v4 address: %w", err)
-	}
-	imdsV4Proto := tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddrFrom4(imdsV4.As4()).WithPrefix(),
-	}
-	if tcpipErr := ipstack.AddProtocolAddress(nicID, imdsV4Proto, stack.AddressProperties{}); tcpipErr != nil {
-		return nil, fmt.Errorf("adding IMDS v4 address: %v", tcpipErr)
-	}
-	imdsV6, err := netip.ParseAddr(ports.MetadataAddrV6)
-	if err != nil {
-		return nil, fmt.Errorf("parsing IMDS v6 address: %w", err)
-	}
-	imdsV6Proto := tcpip.ProtocolAddress{
-		Protocol:          ipv6.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddrFrom16(imdsV6.As16()).WithPrefix(),
-	}
-	if tcpipErr := ipstack.AddProtocolAddress(nicID, imdsV6Proto, stack.AddressProperties{}); tcpipErr != nil {
-		return nil, fmt.Errorf("adding IMDS v6 address: %v", tcpipErr)
-	}
-
-	pump := NewPacketPump(tapFD, linkEP, sandboxMTU)
-
-	return &SandboxStack{
+	return &RevisionStack{
 		ipstack:  ipstack,
-		ep:       linkEP,
 		ipt:      ipt,
-		nicID:    nicID,
-		tapFD:    tapFD,
-		pump:     pump,
 		dnsCache: NewDNSCache(),
+		nics:     make(map[tcpip.NICID]*nicAttachment),
 	}, nil
 }
 
-// DNSCache returns the per-sandbox DNS-answer cache populated by the
-// UDP/53 response snoop. Nil-safe — callers may pass it through to
-// downstream consumers (IdentityDialer, route table) as-is.
-func (s *SandboxStack) DNSCache() *DNSCache {
-	return s.dnsCache
-}
+// DNSCache returns the per-revision DNS-answer cache populated by the
+// UDP/53 response snoop. Shared across all sandboxes of the revision
+// — entries are keyed by resolved IP, so cross-sandbox sharing is
+// safe (two sandboxes asking for the same name hit the same entry).
+func (r *RevisionStack) DNSCache() *DNSCache { return r.dnsCache }
 
 // Stack returns the underlying gVisor stack so callers can bind
-// their own gonet listeners (e.g. the per-sandbox IMDS metadata
-// server). Lifetime is tied to the SandboxStack — once Close is
-// called the stack is torn down.
-func (s *SandboxStack) Stack() *stack.Stack { return s.ipstack }
+// their own gonet listeners (e.g. the shared IMDS metadata server).
+// Lifetime is tied to the RevisionStack — once Close is called the
+// stack is torn down.
+func (r *RevisionStack) Stack() *stack.Stack { return r.ipstack }
 
-// NICID returns the NIC ID that all sandbox traffic flows through.
-// Pair with Stack() to bind gonet listeners on the sandbox's NIC.
-func (s *SandboxStack) NICID() tcpip.NICID { return s.nicID }
-
-// Start enables packet forwarding and begins the TAP pump. It blocks until
-// ctx is cancelled or the pump encounters a fatal error.
-func (s *SandboxStack) Start(ctx context.Context, dialer Dialer) error {
-	// Allow spoofing (source addr != NIC addr) for SNAT'd return traffic.
-	if tcpipErr := s.ipstack.SetSpoofing(s.nicID, true); tcpipErr != nil {
-		return fmt.Errorf("enabling spoofing: %v", tcpipErr)
-	}
-	// Allow promiscuous mode so we receive packets destined for any IP.
-	if tcpipErr := s.ipstack.SetPromiscuousMode(s.nicID, true); tcpipErr != nil {
-		return fmt.Errorf("enabling promiscuous mode: %v", tcpipErr)
-	}
-
-	// Wire up TCP and UDP forwarders.
-	tcpFwd := TCPForwarder(ctx, s.ipstack, dialer)
-	s.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd)
-
-	udpFwd := UDPForwarder(ctx, s.ipstack, dialer, s.dnsCache)
-	s.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd)
-
-	// Run the TAP packet pump (blocks).
-	return s.pump.Run()
+// Start installs the TCP/UDP forwarders with the supplied dialer.
+// Idempotent — only the first call takes effect, so callers can
+// Start before any Attach without racing against subsequent
+// per-sandbox attachments.
+func (r *RevisionStack) Start(ctx context.Context, dialer Dialer) {
+	r.startOnce.Do(func() {
+		tcpFwd := TCPForwarder(ctx, r.ipstack, dialer)
+		r.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd)
+		udpFwd := UDPForwarder(ctx, r.ipstack, dialer, r.dnsCache)
+		r.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd)
+		r.started.Store(true)
+	})
 }
 
-// Close tears down the stack and pump.
-func (s *SandboxStack) Close() error {
-	if s.closed.Swap(true) {
+// Attach adds one NIC backed by tapFD with the supplied gateway/IP
+// pair (per-sandbox /30). The IMDS v4 link-local address is bound on
+// this NIC so packets the sandbox sends to 169.254.169.254 reach the
+// listener bound by metadata.New (NIC: 0 — accept from any NIC).
+//
+// The returned NIC ID identifies the attachment for later Detach.
+// Spawns a per-NIC packet pump goroutine that runs until Detach or
+// Close.
+func (r *RevisionStack) Attach(tapFD *os.File, gw, sandboxIP netip.Addr) (tcpip.NICID, error) {
+	if r.closed.Load() {
+		return 0, errors.New("RevisionStack closed")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	nicID := r.ipstack.NextNICID()
+	linkEP := channel.New(channelSize, uint32(sandboxMTU), "")
+
+	if tcpipErr := r.ipstack.CreateNIC(nicID, linkEP); tcpipErr != nil {
+		linkEP.Close()
+		return 0, fmt.Errorf("creating NIC: %v", tcpipErr)
+	}
+
+	// Allow spoofing (source addr != NIC addr) for SNAT'd return
+	// traffic, and promiscuous so the netstack accepts packets
+	// destined for any IP routed via this NIC. Matches the original
+	// per-sandbox SandboxStack semantics.
+	if tcpipErr := r.ipstack.SetSpoofing(nicID, true); tcpipErr != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("enabling spoofing on NIC %d: %v", nicID, tcpipErr)
+	}
+	if tcpipErr := r.ipstack.SetPromiscuousMode(nicID, true); tcpipErr != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("enabling promiscuous mode on NIC %d: %v", nicID, tcpipErr)
+	}
+
+	gwV4 := tcpip.AddrFrom4(gw.As4())
+	if tcpipErr := r.ipstack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: gwV4.WithPrefix(),
+	}, stack.AddressProperties{}); tcpipErr != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("adding gateway address: %v", tcpipErr)
+	}
+
+	imdsV4, err := netip.ParseAddr(ports.MetadataAddrV4)
+	if err != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("parsing IMDS v4 address: %w", err)
+	}
+	if tcpipErr := r.ipstack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFrom4(imdsV4.As4()).WithPrefix(),
+	}, stack.AddressProperties{}); tcpipErr != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("adding IMDS v4 address: %v", tcpipErr)
+	}
+	imdsV6, err := netip.ParseAddr(ports.MetadataAddrV6)
+	if err != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("parsing IMDS v6 address: %w", err)
+	}
+	if tcpipErr := r.ipstack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
+		Protocol:          ipv6.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFrom16(imdsV6.As16()).WithPrefix(),
+	}, stack.AddressProperties{}); tcpipErr != nil {
+		r.ipstack.RemoveNIC(nicID)
+		linkEP.Close()
+		return 0, fmt.Errorf("adding IMDS v6 address: %v", tcpipErr)
+	}
+
+	// Per-NIC default route. With multiple NICs on a shared stack,
+	// the route table needs a NIC-scoped entry per sandbox so the
+	// UDP forwarder's CreateEndpoint (which does a route lookup
+	// against the packet's destination address) can resolve the
+	// outbound interface for replies. We add a default-route entry
+	// pointing at this NIC — gVisor matches the inbound packet's
+	// destination against bound addresses for delivery, and uses
+	// this route entry for the reply path.
+	r.ipstack.AddRoute(tcpip.Route{
+		Destination: header.IPv4EmptySubnet,
+		NIC:         nicID,
+	})
+
+	pump := NewPacketPump(tapFD, linkEP, sandboxMTU)
+	att := &nicAttachment{
+		nicID:     nicID,
+		ep:        linkEP,
+		tapFD:     tapFD,
+		pump:      pump,
+		pumpDone:  make(chan struct{}),
+		sandboxIP: sandboxIP,
+		gwIP:      gw,
+	}
+	r.nics[nicID] = att
+
+	go func() {
+		defer close(att.pumpDone)
+		_ = pump.Run()
+	}()
+
+	return nicID, nil
+}
+
+// Detach removes the NIC and stops its packet pump. Idempotent —
+// repeat calls return nil. Safe to call before Close.
+func (r *RevisionStack) Detach(nicID tcpip.NICID) error {
+	r.mu.Lock()
+	att, ok := r.nics[nicID]
+	if ok {
+		delete(r.nics, nicID)
+	}
+	r.mu.Unlock()
+	if !ok {
 		return nil
 	}
-	// Remove NIC and close endpoint first to deregister the WriteNotify
-	// callback before closing the pump's wakeup channel.
-	s.ipstack.RemoveNIC(s.nicID)
-	s.ep.Close()
-	s.pump.Close()
+	r.detachOne(att)
+	return nil
+}
+
+// detachOne tears down one attachment. Caller must already have
+// removed it from r.nics.
+//
+// The pump's inbound goroutine reads from the TAP fd and only exits
+// when that fd is closed by the caller's later TeardownNetNS — pump.
+// Close() only stops the outbound side. So we do not block on pumpDone
+// here; the inbound goroutine reaps after the netns/TAP teardown that
+// follows Detach in the sandbox-delete sequence.
+func (r *RevisionStack) detachOne(att *nicAttachment) {
+	// Remove NIC + close channel endpoint first so gVisor stops
+	// pushing to the pump's wakeup channel before we close it.
+	r.ipstack.RemoveNIC(att.nicID)
+	att.ep.Close()
+	att.pump.Close()
+}
+
+// Close tears down every attachment and the stack itself. Idempotent.
+func (r *RevisionStack) Close() error {
+	if r.closed.Swap(true) {
+		return nil
+	}
+	r.mu.Lock()
+	attachments := make([]*nicAttachment, 0, len(r.nics))
+	for _, att := range r.nics {
+		attachments = append(attachments, att)
+	}
+	r.nics = nil
+	r.mu.Unlock()
+	for _, att := range attachments {
+		r.detachOne(att)
+	}
 	return nil
 }
 
 // RegisterTCPMetrics registers gVisor TCP stats as Prometheus gauges.
-func (s *SandboxStack) RegisterTCPMetrics(reg prometheus.Registerer) {
-	st := s.ipstack.Stats().TCP
+func (r *RevisionStack) RegisterTCPMetrics(reg prometheus.Registerer) {
+	st := r.ipstack.Stats().TCP
 	gauges := []struct {
 		name string
 		help string

@@ -44,9 +44,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Initialize egress router.
 	router := egress.NewRouter(clrkv1alpha1.EgressPolicyAllowAll)
 
+	// Shared per-(TaskAgent, revision) netstack manager. One gVisor
+	// stack hosts every sandbox of a given revision on this worker;
+	// the IMDS listener, IdentityDialer, and DNS cache are paid once
+	// per revision instead of once per sandbox.
+	revStackMgr := NewRevisionStackManager(router, readWorkerResolvers())
+
 	// Initialize components.
 	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, router)
+	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, revStackMgr)
 
 	// Clean up orphaned containers from previous incarnation.
 	if err := sandboxMgr.Cleanup(ctx); err != nil {
@@ -141,6 +147,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	daemonMgr.Shutdown()
 	warmPool.DestroyAll(context.Background())
 	shutdown(sandboxMgr)
+	revStackMgr.Shutdown()
 
 	return nil
 }

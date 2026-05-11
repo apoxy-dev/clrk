@@ -5,17 +5,23 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 )
 
 const contentTypeCloudEventsJSON = "application/cloudevents+json"
 
-// NewHandler returns the IMDS HTTP routes wired against entry. The
-// linux-only Server in server.go uses this to assemble its
+// NewHandler returns the IMDS HTTP routes. lookup resolves the live
+// *Entry for the requesting sandbox from its source IP (the per-NIC
+// IP on the shared RevisionStack). Returns 404 when no dispatch is
+// in progress for the source — e.g. a warm sandbox polling /v1/event
+// before the dispatcher has registered it.
+//
+// The linux-only Server in server.go uses this to assemble its
 // gVisor-bound http.Server; tests can use it directly with
-// httptest.NewServer.
-func NewHandler(entry *Entry) http.Handler {
-	h := &handler{entry: entry}
+// httptest.NewServer by passing a closure-backed EntryLookup.
+func NewHandler(lookup EntryLookup) http.Handler {
+	h := &handler{lookup: lookup}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/event", h.handleEvent)
 	mux.HandleFunc("/v1/response", h.handleResponse)
@@ -23,7 +29,26 @@ func NewHandler(entry *Entry) http.Handler {
 }
 
 type handler struct {
-	entry *Entry
+	lookup EntryLookup
+}
+
+// resolveEntry returns the live *Entry for the requesting sandbox or
+// nil. The HTTP RemoteAddr parses as host:port; we strip the port and
+// the IPv4-in-IPv6 mapping so the lookup key matches the per-NIC
+// sandbox IP the RevisionStack registered.
+func (h *handler) resolveEntry(r *http.Request) *Entry {
+	if h.lookup == nil {
+		return nil
+	}
+	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return nil
+	}
+	src := addrPort.Addr()
+	if src.Is4In6() {
+		src = src.Unmap()
+	}
+	return h.lookup(src)
 }
 
 // handleEvent serves the request envelope. Binary mode by default
@@ -35,21 +60,27 @@ func (h *handler) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	entry := h.resolveEntry(r)
+	if entry == nil {
+		http.Error(w, "no live dispatch", http.StatusNotFound)
+		return
+	}
+
 	if accepts(r, contentTypeCloudEventsJSON) {
-		env := buildStructuredEnvelope(h.entry)
+		env := buildStructuredEnvelope(entry)
 		w.Header().Set("Content-Type", contentTypeCloudEventsJSON)
 		_ = json.NewEncoder(w).Encode(env)
 		return
 	}
 
-	for k, v := range h.entry.Attrs {
+	for k, v := range entry.Attrs {
 		w.Header().Set("ce-"+k, v)
 	}
-	w.Header().Set("ce-id", h.entry.CEID)
-	if h.entry.ContentType != "" {
-		w.Header().Set("Content-Type", h.entry.ContentType)
+	w.Header().Set("ce-id", entry.CEID)
+	if entry.ContentType != "" {
+		w.Header().Set("Content-Type", entry.ContentType)
 	}
-	_, _ = w.Write(h.entry.Body)
+	_, _ = w.Write(entry.Body)
 }
 
 // handleResponse records the agent's response and signals Done.
@@ -61,12 +92,17 @@ func (h *handler) handleResponse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	entry := h.resolveEntry(r)
+	if entry == nil {
+		http.Error(w, "no live dispatch", http.StatusNotFound)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !h.entry.SetResponse(body, r.Header.Get("Content-Type")) {
+	if !entry.SetResponse(body, r.Header.Get("Content-Type")) {
 		http.Error(w, "response already delivered", http.StatusConflict)
 		return
 	}

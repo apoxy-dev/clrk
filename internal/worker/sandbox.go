@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,7 +31,6 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
-	"github.com/apoxy-dev/clrk/internal/netstack"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
@@ -54,10 +52,12 @@ type SandboxManager struct {
 	logsDir    string // Per-agent stdio log files (e.g. /run/clrk/logs).
 	podName    string // Worker pod name; stamped on every sandbox's libcontainer Labels.
 	imageStore *ImageStore
-	dialer     netstack.Dialer // Egress dialer for sandbox netstacks.
-	// workerResolvers is the worker container's own DNS server list.
-	// Used to rewrite sandbox :53 dials in IdentityDialer — see dns.go.
-	workerResolvers []netip.AddrPort
+
+	// revStackMgr owns one shared gVisor netstack per (TaskAgent,
+	// revision) on this worker. Sandbox.Create attaches a NIC for
+	// itself; Sandbox.Delete detaches; the manager tears stacks down
+	// after a grace period when the last sandbox for the key leaves.
+	revStackMgr *RevisionStackManager
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
@@ -88,20 +88,21 @@ type sandboxLogs struct {
 	file   *os.File
 }
 
-// NewSandboxManager creates a new SandboxManager.
-func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *ImageStore, dialer netstack.Dialer) *SandboxManager {
+// NewSandboxManager creates a new SandboxManager. revStackMgr is the
+// shared per-(TaskAgent, revision) netstack manager — sandboxes
+// attach NICs to its stacks instead of standing up one stack each.
+func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *ImageStore, revStackMgr *RevisionStackManager) *SandboxManager {
 	return &SandboxManager{
-		stateDir:        stateDir,
-		rootDir:         rootDir,
-		logsDir:         logsDir,
-		podName:         podName,
-		imageStore:      imageStore,
-		dialer:          dialer,
-		workerResolvers: readWorkerResolvers(),
-		sandboxes:       make(map[SandboxID]*SandboxInstance),
-		containers:      make(map[SandboxID]*libcontainer.Container),
-		processes:       make(map[SandboxID]*libcontainer.Process),
-		stdLogs:         make(map[SandboxID]sandboxLogs),
+		stateDir:    stateDir,
+		rootDir:     rootDir,
+		logsDir:     logsDir,
+		podName:     podName,
+		imageStore:  imageStore,
+		revStackMgr: revStackMgr,
+		sandboxes:   make(map[SandboxID]*SandboxInstance),
+		containers:  make(map[SandboxID]*libcontainer.Container),
+		processes:   make(map[SandboxID]*libcontainer.Process),
+		stdLogs:     make(map[SandboxID]sandboxLogs),
 	}
 }
 
@@ -157,11 +158,15 @@ func (m *SandboxManager) Create(
 		return nil, fmt.Errorf("setting up netns: %w", err)
 	}
 
-	// 4. Create per-sandbox netstack.
-	stack, err := netstack.NewSandboxStack(nsCfg.TAPFD, nsCfg.GW)
+	// 4. Attach a NIC for this sandbox on the shared per-revision
+	// netstack. The manager lazily constructs the stack on the first
+	// attach for (ns, agent, revision) and ref-counts attachments;
+	// the IMDS listener, IdentityDialer, and DNS cache are all
+	// per-revision rather than per-sandbox.
+	revAttach, err := m.revStackMgr.Attach(ctx, identity, nsCfg.TAPFD, nsCfg.GW, nsCfg.IP)
 	if err != nil {
 		TeardownNetNS(nsCfg)
-		return nil, fmt.Errorf("creating sandbox netstack: %w", err)
+		return nil, fmt.Errorf("attaching sandbox to revision netstack: %w", err)
 	}
 
 	// 5. Build libcontainer config.
@@ -179,7 +184,7 @@ func (m *SandboxManager) Create(
 	if len(caPEM) > 0 {
 		caPath, err := m.writeAgentCA(id, caPEM)
 		if err != nil {
-			stack.Close()
+			revAttach.Detach()
 			TeardownNetNS(nsCfg)
 			return nil, fmt.Errorf("staging agent CA: %w", err)
 		}
@@ -193,7 +198,7 @@ func (m *SandboxManager) Create(
 	resolvPath, err := m.writeSandboxResolvConf(id, nsCfg.GW)
 	if err != nil {
 		m.removeAgentCA(id)
-		stack.Close()
+		revAttach.Detach()
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
 	}
@@ -209,7 +214,7 @@ func (m *SandboxManager) Create(
 		if err != nil {
 			m.removeSandboxNetConfig(id)
 			m.removeAgentCA(id)
-			stack.Close()
+			revAttach.Detach()
 			TeardownNetNS(nsCfg)
 			return nil, err
 		}
@@ -221,7 +226,7 @@ func (m *SandboxManager) Create(
 	if err != nil {
 		m.removeSandboxNetConfig(id)
 		m.removeAgentCA(id)
-		stack.Close()
+		revAttach.Detach()
 		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("creating container: %w", err)
 	}
@@ -235,7 +240,8 @@ func (m *SandboxManager) Create(
 		NetNS:     nsCfg.NSPath,
 		TAPName:   nsCfg.TAPName,
 		TAPFD:     nsCfg.TAPFD,
-		Stack:     stack,
+		SandboxIP: nsCfg.IP,
+		stack:     revAttach,
 		Sandbox:   sandbox,
 		Resources: resources,
 		Identity:  identity,
@@ -250,7 +256,7 @@ func (m *SandboxManager) Create(
 		if err != nil {
 			m.removeSandboxNetConfig(id)
 			m.removeAgentCA(id)
-			stack.Close()
+			revAttach.Detach()
 			TeardownNetNS(nsCfg)
 			return nil, fmt.Errorf("creating stdin pipe: %w", err)
 		}
@@ -260,7 +266,7 @@ func (m *SandboxManager) Create(
 			inW.Close()
 			m.removeSandboxNetConfig(id)
 			m.removeAgentCA(id)
-			stack.Close()
+			revAttach.Detach()
 			TeardownNetNS(nsCfg)
 			return nil, fmt.Errorf("creating stdout pipe: %w", err)
 		}
@@ -272,7 +278,7 @@ func (m *SandboxManager) Create(
 			outW.Close()
 			m.removeSandboxNetConfig(id)
 			m.removeAgentCA(id)
-			stack.Close()
+			revAttach.Detach()
 			TeardownNetNS(nsCfg)
 			return nil, fmt.Errorf("creating stderr pipe: %w", err)
 		}
@@ -399,25 +405,9 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 
 	log.Info("Starting sandbox", "args", args)
 
-	// Start the per-sandbox netstack pump in a background goroutine.
-	// It runs until the sandbox is deleted and its stack is closed.
-	// Use a background context so the netstack outlives the caller's
-	// request-scoped context (e.g. reconciler).
-	if stack, ok := sb.Stack.(*netstack.SandboxStack); ok {
-		dialer := netstack.Dialer(&egress.IdentityDialer{
-			Base:         m.dialer,
-			Identity:     sb.Identity,
-			Backends:     sb.EgressBackends,
-			DNSResolvers: m.workerResolvers,
-			DNSCache:     stack.DNSCache(),
-			Policy:       sb.EgressPolicy,
-		})
-		go func() {
-			if err := stack.Start(context.Background(), dialer); err != nil {
-				log.Error(err, "Netstack pump exited")
-			}
-		}()
-	}
+	// The shared RevisionStack is already pumping packets — Attach
+	// spawned the per-NIC pump and Start was called once at stack
+	// construction. Nothing more to do at the netstack level here.
 
 	if err := ctr.Run(p); err != nil {
 		ctr.Destroy()
@@ -436,15 +426,20 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 
 // SetEgressBackends configures the per-listener EG egress backends
 // for a sandbox between Create and Start. Empty / nil disables PROXY
-// v2 framing and direct-dials upstream.
+// v2 framing and direct-dials upstream. Writes into the shared
+// RevisionStack's per-sandbox slot keyed by SandboxIP — the dialer
+// reads it per-dial.
 func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
+	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	sb.EgressBackends = backends
+	if sb.stack != nil {
+		sb.stack.SetEgressBackends(backends)
+	}
 	return nil
 }
 
@@ -455,12 +450,33 @@ func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.Backe
 // Nil disables enforcement (used for agents with no EgressRefs).
 func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
+	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	sb.EgressPolicy = policy
+	if sb.stack != nil {
+		sb.stack.SetEgressPolicy(policy)
+	}
+	return nil
+}
+
+// SetInvocationID stamps the per-dispatch InvocationID into the
+// sandbox's slot on the shared RevisionStack. Called by the
+// dispatcher once per dispatch — cold and warm path alike — so warm
+// reruns get a fresh InvocationID for proxyproto TLVs.
+func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) error {
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	sb.Identity.InvocationID = invocationID
+	if sb.stack != nil {
+		sb.stack.SetInvocationID(invocationID)
+	}
 	return nil
 }
 
@@ -604,11 +620,12 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 	}
 	m.mu.Unlock()
 
-	// Close the netstack before destroying the container and netns.
-	if sb.Stack != nil {
-		if err := sb.Stack.Close(); err != nil {
-			log.Error(err, "Failed to close netstack")
-		}
+	// Detach this sandbox from the shared revision netstack. The
+	// stack itself outlives this sandbox unless this was the last
+	// attachment for the (ns, agent, revision) — RevisionStackManager
+	// handles ref-counting + grace-period close.
+	if sb.stack != nil {
+		sb.stack.Detach()
 	}
 
 	ctr, err := libcontainer.Load(m.stateDir, string(id))

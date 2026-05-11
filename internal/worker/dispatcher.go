@@ -299,11 +299,6 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sb = warm
 			sandboxID = warm.ID
 			warmHit = true
-			// Warm sandboxes were created with no invocation-id (the
-			// fill happens before any specific request exists). Stamp
-			// the per-request id now, before Start builds the
-			// IdentityDialer off sb.Identity.
-			sb.Identity.InvocationID = invocationID
 			log = log.WithValues("warm", true, "sandboxID", sandboxID, "invocationID", invocationID)
 		}
 	}
@@ -351,6 +346,15 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Error(err, "Set egress policy failed")
 		}
 	}
+	// Stamp this dispatch's InvocationID into the shared
+	// RevisionStack's per-sandbox slot. Mandatory on the warm path
+	// (slot was created at fill time with no invocation) and a no-op
+	// rewrite on the cold path (Create already stamped Identity, but
+	// the per-dial lookup reads from the slot regardless — rewriting
+	// here keeps cold and warm code paths identical).
+	if err := d.sandboxMgr.SetInvocationID(sandboxID, invocationID); err != nil {
+		log.Error(err, "Set invocation id failed")
+	}
 
 	// Resolve the delivery transport. Stdin (default) writes a CE
 	// JSON envelope to the agent's stdin; Metadata closes stdin and
@@ -389,9 +393,9 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch deliveryMode {
 	case clrkv1alpha1.AgentDeliveryMetadata:
 		mdEntry = metadata.NewEntry(ceID, r.Header.Get("Content-Type"), bodyBytes, ceAttrs)
-		srv, err := startMetadataServer(sb, mdEntry)
+		srv, err := registerMetadataEntry(sb, mdEntry)
 		if err != nil {
-			log.Error(err, "Failed to start metadata server")
+			log.Error(err, "Failed to register metadata entry")
 			http.Error(w, "metadata server failed", http.StatusInternalServerError)
 			return
 		}

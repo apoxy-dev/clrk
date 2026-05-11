@@ -40,3 +40,4 @@ go.work.sum
 # Only `cmd/clrk` must build standalone via `go build`, and it does
 # not import any proto packages.
 proto/**/*.pb.go
+clrk

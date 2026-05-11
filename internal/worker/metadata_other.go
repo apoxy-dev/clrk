@@ -9,8 +9,8 @@ import (
 	"github.com/apoxy-dev/clrk/internal/sandbox/metadata"
 )
 
-// startMetadataServer is a stub on non-Linux platforms. The
-// gVisor-backed netstack is Linux-only; metadata mode requires it.
-func startMetadataServer(_ *SandboxInstance, _ *metadata.Entry) (io.Closer, error) {
+// registerMetadataEntry is a stub on non-Linux platforms. The
+// gVisor-backed RevisionStack is Linux-only; metadata mode requires it.
+func registerMetadataEntry(_ *SandboxInstance, _ *metadata.Entry) (io.Closer, error) {
 	return nil, errors.New("metadata delivery mode requires linux")
 }

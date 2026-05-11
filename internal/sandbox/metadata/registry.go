@@ -1,19 +1,28 @@
-// Package metadata implements the per-execution IMDS-style HTTP
-// service exposed inside each sandbox. Agents that prefer not to
-// (or can't) read CloudEvents from stdin fetch the request via
-// $CLRK_METADATA_URL/event and POST the response back to
-// $CLRK_METADATA_URL/response. The dispatcher creates an Entry per
-// Metadata-mode dispatch and starts a Server bound on the
-// per-sandbox gVisor netstack at link-local IMDS addresses.
+// Package metadata implements the IMDS-style HTTP service exposed
+// inside each sandbox. Agents that prefer not to (or can't) read
+// CloudEvents from stdin fetch the request via $CLRK_METADATA_URL/event
+// and POST the response back to $CLRK_METADATA_URL/response.
+//
+// The HTTP listener is owned per-RevisionStack and shared across all
+// sandboxes of a given (TaskAgent, revision) on a worker; the per-
+// dispatch *Entry is resolved on each request by source IP via the
+// EntryLookup function the worker installs.
 package metadata
 
 import (
+	"net/netip"
 	"sync"
 )
 
+// EntryLookup resolves the live *Entry for a sandbox identified by
+// its per-NIC source IP. Returns nil when no dispatch is in progress
+// for that sandbox (e.g. warm sandbox waiting to be acquired) so the
+// HTTP handler can answer 404 instead of serving a stale entry.
+type EntryLookup func(srcIP netip.Addr) *Entry
+
 // Entry is the per-execution context shared between the dispatcher
-// (writer) and the per-sandbox metadata HTTP server (reader). One
-// Entry per Metadata-mode dispatch; never reused across executions.
+// (writer) and the metadata HTTP server (reader). One Entry per
+// Metadata-mode dispatch; never reused across executions.
 type Entry struct {
 	// CEID is the CloudEvents `id` attribute resolved by the
 	// dispatcher (X-Clrk-Execution-ID -> x-request-id -> generated).

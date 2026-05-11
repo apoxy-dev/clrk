@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/netip"
 	"strings"
 	"syscall"
@@ -20,12 +19,6 @@ import (
 
 // ProtocolHandler is a function that handles packets for a specific protocol.
 type ProtocolHandler func(stack.TransportEndpointID, *stack.PacketBuffer) bool
-
-// Dialer abstracts upstream connection establishment for the TCP forwarder.
-// The EgressRouter implements this to apply routing decisions.
-type Dialer interface {
-	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
-}
 
 // TCPForwarder intercepts all TCP SYN packets and forwards established
 // connections to the upstream via the provided Dialer.
@@ -61,6 +54,18 @@ func tcpHandler(ctx context.Context, dialer Dialer) func(req *tcp.ForwarderReque
 
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
+
+			// Thread the intercepted connection's source IP into the
+			// dial context so a RevisionStack-shared IdentityDialer
+			// can attribute each dial back to the originating sandbox
+			// (per-dispatch InvocationID, Backends, Policy live in a
+			// slot table keyed by per-NIC source IP). Unmap 4in6 so
+			// the key matches what RevisionStack.Attach registers.
+			srcIP := srcAddrPort.Addr()
+			if srcIP.Is4In6() {
+				srcIP = srcIP.Unmap()
+			}
+			ctx = WithSourceAddr(ctx, srcIP)
 
 			var wq waiter.Queue
 			ep, tcpipErr := req.CreateEndpoint(&wq)
