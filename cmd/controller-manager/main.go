@@ -40,9 +40,9 @@ const (
 	// defaultNamespace is the controller-manager's fallback runtime
 	// namespace when POD_NAMESPACE is unset (e.g. `go run`,
 	// out-of-cluster invocations). Production runs in-cluster set
-	// POD_NAMESPACE via downward API. Used to redirect EG's control
+	// POD_NAMESPACE via downward API. Threaded into EG's control
 	// plane (`ENVOY_GATEWAY_NAMESPACE`) and every clrk-side reference
-	// that previously hardcoded "envoy-gateway-system".
+	// to the controller's runtime namespace.
 	defaultNamespace = "clrk"
 )
 

@@ -54,11 +54,8 @@ type Config struct {
 	// ControllerNamespace is the namespace clrk's controller-manager
 	// runs in. We pass it to the supervised `envoy-gateway` child as
 	// ENVOY_GATEWAY_NAMESPACE so EG's certgen + xDS server + per-Gateway
-	// data-plane provisioning all land here instead of upstream's
-	// hardcoded "envoy-gateway-system" default. materializeXDSCerts
-	// reads the certgen-written Secret out of this namespace too.
-	// Defaults to "envoy-gateway-system" so a Config{} caller (tests
-	// that don't set it) gets the upstream behavior.
+	// data-plane provisioning all land here. materializeXDSCerts reads
+	// the certgen-written Secret out of this namespace too. Required.
 	ControllerNamespace string
 
 	// LogSink receives child stdout/stderr line by line. When nil,
@@ -112,13 +109,6 @@ func (c *Config) defaults() {
 	if c.LogSink == nil {
 		c.LogSink = defaultSlogSink
 	}
-	if c.ControllerNamespace == "" {
-		// Match upstream EG's DefaultNamespace so a zero Config still
-		// works against an unmodified install. Production callers
-		// (cmd/controller-manager) set this explicitly to clrk's
-		// runtime namespace via POD_NAMESPACE.
-		c.ControllerNamespace = "envoy-gateway-system"
-	}
 }
 
 // Run spawns `envoy-gateway server` as a child and supervises it for
@@ -126,6 +116,9 @@ func (c *Config) defaults() {
 // exits cleanly on SIGTERM) or when the child exits non-zero past the
 // restart budget.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.ControllerNamespace == "" {
+		return errors.New("ControllerNamespace is required")
+	}
 	cfg.defaults()
 
 	cfgPath, err := writeConfig(cfg)
@@ -196,12 +189,11 @@ func runOnce(ctx context.Context, cfg Config, cfgPath string) error {
 	if cfg.Kubeconfig != "" {
 		cmd.Env = append(cmd.Env, "KUBECONFIG="+cfg.Kubeconfig)
 	}
-	// Redirect EG's control-plane namespace from upstream's
-	// "envoy-gateway-system" default to clrk's runtime namespace.
-	// EG's binary reads ENVOY_GATEWAY_NAMESPACE at startup
-	// (vendored: internal/envoygateway/config/config.go) and propagates
-	// it to certgen, the xDS server, and per-Gateway data-plane
-	// provisioning so every EG-managed resource lands in this ns.
+	// Pin EG's control-plane namespace to clrk's runtime namespace.
+	// EG's binary reads ENVOY_GATEWAY_NAMESPACE at startup (vendored:
+	// internal/envoygateway/config/config.go) and propagates it to
+	// certgen, the xDS server, and per-Gateway data-plane provisioning
+	// so every EG-managed resource lands in this ns.
 	cmd.Env = append(cmd.Env, "ENVOY_GATEWAY_NAMESPACE="+cfg.ControllerNamespace)
 	// Process group so we can SIGTERM the whole tree if EG forks
 	// helpers. Setpgid is linux-portable.

@@ -254,9 +254,8 @@ func (d *K3sDriver) WaitAPIReady(ctx context.Context, timeout time.Duration) err
 // EnsureNamespace creates ns if it doesn't exist. Idempotent. Called
 // before starting the controller-manager so the supervised
 // envoy-gateway certgen can write its TLS Secret into the runtime
-// namespace — clrk dropped the in-controller Namespace SSA install
-// when the runtime ns flipped from envoy-gateway-system to clrk, so
-// somebody upstream of the controller has to materialize it.
+// namespace. The controller binary doesn't install its own Namespace,
+// so whoever brings up the controller has to materialize it.
 func (d *K3sDriver) EnsureNamespace(ctx context.Context, ns string) error {
 	yaml := fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", ns)
 	return d.KubectlApply(ctx, "-", []byte(yaml))

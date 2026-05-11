@@ -78,8 +78,7 @@ type EgressGatewayReconciler struct {
 	// manager's runtime namespace (mirrors EG's
 	// ENVOY_GATEWAY_NAMESPACE env var). Used here to mirror
 	// upstream-CA Secrets and to list EG-managed Services for
-	// listener status. Defaults to "envoy-gateway-system" so a
-	// zero-value reconciler still resolves.
+	// listener status. Required.
 	EnvoyGatewayNamespace string
 }
 
@@ -386,7 +385,7 @@ func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context,
 	mirror := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      upstreamTrustMirrorName(eg.Name),
-			Namespace: r.envoyGatewayNamespace(),
+			Namespace: r.EnvoyGatewayNamespace,
 		},
 	}
 	err := createOrUpdateWithRetry(ctx, r.Client, mirror, func() error {
@@ -624,16 +623,6 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 
 func envoyProxyName(egName string) string { return "clrk-eg-envoyproxy-" + egName }
 
-// envoyGatewayNamespace returns the EG control-plane namespace. Falls
-// back to upstream's "envoy-gateway-system" default when the field
-// isn't set (zero-value reconciler in tests).
-func (r *EgressGatewayReconciler) envoyGatewayNamespace() string {
-	if r.EnvoyGatewayNamespace == "" {
-		return "envoy-gateway-system"
-	}
-	return r.EnvoyGatewayNamespace
-}
-
 // updateStatus refreshes Status.Conditions[Ready] from the EG-managed
 // Gateway's Programmed condition and Status.Listeners[*].BackendAddress
 // from the EG-managed Service. Returns requeue=true while the data plane
@@ -701,7 +690,7 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) ([]clrkv1alpha1.EgressListenerStatus, bool, error) {
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs,
-		client.InNamespace(r.envoyGatewayNamespace()),
+		client.InNamespace(r.EnvoyGatewayNamespace),
 		client.MatchingLabels{
 			"gateway.envoyproxy.io/owning-gateway-name":      gwName,
 			"gateway.envoyproxy.io/owning-gateway-namespace": eg.Namespace,
