@@ -1,0 +1,28 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: TaskAgent
+metadata:
+  name: jq-bot
+spec:
+  workerPoolRef: default
+  egressRefs:
+    - gatewayRef: jq-bot
+  # Default for the field is 100s. Set explicitly because Claude Code
+  # cold-start + an Anthropic round-trip can take 10-30s with no warm
+  # pool. The ingress HTTPRoute timeout is pinned to this value by
+  # taskagent_ingress_controller, so the cap holds end-to-end.
+  timeout: 100s
+  template:
+    spec:
+      # Replace with the registry path you pushed _examples/jq-bot/Dockerfile to.
+      image: ghcr.io/apoxy-dev/clrk-jq-bot:latest
+      env:
+        # Placeholder. The CredentialInjectionPolicy rewrites x-api-key
+        # on the egress side; this value never reaches Anthropic.
+        - name: ANTHROPIC_API_KEY
+          value: clrk-injected-by-proxy
+        # Claude Code (Bun-bundled) writes session artifacts under $HOME
+        # at startup. /root in a fresh clrk rootfs isn't writable in the
+        # way the CLI expects, so claude --print exits 0 with no output.
+        # Pinning HOME to a writable path fixes it.
+        - name: HOME
+          value: /tmp

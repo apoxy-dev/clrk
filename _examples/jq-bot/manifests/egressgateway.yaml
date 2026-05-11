@@ -1,0 +1,17 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: jq-bot
+spec:
+  defaultPolicy: allow-all
+  listeners:
+    - name: egress
+      protocol: TLS
+      tls:
+        mode: Terminate
+  # Body capture on; OTLP endpoint left empty so the controller-manager
+  # picks the runtime sink (clrk dev TUI in dev, operator-configured
+  # collector in prod).
+  otlp:
+    captureBody:
+      maxBytes: 65536
