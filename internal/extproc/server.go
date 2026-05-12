@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extprocfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -99,6 +100,13 @@ type Record struct {
 	ResponseBodyAt    time.Time
 	ResponseBody      []byte
 	ResponseTruncated bool
+	// ResponseBodyChunks counts ResponseBody ProcessingRequest messages
+	// received from Envoy. Under ResponseBodyMode=BUFFERED this is 1
+	// (or 0 if the upstream produced no body); under STREAMED it
+	// reflects per-chunk delivery. Surfaced on OTLP so operators (and
+	// integration tests) can confirm the conditional STREAMED override
+	// promoted the mode for streaming traffic.
+	ResponseBodyChunks int
 
 	// RequestBodyRewritten is true when ext_proc replaced the request
 	// body before forwarding (e.g. forcing OpenAI
@@ -246,6 +254,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// providers report cumulative token usage in the terminal event,
 	// so first-N truncation drops exactly the data we need.
 	respKeepLast := false
+	// streamRequested latches when the request body advertises
+	// "stream": true. The filter runs with ResponseBodyMode=BUFFERED
+	// by default (one ProcessingRequest covers the whole non-streaming
+	// response) and we promote to STREAMED via ModeOverride on the
+	// ResponseHeaders reply only when the client asked for streaming
+	// AND the upstream returned 200. BUFFERED_PARTIAL request bodies
+	// may arrive in multiple chunks; the OR-set below latches on the
+	// first chunk that carries the probe.
+	streamRequested := false
 
 	for {
 		req, err := stream.Recv()
@@ -343,6 +360,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			rec.ResponseHeadersAt = now
 			rec.ResponseHeaders = headersToMap(m.ResponseHeaders)
 			resp = headersContinue(false)
+			// Promote response-body mode to STREAMED only when the
+			// client requested streaming AND the upstream returned a
+			// 200. Error responses stay BUFFERED so the capture path
+			// gets the whole error body in one ProcessingRequest.
+			if streamRequested && rec.ResponseHeaders[":status"] == "200" {
+				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
+					ResponseBodyMode: extprocfilterv3.ProcessingMode_STREAMED,
+				}
+			}
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
 				respBytesLeft = 0
 			}
@@ -355,6 +381,12 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			}
 			rec.RequestBody = body
 			rec.RequestTruncated = rec.RequestTruncated || trunc
+			// Probe each chunk so multi-chunk BUFFERED_PARTIAL deliveries
+			// latch as soon as "stream":true appears. Once true, we leave
+			// it.
+			if !streamRequested {
+				streamRequested = parsers.BodyAdvertisesStream(chunk)
+			}
 			// On the terminal body chunk (BUFFERED_PARTIAL delivers the
 			// whole body in one ProcessingRequest under the buffer
 			// limit; multi-chunk only happens when the body exceeds
@@ -375,6 +407,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			}
 			resp = bodyContinue(true)
 		case *extprocv3.ProcessingRequest_ResponseBody:
+			rec.ResponseBodyChunks++
 			var (
 				body  []byte
 				trunc bool

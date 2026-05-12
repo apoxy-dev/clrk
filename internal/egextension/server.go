@@ -853,22 +853,29 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 			Timeout: durationpb.New(defaultExtProcTimeout),
 		},
 		ProcessingMode: &extprocv3.ProcessingMode{
-			RequestHeaderMode: extprocv3.ProcessingMode_SEND,
+			RequestHeaderMode:  extprocv3.ProcessingMode_SEND,
 			ResponseHeaderMode: extprocv3.ProcessingMode_SEND,
 			// Request body stays BUFFERED_PARTIAL so the EnsureIncludeUsage
 			// rewrite (OpenAI/OAI-compat stream_options.include_usage)
 			// sees the whole body in one ProcessingRequest under the
-			// buffer limit. Response body must be STREAMED: BUFFERED_PARTIAL
-			// holds every SSE chunk until end-of-stream or the 64KiB cap,
-			// which turns an 8s Anthropic/OpenAI completion into an 8s
-			// wall before the first byte reaches the agent. The capture
-			// path in extproc.Server.Process accumulates chunks and never
-			// mutates the response, so per-chunk CONTINUE is safe.
-			RequestBodyMode:     extprocv3.ProcessingMode_BUFFERED_PARTIAL,
-			ResponseBodyMode:    extprocv3.ProcessingMode_STREAMED,
+			// 64KiB cap.
+			RequestBodyMode: extprocv3.ProcessingMode_BUFFERED_PARTIAL,
+			// Response body default is BUFFERED — one ProcessingRequest
+			// carries the whole response for non-streaming AI traffic
+			// (embeddings, classifiers, non-streaming completions) and
+			// for error responses we want fully captured in OTLP. The
+			// per-chunk STREAMED cost (Envoy↔UDS↔grpc round-trip per
+			// SSE frame) is paid only when the client actually requested
+			// streaming AND the upstream actually delivered a 200; the
+			// server promotes the mode to STREAMED from
+			// ProcessResponseHeaders in that case, and AllowModeOverride
+			// below makes the promotion legal. Pattern from
+			// envoyproxy/ai-gateway internal/extproc/processor_impl.go:424.
+			ResponseBodyMode:    extprocv3.ProcessingMode_BUFFERED,
 			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
 			ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
 		},
+		AllowModeOverride: true,
 		// Per-message timeout. Default is 200ms, which is too tight: on
 		// the first stream after a sink-registry rebuild the handler does
 		// a List(CIP)+List(APR)+per-CIP Secret Get, which can run past

@@ -50,6 +50,7 @@ const (
 	attrBodyBytes      = "clrk.body.bytes"
 	attrBodyTruncated  = "clrk.body.truncated"
 	attrBodyB64        = "clrk.body.b64"
+	attrRespChunks     = "clrk.resp.chunks"
 
 	attrGenAISystem        = "gen_ai.system"
 	attrGenAIOperationName = "gen_ai.operation.name"
@@ -318,6 +319,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 		semconv.HTTPResponseStatusCode(d.status),
 		attribute.Int(attrReqBytes, len(r.RequestBody)),
 		attribute.Int(attrRespBytes, len(r.ResponseBody)),
+		attribute.Int(attrRespChunks, r.ResponseBodyChunks),
 		attribute.Bool(attrReqTruncated, r.RequestTruncated),
 		attribute.Bool(attrRespTruncated, r.ResponseTruncated),
 	)
@@ -380,6 +382,7 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 		otellog.Int(string(semconv.HTTPResponseStatusCodeKey), d.status),
 		otellog.Int(attrReqBytes, len(r.RequestBody)),
 		otellog.Int(attrRespBytes, len(r.ResponseBody)),
+		otellog.Int(attrRespChunks, r.ResponseBodyChunks),
 		otellog.Bool(attrReqTruncated, r.RequestTruncated),
 		otellog.Bool(attrRespTruncated, r.ResponseTruncated),
 	)

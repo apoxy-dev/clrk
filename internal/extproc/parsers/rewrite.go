@@ -17,7 +17,10 @@ var streamColonTrueProbes = [][]byte{
 	[]byte(`"stream": true`),
 }
 
-func bodyAdvertisesStream(body []byte) bool {
+// BodyAdvertisesStream reports whether the request body looks like it
+// opts into streaming. The match is the byte-scan above; callers that
+// need strict JSON semantics should decode instead.
+func BodyAdvertisesStream(body []byte) bool {
 	for _, p := range streamColonTrueProbes {
 		if bytes.Contains(body, p) {
 			return true
@@ -57,7 +60,7 @@ func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
 	if !shouldRewriteIncludeUsage(host, path) {
 		return nil, false
 	}
-	if !bodyAdvertisesStream(body) {
+	if !BodyAdvertisesStream(body) {
 		return nil, false
 	}
 	return rewriteIncludeUsage(body)
