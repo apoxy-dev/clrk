@@ -828,10 +828,19 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 			Timeout: durationpb.New(defaultExtProcTimeout),
 		},
 		ProcessingMode: &extprocv3.ProcessingMode{
-			RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
-			ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
+			RequestHeaderMode: extprocv3.ProcessingMode_SEND,
+			ResponseHeaderMode: extprocv3.ProcessingMode_SEND,
+			// Request body stays BUFFERED_PARTIAL so the EnsureIncludeUsage
+			// rewrite (OpenAI/OAI-compat stream_options.include_usage)
+			// sees the whole body in one ProcessingRequest under the
+			// buffer limit. Response body must be STREAMED: BUFFERED_PARTIAL
+			// holds every SSE chunk until end-of-stream or the 64KiB cap,
+			// which turns an 8s Anthropic/OpenAI completion into an 8s
+			// wall before the first byte reaches the agent. The capture
+			// path in extproc.Server.Process accumulates chunks and never
+			// mutates the response, so per-chunk CONTINUE is safe.
 			RequestBodyMode:     extprocv3.ProcessingMode_BUFFERED_PARTIAL,
-			ResponseBodyMode:    extprocv3.ProcessingMode_BUFFERED_PARTIAL,
+			ResponseBodyMode:    extprocv3.ProcessingMode_STREAMED,
 			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
 			ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
 		},
