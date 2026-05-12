@@ -427,6 +427,14 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 	if downstream.CommonTlsContext == nil {
 		downstream.CommonTlsContext = &tlsv3.CommonTlsContext{}
 	}
+	// Advertise h2 + http/1.1 in the ServerHello ALPN list so the agent's
+	// claude SDK (or any SDK speaking the OpenAI/Anthropic protocols) can
+	// pick HTTP/2 over our MITM listener and multiplex its serial setup
+	// calls (settings, policy_limits, /api/eval, /v1/messages, batch
+	// logging) onto a single connection instead of serializing them over
+	// HTTP/1.1. Pairs with the upstream-side h2 enablement in
+	// buildDFPCluster — both ends must speak h2 for the end-to-end win.
+	downstream.CommonTlsContext.AlpnProtocols = []string{"h2", "http/1.1"}
 
 	// The stock grpc_certificate_provider handshaker forwards only the
 	// SNI to FetchCertificate; GrpcService.InitialMetadata is dropped.
