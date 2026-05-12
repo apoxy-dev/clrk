@@ -31,6 +31,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	fileaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	dfpclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
+	upstreamhttpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	dfpcommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
 	dfpfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -937,6 +938,14 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 		// ClientHello.
 		AutoHostSni: true,
 		CommonTlsContext: &tlsv3.CommonTlsContext{
+			// Advertise h2 + http/1.1 in the ClientHello so AI-provider
+			// origins (Cloudflare-fronted Anthropic, OpenAI, etc.) can
+			// pick HTTP/2 over ALPN. Without this the upstream falls
+			// back to HTTP/1.1 — claude's parallel setup calls then
+			// each open their own TCP+TLS to api.anthropic.com instead
+			// of multiplexing over one. Pairs with the AutoConfig in
+			// the cluster's HttpProtocolOptions below.
+			AlpnProtocols: []string{"h2", "http/1.1"},
 			ValidationContextType: &tlsv3.CommonTlsContext_ValidationContext{
 				ValidationContext: &tlsv3.CertificateValidationContext{
 					TrustedCa: &corev3.DataSource{
@@ -954,10 +963,38 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal upstream TLS context: %w", err)
 	}
-	return buildDFPClusterShape(DFPClusterName, &corev3.TransportSocket{
+	c, err := buildDFPClusterShape(DFPClusterName, &corev3.TransportSocket{
 		Name:       tlsTransportSocketName,
 		ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
 	})
+	if err != nil {
+		return nil, err
+	}
+	// AutoConfig lets the upstream connection negotiate HTTP/2 over ALPN
+	// when the origin offers h2 (Cloudflare-fronted Anthropic, OpenAI,
+	// Google all do), and falls back to HTTP/1.1 otherwise. Without it
+	// every call from `claude` (settings, policy_limits, /api/eval,
+	// /v1/messages, batch logging) opens its own TCP+TLS to the origin
+	// — six handshakes per agent invocation, serialised on a cold
+	// process. H2 multiplexes them onto one connection. Only applied
+	// to the MITM-TLS cluster: the passthrough cluster is L4 and never
+	// HCM-routed.
+	httpOpts := &upstreamhttpv3.HttpProtocolOptions{
+		UpstreamProtocolOptions: &upstreamhttpv3.HttpProtocolOptions_AutoConfig{
+			AutoConfig: &upstreamhttpv3.HttpProtocolOptions_AutoHttpConfig{
+				Http2ProtocolOptions: &corev3.Http2ProtocolOptions{},
+				HttpProtocolOptions:  &corev3.Http1ProtocolOptions{},
+			},
+		},
+	}
+	httpOptsAny, err := anypb.New(httpOpts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal http protocol options: %w", err)
+	}
+	c.TypedExtensionProtocolOptions = map[string]*anypb.Any{
+		"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": httpOptsAny,
+	}
+	return c, nil
 }
 
 // buildDFPPlainCluster is the plaintext sibling of buildDFPCluster used
