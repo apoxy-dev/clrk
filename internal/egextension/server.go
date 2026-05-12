@@ -979,7 +979,17 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 	// process. H2 multiplexes them onto one connection. Only applied
 	// to the MITM-TLS cluster: the passthrough cluster is L4 and never
 	// HCM-routed.
+	// DFP refuses HttpProtocolOptions unless auto_sni + auto_san_validation
+	// are set: without them a multiplexed h2 connection could route requests
+	// for host A onto a TLS session opened for host B. AutoSni picks SNI from
+	// :authority per request, AutoSanValidation matches that SNI against the
+	// cert. Both must be true — the alternative is allow_insecure_cluster_options
+	// which we never want.
 	httpOpts := &upstreamhttpv3.HttpProtocolOptions{
+		UpstreamHttpProtocolOptions: &corev3.UpstreamHttpProtocolOptions{
+			AutoSni:           true,
+			AutoSanValidation: true,
+		},
 		UpstreamProtocolOptions: &upstreamhttpv3.HttpProtocolOptions_AutoConfig{
 			AutoConfig: &upstreamhttpv3.HttpProtocolOptions_AutoHttpConfig{
 				Http2ProtocolOptions: &corev3.Http2ProtocolOptions{},
