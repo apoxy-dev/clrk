@@ -23,11 +23,13 @@ import (
 	"time"
 
 	pb "github.com/envoyproxy/gateway/proto/extension"
+	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	mutationrulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	fileaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	dfpclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
 	dfpcommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
 	dfpfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
@@ -553,6 +555,20 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
 			},
 		}
 
+		// Per-phase access log so latency between connect, request-rx,
+		// upstream-TTFB, and response-tx is visible. EG 1.4 doesn't
+		// surface an access_log knob via the BackendTrafficPolicy /
+		// ClientTrafficPolicy CRDs for HTTP listeners; the cheapest way
+		// to get this onto every clrk-owned egress Envoy is to stamp it
+		// here, idempotently — repeated PostHTTPListenerModify calls
+		// will keep replacing it with the same value. Goes to
+		// /dev/stdout so `docker logs <eg-envoy>` shows it.
+		al, err := buildEgressAccessLog()
+		if err != nil {
+			return fmt.Errorf("build access log: %w", err)
+		}
+		hcm.AccessLog = []*accesslogv3.AccessLog{al}
+
 		newTypedCfg, err := anypb.New(hcm)
 		if err != nil {
 			return fmt.Errorf("re-marshal HCM: %w", err)
@@ -862,6 +878,46 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 	return &hcmv3.HttpFilter{
 		Name:       extProcFilterName,
 		ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: any},
+	}, nil
+}
+
+// buildEgressAccessLog returns a file access logger writing one line per
+// HTTP transaction to /dev/stdout with per-phase timings. Phases visible:
+//
+//   - %DURATION%               total stream wall time
+//   - %REQUEST_DURATION%       last-byte-of-request-headers to last byte received from downstream
+//   - %REQUEST_TX_DURATION%    request transmit duration to upstream
+//   - %RESPONSE_DURATION%      time to first upstream response byte (upstream TTFB)
+//   - %RESPONSE_TX_DURATION%   time from first byte received from upstream to last byte sent downstream
+//
+// The point: surface where the latency hides — upstream connect/TLS, ext_proc
+// roundtrip per chunk, or just downstream slowness.
+func buildEgressAccessLog() (*accesslogv3.AccessLog, error) {
+	format := "[%START_TIME%] eg %REQ(:METHOD)% %REQ(:authority)%%REQ(:PATH)% %PROTOCOL% " +
+		"-> %RESPONSE_CODE% flags=%RESPONSE_FLAGS% " +
+		"dur=%DURATION%ms req_rx=%REQUEST_DURATION%ms req_tx=%REQUEST_TX_DURATION%ms " +
+		"upstream_ttfb=%RESPONSE_DURATION%ms resp_tx=%RESPONSE_TX_DURATION%ms " +
+		"bytes_rx=%BYTES_RECEIVED% bytes_tx=%BYTES_SENT% " +
+		"upstream=%UPSTREAM_HOST% upstream_cluster=%UPSTREAM_CLUSTER%\n"
+	cfg := &fileaccesslogv3.FileAccessLog{
+		Path: "/dev/stdout",
+		AccessLogFormat: &fileaccesslogv3.FileAccessLog_LogFormat{
+			LogFormat: &corev3.SubstitutionFormatString{
+				Format: &corev3.SubstitutionFormatString_TextFormatSource{
+					TextFormatSource: &corev3.DataSource{
+						Specifier: &corev3.DataSource_InlineString{InlineString: format},
+					},
+				},
+			},
+		},
+	}
+	any, err := anypb.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal file access log: %w", err)
+	}
+	return &accesslogv3.AccessLog{
+		Name:       "envoy.access_loggers.file",
+		ConfigType: &accesslogv3.AccessLog_TypedConfig{TypedConfig: any},
 	}, nil
 }
 
