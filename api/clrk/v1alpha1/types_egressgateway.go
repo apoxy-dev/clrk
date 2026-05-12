@@ -100,6 +100,20 @@ type EgressGatewaySpec struct {
 	// re-encrypting traffic to upstreams (the egress dial after MITM).
 	// +optional
 	UpstreamTLS *EgressUpstreamTLSSpec `json:"upstreamTLS,omitempty"`
+
+	// RequestTimeout caps the duration of a single outbound request
+	// transiting this gateway. Applied to the catch-all HTTPRoute's
+	// Request and BackendRequest timeouts. Defaults to 5m when unset —
+	// chosen to cover AI-provider streaming completions (Anthropic /
+	// OpenAI SSE responses routinely run 30-60s; reasoning models can
+	// stream several minutes). Envoy Gateway's bare default of 15s 504's
+	// those mid-stream, so a generous clrk-side default keeps the
+	// AI-runtime case working out of the box. Operators wanting a
+	// tighter cap (e.g. test environments) can override; per-route
+	// overrides are not supported today — every flow through this EG
+	// shares the cap.
+	// +optional
+	RequestTimeout *metav1.Duration `json:"requestTimeout,omitempty"`
 }
 
 // EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream

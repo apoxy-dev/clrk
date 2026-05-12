@@ -43,6 +43,11 @@ const (
 	// MaxEgressListeners caps spec.listeners to keep the assigned port
 	// range narrow and reviewable. Bump if a real workload needs more.
 	MaxEgressListeners = 8
+
+	// defaultEgressRequestTimeout is the catch-all HTTPRoute's request
+	// timeout when EgressGateway.spec.requestTimeout is unset. Sized for
+	// AI-provider streaming completions — see the spec field comment.
+	defaultEgressRequestTimeout = 5 * time.Minute
 )
 
 // listenerPort assigns a deterministic port per EgressListener index.
@@ -51,6 +56,17 @@ const (
 // port is always controlled by the controller to keep Service ports
 // predictable.
 func listenerPort(idx int) int32 { return EgressListenerBasePort + int32(idx) }
+
+// resolveRequestTimeout returns the effective per-request timeout for
+// the catch-all HTTPRoute. Operator-supplied positive values win; unset
+// or non-positive (the latter is also rejected at validate time) falls
+// back to defaultEgressRequestTimeout.
+func resolveRequestTimeout(eg *clrkv1alpha1.EgressGateway) time.Duration {
+	if eg.Spec.RequestTimeout != nil && eg.Spec.RequestTimeout.Duration > 0 {
+		return eg.Spec.RequestTimeout.Duration
+	}
+	return defaultEgressRequestTimeout
+}
 
 // EgressGatewayReconciler provisions Envoy Gateway infrastructure for each
 // clrk EgressGateway: a shared GatewayClass, an EnvoyProxy referencing our
@@ -492,6 +508,9 @@ func validateEgressGatewaySpec(eg *clrkv1alpha1.EgressGateway) error {
 			return err
 		}
 	}
+	if eg.Spec.RequestTimeout != nil && eg.Spec.RequestTimeout.Duration <= 0 {
+		return fmt.Errorf("spec.requestTimeout must be a positive duration, got %s", eg.Spec.RequestTimeout.Duration)
+	}
 	return nil
 }
 
@@ -616,6 +635,13 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 			})
 		}
 		rt.Spec.ParentRefs = parents
+		// Pin Request + BackendRequest so AI-provider streaming
+		// responses don't hit Envoy Gateway's bare 15s default. Value
+		// comes from spec.requestTimeout when set; otherwise the
+		// clrk-side default in resolveRequestTimeout. time.Duration's
+		// String() yields a GEP-2257-compatible value for
+		// gwapiv1.Duration.
+		gwTimeout := gwapiv1.Duration(resolveRequestTimeout(eg).String())
 		rt.Spec.Rules = []gwapiv1.HTTPRouteRule{{
 			BackendRefs: []gwapiv1.HTTPBackendRef{{
 				BackendRef: gwapiv1.BackendRef{
@@ -625,6 +651,10 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 					},
 				},
 			}},
+			Timeouts: &gwapiv1.HTTPRouteTimeouts{
+				Request:        &gwTimeout,
+				BackendRequest: &gwTimeout,
+			},
 		}}
 		return ctrl.SetControllerReference(eg, rt, r.Scheme)
 	})

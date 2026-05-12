@@ -1999,12 +1999,18 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec"),
 						},
 					},
+					"requestTimeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RequestTimeout caps the duration of a single outbound request transiting this gateway. Applied to the catch-all HTTPRoute's Request and BackendRequest timeouts. Defaults to 5m when unset — chosen to cover AI-provider streaming completions (Anthropic / OpenAI SSE responses routinely run 30-60s; reasoning models can stream several minutes). Envoy Gateway's bare default of 15s 504's those mid-stream, so a generous clrk-side default keeps the AI-runtime case working out of the box. Operators wanting a tighter cap (e.g. test environments) can override; per-route overrides are not supported today — every flow through this EG shares the cap.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
 				},
 				Required: []string{"defaultPolicy", "listeners"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
 	}
 }
 

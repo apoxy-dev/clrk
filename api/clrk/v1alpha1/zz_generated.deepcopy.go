@@ -924,6 +924,11 @@ func (in *EgressGatewaySpec) DeepCopyInto(out *EgressGatewaySpec) {
 		*out = new(EgressUpstreamTLSSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.RequestTimeout != nil {
+		in, out := &in.RequestTimeout, &out.RequestTimeout
+		*out = new(metav1.Duration)
+		**out = **in
+	}
 	return
 }
 
