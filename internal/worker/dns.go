@@ -64,17 +64,7 @@ func (m *SandboxManager) writeSandboxResolvConf(id SandboxID, gw netip.Addr) (st
 	path := filepath.Join(dir, "resolv.conf")
 	// ndots:0 keeps glibc/musl from prepending search domains and
 	// burning round-trips on suffixed queries that will all NXDOMAIN.
-	//
-	// use-vc forces DNS over TCP. The default UDP path goes through
-	// gVisor's UDP forwarder, which dispatches a separate handler per
-	// inbound packet without a 5-tuple session table; back-to-back
-	// A/AAAA queries from the same musl socket race to bind the same
-	// local port and the loser is silently dropped. The resolver then
-	// waits its full timeout (default 2s on musl) before proceeding.
-	// TCP gets a per-connection forwarder with no such race, costs one
-	// extra SYN handshake per resolution, and saves ~2s per fresh DNS
-	// lookup inside the sandbox.
-	content := fmt.Sprintf("nameserver %s\noptions ndots:0 use-vc\n", gw.String())
+	content := fmt.Sprintf("nameserver %s\noptions ndots:0\n", gw.String())
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("writing resolv.conf: %w", err)
 	}
