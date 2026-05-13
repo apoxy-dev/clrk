@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/envoyproxy/gateway/proto/extension"
@@ -52,7 +53,9 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Well-known extension names.
@@ -127,13 +130,11 @@ func tlvRule(t byte, key string) *proxyprotov3.ProxyProtocol_Rule {
 	}
 }
 
-// dnsCacheConfig is shared by the dynamic_forward_proxy HTTP filter and the
-// matching cluster — both must reference the same Name to share an Envoy
-// DNS cache instance, so the proto is a pre-built singleton.
-var dnsCacheConfig = &dfpcommonv3.DnsCacheConfig{
-	Name:            dnsCacheName,
-	DnsLookupFamily: clusterv3.Cluster_AUTO,
-}
+// defaultDnsLookupFamily is the family used when an EgressGateway leaves
+// spec.dns.lookupFamily unset (or when the EG can't be fetched). See the
+// EgressDNSLookupFamily godoc on the API type for why V4_PREFERRED is the
+// right default for clrk's deployment envelope.
+const defaultDnsLookupFamily = clusterv3.Cluster_V4_PREFERRED
 
 // GatewayNamePrefix is the prefix the EgressGateway controller uses when
 // creating Gateway resources. We parse it off listener names so every
@@ -153,6 +154,11 @@ const (
 type Server struct {
 	pb.UnimplementedEnvoyGatewayExtensionServer
 
+	// Client reads EgressGateway resources to resolve per-EG knobs
+	// (currently spec.dns.lookupFamily). May be nil in tests; callers
+	// that reach k8s gate on Client != nil and fall back to defaults.
+	Client client.Client
+
 	// CertProviderTargetURI is the gRPC target the custom handshaker dials
 	// to fetch leaf certs (e.g. "controller-manager.clrk.svc:9443" or
 	// "localhost:9443" when the handshaker runs in-pod next to us).
@@ -161,48 +167,124 @@ type Server struct {
 	// ExtProcTargetURI is the gRPC target for body-capture.
 	ExtProcTargetURI string
 
-	// dfpHTTPFilter, dfpCluster, dfpPlainCluster are pre-built — their
-	// proto contents don't vary across listeners. The ext_proc filter is
-	// rebuilt per listener because it carries a per-EG :authority value
-	// that identifies the calling EG to the controller-manager.
-	dfpHTTPFilter   *hcmv3.HttpFilter
-	dfpCluster      *clusterv3.Cluster
-	dfpPlainCluster *clusterv3.Cluster
-
 	// origDstCluster is the ORIGINAL_DST cluster the plain-TCP shape's
 	// tcp_proxy targets — DFP needs an SNI which plain TCP doesn't
-	// have, so we route by PROXY v2 destination instead.
+	// have, so we route by PROXY v2 destination instead. Has no DNS
+	// dependency, so it stays a pre-built singleton.
 	origDstCluster *clusterv3.Cluster
+
+	// dnsCacheByEG records the per-EG DnsCacheConfig built during
+	// PostHTTPListenerModify so PostTranslateModify can emit the matching
+	// DFP cluster pair. EG v1.4 omits listener context from
+	// PostTranslateModifyRequest (added in v1.5), so we can't identify
+	// the EG owning the current Envoy at translate time — instead we
+	// emit a cluster pair for every EG ever seen. Each pair has unique
+	// names (clrk-egress-dfp-<eg>, clrk-egress-dfp-plain-<eg>) and its
+	// own DnsCacheConfig, so unused entries in one Envoy are silently
+	// ignored by Envoy. The per-Envoy bloat is ~200 bytes per known EG;
+	// once the EG dep is bumped to v1.5+ this can collapse to a single
+	// pair selected by listener context.
+	//
+	// Entries are not evicted on EgressGateway delete — the leak is
+	// bounded by the total EGs ever created against this controller.
+	dnsCacheByEG sync.Map // egKey → *dfpcommonv3.DnsCacheConfig
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
 // Envoy uses to reach the cert provider and ext_proc server (both hosted
-// by the clrk controller-manager).
-func New(certProviderURI, extProcURI string) (*Server, error) {
-	dfp, err := buildDFPHTTPFilter()
-	if err != nil {
-		return nil, err
-	}
-	cluster, err := buildDFPCluster()
-	if err != nil {
-		return nil, err
-	}
-	plainCluster, err := buildDFPPlainCluster()
-	if err != nil {
-		return nil, err
-	}
+// by the clrk controller-manager). c reads EgressGateway resources for
+// per-EG knobs; pass nil only in tests that exercise the shape rewrite
+// without per-EG configuration.
+func New(c client.Client, certProviderURI, extProcURI string) (*Server, error) {
 	origDst, err := buildOriginalDstCluster()
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
+		Client:                c,
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
-		dfpHTTPFilter:         dfp,
-		dfpCluster:            cluster,
-		dfpPlainCluster:       plainCluster,
 		origDstCluster:        origDst,
 	}, nil
+}
+
+// dnsCacheConfigFor returns the DnsCacheConfig the DFP filter and clusters
+// should share for the given EgressGateway, and records it on
+// s.dnsCacheByEG so PostTranslateModify can emit a matching cluster pair.
+// The cache Name is per-EG (clrk-egress-dns-cache-<eg>) so each EG's DFP
+// HTTP filter and cluster pair attach to a distinct Envoy DNS cache; this
+// is what makes spec.dns.lookupFamily honored end-to-end despite the EG
+// v1.4 limitation that PostTranslateModify has no listener context to
+// identify the owning EG (PostHTTPListenerModify does, and the cluster
+// name is per-EG, so the right family follows the cluster).
+//
+// If the EG can't be fetched (missing client, not-found, transient API
+// error) we log at V(1) and fall back to defaultDnsLookupFamily — the
+// extension server runs on the request path, so getting a usable config
+// out is more important than surfacing the lookup error to EG (which has
+// no good way to react anyway).
+func (s *Server) dnsCacheConfigFor(ctx context.Context, key egKey) *dfpcommonv3.DnsCacheConfig {
+	cfg := &dfpcommonv3.DnsCacheConfig{
+		Name:            dnsCacheNameFor(key.name),
+		DnsLookupFamily: s.lookupFamilyFor(ctx, key),
+	}
+	s.dnsCacheByEG.Store(key, cfg)
+	return cfg
+}
+
+func (s *Server) lookupFamilyFor(ctx context.Context, key egKey) clusterv3.Cluster_DnsLookupFamily {
+	if s.Client == nil {
+		return defaultDnsLookupFamily
+	}
+	var eg clrkv1alpha1.EgressGateway
+	nn := types.NamespacedName{Namespace: key.namespace, Name: key.name}
+	if err := s.Client.Get(ctx, nn, &eg); err != nil {
+		if !apierrors.IsNotFound(err) {
+			ctrllog.FromContext(ctx).WithName("egextension").V(1).Info(
+				"Failed to fetch EgressGateway for DNS lookup family; using default",
+				"eg", nn, "error", err.Error())
+		}
+		return defaultDnsLookupFamily
+	}
+	if eg.Spec.DNS == nil {
+		return defaultDnsLookupFamily
+	}
+	return envoyDnsLookupFamily(eg.Spec.DNS.LookupFamily)
+}
+
+// dnsCacheNameFor / dfpClusterNameFor / dfpPlainClusterNameFor derive the
+// per-EG xDS names used by the DFP HTTP filter, the SNI filter, and the
+// two DFP clusters. Per-EG names sidestep EG v1.4's missing
+// PostTranslateModify listener context: PostHTTPListenerModify (which has
+// the listener and thus the EG) stamps the per-EG cluster name into the
+// HCM route / SNI tcp_proxy, and PostTranslateModify emits clusters under
+// the same names.
+func dnsCacheNameFor(egName string) string      { return dnsCacheName + "-" + egName }
+func dfpClusterNameFor(egName string) string    { return DFPClusterName + "-" + egName }
+func dfpPlainClusterNameFor(egName string) string {
+	return DFPPlainClusterName + "-" + egName
+}
+
+// envoyDnsLookupFamily maps the EgressGateway API enum to Envoy's
+// Cluster_DnsLookupFamily. An unknown / empty value falls back to the
+// default (V4Preferred) — the kubebuilder enum validation guarantees we
+// only see the listed values on resources accepted by the apiserver, but
+// be defensive against direct yaml apply against an older CRD.
+func envoyDnsLookupFamily(f clrkv1alpha1.EgressDNSLookupFamily) clusterv3.Cluster_DnsLookupFamily {
+	switch f {
+	case clrkv1alpha1.EgressDNSLookupV4Preferred:
+		return clusterv3.Cluster_V4_PREFERRED
+	case clrkv1alpha1.EgressDNSLookupV4Only:
+		return clusterv3.Cluster_V4_ONLY
+	case clrkv1alpha1.EgressDNSLookupV6Only:
+		return clusterv3.Cluster_V6_ONLY
+	case clrkv1alpha1.EgressDNSLookupAuto:
+		return clusterv3.Cluster_AUTO
+	case clrkv1alpha1.EgressDNSLookupAll:
+		return clusterv3.Cluster_ALL
+	default:
+		return defaultDnsLookupFamily
+	}
 }
 
 // PostHTTPListenerModify rewrites every clrk-owned egress listener
@@ -265,11 +347,16 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 		"eg.name", egKey.name,
 		"shape", string(shape))
 
+	// Fetch the per-EG DNS cache config once and pass it through to the
+	// shapes that touch DFP. applyTCPShape doesn't consult DNS (uses
+	// ORIGINAL_DST), so it doesn't need this.
+	dnsCacheCfg := s.dnsCacheConfigFor(ctx, egKey)
+
 	switch shape {
 	case clrkv1alpha1.EgressShapeTLSTerminate, clrkv1alpha1.EgressShapeHTTPS, clrkv1alpha1.EgressShapeHTTP:
-		s.applyHTTPShape(ctx, listener, egKey, shape)
+		s.applyHTTPShape(ctx, listener, egKey, shape, dnsCacheCfg)
 	case clrkv1alpha1.EgressShapeTLSPassthrough:
-		s.applyTLSPassthroughShape(ctx, listener, egKey)
+		s.applyTLSPassthroughShape(ctx, listener, egKey, dnsCacheCfg)
 	case clrkv1alpha1.EgressShapeTCP:
 		s.applyTCPShape(ctx, listener, egKey)
 	}
@@ -283,7 +370,7 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 // to add ext_proc + DFP filters with a catch-all route. Used by
 // tls-terminate / https / http shapes. For plain http we strip the
 // per-chain TLS TransportSocket since the listener is non-TLS.
-func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape clrkv1alpha1.EgressListenerShape) {
+func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape clrkv1alpha1.EgressListenerShape, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	if err := ensureProxyProtocolFilter(listener); err != nil {
 		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
@@ -304,7 +391,7 @@ func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listen
 		} else if err := s.injectHandshaker(fc, egKey); err != nil {
 			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
 		}
-		if err := s.rewriteHCM(fc, egKey); err != nil {
+		if err := s.rewriteHCM(fc, egKey, dnsCacheCfg); err != nil {
 			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
 		}
 	}
@@ -315,7 +402,7 @@ func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listen
 // sni_dynamic_forward_proxy stamps it as the upstream host. No TLS
 // termination — the chain forwards encrypted bytes to the upstream
 // the agent originally addressed.
-func (s *Server) applyTLSPassthroughShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey) {
+func (s *Server) applyTLSPassthroughShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	if err := ensureProxyProtocolFilter(listener); err != nil {
 		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
@@ -324,7 +411,7 @@ func (s *Server) applyTLSPassthroughShape(ctx context.Context, listener *listene
 		logger.Error(err, "Adding tls_inspector listener filter failed", "listener", listener.GetName())
 	}
 
-	chain, err := s.buildTLSPassthroughChain(egKey)
+	chain, err := s.buildTLSPassthroughChain(egKey, dnsCacheCfg)
 	if err != nil {
 		logger.Error(err, "Build TLS-passthrough chain failed", "listener", listener.GetName())
 		return
@@ -354,18 +441,54 @@ func (s *Server) applyTCPShape(ctx context.Context, listener *listenerv3.Listene
 }
 
 // PostTranslateModify appends the synthetic clusters every clrk-shape
-// chain dispatches to: DFP (TLS-upstream, for HCM HTTP/HTTPS shapes),
-// DFP-plain (no TLS-upstream, for the TLS-passthrough chain — bytes are
-// already TLS), and ORIGINAL_DST (for plain-TCP, dialed by PROXY v2 dst).
-// The HTTP filter and both DFP clusters share a single DNS cache config
-// so name resolution is consistent across shapes.
+// chain dispatches to: per-EG DFP (TLS-upstream, for HCM HTTP/HTTPS
+// shapes), per-EG DFP-plain (no TLS-upstream, for the TLS-passthrough
+// chain — bytes are already TLS), and ORIGINAL_DST (for plain-TCP,
+// dialed by PROXY v2 dst).
+//
+// One DFP cluster pair is emitted per EgressGateway ever seen by
+// PostHTTPListenerModify on this controller (tracked in s.dnsCacheByEG).
+// Each pair has unique cluster names (clrk-egress-dfp-<eg>,
+// clrk-egress-dfp-plain-<eg>) and its own DnsCacheConfig, so an Envoy
+// snapshot carrying clusters for non-owning EGs simply ignores them. We
+// fan out across all known EGs because EG v1.4 omits listener context
+// from PostTranslateModifyRequest (added in v1.5) — when the EG dep is
+// bumped, restrict emission to the EG identified by the request's
+// listener context.
 func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
+	logger := ctrllog.FromContext(ctx).WithName("egextension")
+
 	in := req.GetClusters()
-	out := make([]*clusterv3.Cluster, 0, len(in)+3)
-	out = append(out, s.dfpCluster, s.dfpPlainCluster, s.origDstCluster)
+	out := make([]*clusterv3.Cluster, 0, len(in)+8)
+
+	s.dnsCacheByEG.Range(func(k, v any) bool {
+		key := k.(egKey)
+		cfg := v.(*dfpcommonv3.DnsCacheConfig)
+		dfpCluster, err := buildDFPCluster(cfg)
+		if err != nil {
+			logger.Error(err, "Build DFP cluster failed", "eg", key)
+			return true
+		}
+		dfpCluster.Name = dfpClusterNameFor(key.name)
+		dfpPlainCluster, err := buildDFPPlainCluster(cfg)
+		if err != nil {
+			logger.Error(err, "Build DFP plain cluster failed", "eg", key)
+			return true
+		}
+		dfpPlainCluster.Name = dfpPlainClusterNameFor(key.name)
+		out = append(out, dfpCluster, dfpPlainCluster)
+		return true
+	})
+
+	out = append(out, s.origDstCluster)
 	for _, c := range in {
-		switch c.GetName() {
-		case DFPClusterName, DFPPlainClusterName, OriginalDstClusterName:
+		// Strip any pre-existing copies of the names we're emitting so
+		// repeated translation cycles don't pile up duplicates.
+		// DFPClusterName ("clrk-egress-dfp") is a prefix of
+		// DFPPlainClusterName ("clrk-egress-dfp-plain"), so a single
+		// HasPrefix check on the former covers both per-EG variants.
+		name := c.GetName()
+		if name == OriginalDstClusterName || strings.HasPrefix(name, DFPClusterName) {
 			continue
 		}
 		out = append(out, c)
@@ -488,7 +611,11 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 // The ext_proc filter is rebuilt per call because it carries a per-EG
 // :authority value that identifies the calling EG to the
 // controller-manager.
-func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
+func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) error {
+	dfpHTTPFilter, err := buildDFPHTTPFilter(dnsCacheCfg)
+	if err != nil {
+		return fmt.Errorf("build dfp http filter: %w", err)
+	}
 	extProcFilter, err := buildExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
 		Namespace: key.namespace,
 		Name:      key.name,
@@ -519,7 +646,7 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
 		// of these — drop nothing the operator configured (auth,
 		// ratelimit, etc.) but make sure ours land just before router
 		// so they always run.
-		ours := []*hcmv3.HttpFilter{extProcFilter, s.dfpHTTPFilter}
+		ours := []*hcmv3.HttpFilter{extProcFilter, dfpHTTPFilter}
 		newFilters := make([]*hcmv3.HttpFilter, 0, len(hcm.HttpFilters)+len(ours))
 		inserted := false
 		for _, existing := range hcm.HttpFilters {
@@ -552,7 +679,7 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey) error {
 						Action: &routev3.Route_Route{
 							Route: &routev3.RouteAction{
 								ClusterSpecifier: &routev3.RouteAction_Cluster{
-									Cluster: DFPClusterName,
+									Cluster: dfpClusterNameFor(key.name),
 								},
 								HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
 									AutoHostRewrite: wrapperspb.Bool(true),
@@ -666,7 +793,7 @@ func shapeFromListener(l *listenerv3.Listener) (clrkv1alpha1.EgressListenerShape
 // the ClientHello SNI as the upstream host the shared DFP cluster
 // resolves; tcp_proxy forwards encrypted bytes through. No
 // TransportSocket — the listener doesn't terminate TLS.
-func (s *Server) buildTLSPassthroughChain(key egKey) (*listenerv3.FilterChain, error) {
+func (s *Server) buildTLSPassthroughChain(key egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*listenerv3.FilterChain, error) {
 	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
 		Namespace: key.namespace,
 		Name:      key.name,
@@ -674,14 +801,14 @@ func (s *Server) buildTLSPassthroughChain(key egKey) (*listenerv3.FilterChain, e
 	if err != nil {
 		return nil, fmt.Errorf("build network_ext_proc filter: %w", err)
 	}
-	sniDFP, err := buildSNIDFPFilter()
+	sniDFP, err := buildSNIDFPFilter(dnsCacheCfg)
 	if err != nil {
 		return nil, fmt.Errorf("build sni_dynamic_forward_proxy filter: %w", err)
 	}
 	// DFPPlainClusterName (not DFPClusterName) — passthrough bytes are
 	// already TLS and the upstream expects raw TLS, so the cluster must
 	// not re-wrap with UpstreamTlsContext.
-	tcpProxy, err := buildTCPProxyFilter(DFPPlainClusterName)
+	tcpProxy, err := buildTCPProxyFilter(dfpPlainClusterNameFor(key.name))
 	if err != nil {
 		return nil, fmt.Errorf("build tcp_proxy filter: %w", err)
 	}
@@ -769,10 +896,10 @@ func buildNetworkExtProcFilter(targetURI, authority string) (*listenerv3.Filter,
 // upstream host the DFP cluster resolves; uses the same DNS cache
 // as the HTTP path so dual-protocol upstreams (HTTPS + native TLS)
 // share resolution.
-func buildSNIDFPFilter() (*listenerv3.Filter, error) {
+func buildSNIDFPFilter(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*listenerv3.Filter, error) {
 	any, err := anypb.New(&snidfpv3.FilterConfig{
 		PortSpecifier:  &snidfpv3.FilterConfig_PortValue{PortValue: 443},
-		DnsCacheConfig: dnsCacheConfig,
+		DnsCacheConfig: dnsCacheCfg,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal sni_dynamic_forward_proxy: %w", err)
@@ -806,10 +933,10 @@ func buildTCPProxyFilter(cluster string) (*listenerv3.Filter, error) {
 
 // buildDFPHTTPFilter returns the dynamic_forward_proxy HTTP filter that
 // resolves the request's :authority through the shared DNS cache.
-func buildDFPHTTPFilter() (*hcmv3.HttpFilter, error) {
+func buildDFPHTTPFilter(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*hcmv3.HttpFilter, error) {
 	any, err := anypb.New(&dfpfilterv3.FilterConfig{
 		ImplementationSpecifier: &dfpfilterv3.FilterConfig_DnsCacheConfig{
-			DnsCacheConfig: dnsCacheConfig,
+			DnsCacheConfig: dnsCacheCfg,
 		},
 	})
 	if err != nil {
@@ -945,7 +1072,7 @@ func buildEgressAccessLog() (*accesslogv3.AccessLog, error) {
 // api.openai.com), which they reject with 403. SNI is taken from the
 // per-request Host header, and upstream certs are verified against the
 // envoy image's system trust bundle.
-func buildDFPCluster() (*clusterv3.Cluster, error) {
+func buildDFPCluster(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*clusterv3.Cluster, error) {
 	tlsCtx := &tlsv3.UpstreamTlsContext{
 		// Derive SNI from the upstream host. Envoy strips the port from
 		// :authority before using it as the SNI value, so the ext_proc
@@ -981,7 +1108,7 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 	c, err := buildDFPClusterShape(DFPClusterName, &corev3.TransportSocket{
 		Name:       tlsTransportSocketName,
 		ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: tlsAny},
-	})
+	}, dnsCacheCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1027,18 +1154,18 @@ func buildDFPCluster() (*clusterv3.Cluster, error) {
 // DNS cache, but no UpstreamTlsContext: the agent's bytes are already
 // TLS and the upstream completes the real handshake — re-wrapping here
 // would yield TLS-of-TLS the origin rejects.
-func buildDFPPlainCluster() (*clusterv3.Cluster, error) {
-	return buildDFPClusterShape(DFPPlainClusterName, nil)
+func buildDFPPlainCluster(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*clusterv3.Cluster, error) {
+	return buildDFPClusterShape(DFPPlainClusterName, nil, dnsCacheCfg)
 }
 
 // buildDFPClusterShape is the shared spine of the two DFP clusters. The
 // only axis that varies is the upstream TransportSocket — TLS-wrapped
 // for the MITM HCM path (re-encrypt to origin), nil for TLS-passthrough
 // (origin terminates the agent's own TLS).
-func buildDFPClusterShape(name string, ts *corev3.TransportSocket) (*clusterv3.Cluster, error) {
+func buildDFPClusterShape(name string, ts *corev3.TransportSocket, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*clusterv3.Cluster, error) {
 	dfpAny, err := anypb.New(&dfpclusterv3.ClusterConfig{
 		ClusterImplementationSpecifier: &dfpclusterv3.ClusterConfig_DnsCacheConfig{
-			DnsCacheConfig: dnsCacheConfig,
+			DnsCacheConfig: dnsCacheCfg,
 		},
 	})
 	if err != nil {

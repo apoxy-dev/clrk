@@ -61,6 +61,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DaemonAgentSpec":                     schema_clrk_api_clrk_v1alpha1_DaemonAgentSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DaemonAgentStatus":                   schema_clrk_api_clrk_v1alpha1_DaemonAgentStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DenyResponseConfig":                  schema_clrk_api_clrk_v1alpha1_DenyResponseConfig(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDNSSpec":                       schema_clrk_api_clrk_v1alpha1_EgressDNSSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicy":                    schema_clrk_api_clrk_v1alpha1_EgressDenyPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicyList":                schema_clrk_api_clrk_v1alpha1_EgressDenyPolicyList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicySpec":                schema_clrk_api_clrk_v1alpha1_EgressDenyPolicySpec(ref),
@@ -1741,6 +1742,26 @@ func schema_clrk_api_clrk_v1alpha1_DenyResponseConfig(ref common.ReferenceCallba
 	}
 }
 
+func schema_clrk_api_clrk_v1alpha1_EgressDNSSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EgressDNSSpec configures the EG-managed Envoy's upstream DNS behavior for the dynamic_forward_proxy resolver shared by every shape that re-resolves upstream by hostname (tls-terminate, https, http, tls-passthrough). Does not affect the tcp shape, which routes by destination IP via ORIGINAL_DST and never consults DNS.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"lookupFamily": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LookupFamily selects which IP families the resolver considers when resolving upstream hostnames. Defaults to V4Preferred.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -1999,6 +2020,12 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec"),
 						},
 					},
+					"dns": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DNS configures the EG-managed Envoy's upstream DNS resolver (dynamic_forward_proxy DNS cache). Defaults to LookupFamily=V4Preferred.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDNSSpec"),
+						},
+					},
 					"requestTimeout": {
 						SchemaProps: spec.SchemaProps{
 							Description: "RequestTimeout caps the duration of a single outbound request transiting this gateway. Applied to the catch-all HTTPRoute's Request and BackendRequest timeouts. Defaults to 5m when unset — chosen to cover AI-provider streaming completions (Anthropic / OpenAI SSE responses routinely run 30-60s; reasoning models can stream several minutes). Envoy Gateway's bare default of 15s 504's those mid-stream, so a generous clrk-side default keeps the AI-runtime case working out of the box. Operators wanting a tighter cap (e.g. test environments) can override; per-route overrides are not supported today — every flow through this EG shares the cap.",
@@ -2010,7 +2037,7 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDNSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListener", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
 	}
 }
 

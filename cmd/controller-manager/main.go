@@ -284,7 +284,7 @@ func main() {
 	// emitted on this service represent TCP/TLS connections handled
 	// by the egress listener's TCP-fallback chain.
 	extproc.RegisterNetworkServer(grpcSrv, extprocSrv)
-	egExt, err := egextension.New(*grpcAdvertiseURI, *grpcAdvertiseURI)
+	egExt, err := egextension.New(cm.GetClient(), *grpcAdvertiseURI, *grpcAdvertiseURI)
 	if err != nil {
 		log.Error(err, "Unable to construct EG extension server")
 		os.Exit(1)

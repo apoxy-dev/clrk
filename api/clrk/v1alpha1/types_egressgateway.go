@@ -101,6 +101,11 @@ type EgressGatewaySpec struct {
 	// +optional
 	UpstreamTLS *EgressUpstreamTLSSpec `json:"upstreamTLS,omitempty"`
 
+	// DNS configures the Egress Gateway's DNS resolver.
+	// Defaults to LookupFamily=V4Preferred.
+	// +optional
+	DNS *EgressDNSSpec `json:"dns,omitempty"`
+
 	// RequestTimeout caps the duration of a single outbound request
 	// transiting this gateway. Applied to the catch-all HTTPRoute's
 	// Request and BackendRequest timeouts. Defaults to 5m when unset —
@@ -144,6 +149,61 @@ type EgressUpstreamTLSSpec struct {
 	// api.openai.com without globally hijacking the cluster's CoreDNS.
 	// +optional
 	HostAliases []corev1.HostAlias `json:"hostAliases,omitempty"`
+}
+
+// EgressDNSLookupFamily selects which IP families the EG-managed Envoy's
+// dynamic_forward_proxy DNS cache considers when resolving upstream
+// hostnames.
+//
+// V4Preferred is the clrk default because the most common clrk deployment
+// environments (containerized dev clusters running in Docker, plain Linux
+// VMs without an IPv6 transit) expose an IPv6 default route on the pod
+// network but have no path to globally-routable v6 destinations. With
+// Envoy's stock Auto behavior the EG sends every upstream SYN to the
+// AAAA answer first and waits the full connect timeout for it to fail
+// before retrying on A — blowing the agent's request budget. V4Preferred
+// flips the order so the working family is tried first.
+//
+// +kubebuilder:validation:Enum=V4Preferred;V4Only;V6Only;Auto;All
+type EgressDNSLookupFamily string
+
+const (
+	// EgressDNSLookupV4Preferred resolves both A and AAAA; the connect
+	// tries A first and falls back to AAAA only if no A record exists.
+	// The clrk default.
+	EgressDNSLookupV4Preferred EgressDNSLookupFamily = "V4Preferred"
+
+	// EgressDNSLookupV4Only resolves only A records. AAAA-only hostnames
+	// fail to resolve.
+	EgressDNSLookupV4Only EgressDNSLookupFamily = "V4Only"
+
+	// EgressDNSLookupV6Only resolves only AAAA records. A-only hostnames
+	// fail to resolve.
+	EgressDNSLookupV6Only EgressDNSLookupFamily = "V6Only"
+
+	// EgressDNSLookupAuto returns AAAA when any AAAA record exists,
+	// otherwise A. This is Envoy's stock default and prefers v6 even when
+	// the v6 path is broken — appropriate only when the operator has
+	// verified end-to-end IPv6 transit on this gateway.
+	EgressDNSLookupAuto EgressDNSLookupFamily = "Auto"
+
+	// EgressDNSLookupAll resolves both A and AAAA and load-balances
+	// across the union. Useful when the operator wants Happy Eyeballs-
+	// style v4/v6 racing rather than a strict preference order.
+	EgressDNSLookupAll EgressDNSLookupFamily = "All"
+)
+
+// EgressDNSSpec configures the EG-managed Envoy's upstream DNS behavior
+// for the dynamic_forward_proxy resolver shared by every shape that
+// re-resolves upstream by hostname (tls-terminate, https, http,
+// tls-passthrough). Does not affect the tcp shape, which routes by
+// destination IP via ORIGINAL_DST and never consults DNS.
+type EgressDNSSpec struct {
+	// LookupFamily selects which IP families the resolver considers when
+	// resolving upstream hostnames. Defaults to V4Preferred.
+	// +kubebuilder:default=V4Preferred
+	// +optional
+	LookupFamily EgressDNSLookupFamily `json:"lookupFamily,omitempty"`
 }
 
 // BodyCaptureSpec governs request/response body capture bounds.
