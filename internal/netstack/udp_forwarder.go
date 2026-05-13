@@ -28,7 +28,7 @@ var udpBuffPool = sync.Pool{
 }
 
 // UDPForwarder intercepts all UDP packets and forwards them to the upstream
-// via the provided Dialer.
+// via the provided Dialer. DNS queries (port 53) use single-packet mode.
 //
 // When dnsCache is non-nil, upstream → sandbox traffic on UDP/53 is
 // snooped: responses are parsed and any A/AAAA answers are bound to
@@ -127,14 +127,7 @@ func udpHandler(ctx context.Context, dialer Dialer, dnsCache *DNSCache) udp.Forw
 				return
 			}
 
-			// DNS gets a short idle timeout so the per-flow session can
-			// carry multiple back-to-back queries (musl fires A and AAAA
-			// in parallel on the same socket) before being torn down.
-			isDNS := dstAddrPort.Port() == dnsPort
 			idleTimeout := 30 * time.Second
-			if isDNS {
-				idleTimeout = 2 * time.Second
-			}
 			timer := time.AfterFunc(idleTimeout, func() {
 				logger.Debug("Idle timeout reached")
 				cancel()
@@ -150,6 +143,9 @@ func udpHandler(ctx context.Context, dialer Dialer, dnsCache *DNSCache) udp.Forw
 			extend := func() {
 				timer.Reset(idleTimeout)
 			}
+			// For DNS sessions, send one packet each way and then close immediately.
+			isDNS := dstAddrPort.Port() == dnsPort
+			once := isDNS
 
 			// Tap DNS responses (upstream → sandbox direction) into the
 			// cache so TCP connect lookups can surface the resolved name.
@@ -158,15 +154,12 @@ func udpHandler(ctx context.Context, dialer Dialer, dnsCache *DNSCache) udp.Forw
 				responseTap = dnsCache.IngestResponse
 			}
 
-			// Both directions stay open until the idle timer fires so a
-			// single UDP flow can carry musl's parallel A+AAAA pair (and
-			// any retransmits) without one of the responses being dropped.
 			g, copyCtx := errgroup.WithContext(sCtx)
 			g.Go(func() error {
-				return copyPackets(copyCtx, downConn, upConn, false, extend, nil)
+				return copyPackets(copyCtx, downConn, upConn, once, extend, nil)
 			})
 			g.Go(func() error {
-				return copyPackets(copyCtx, upConn, downConn, false, extend, responseTap)
+				return copyPackets(copyCtx, upConn, downConn, once, extend, responseTap)
 			})
 
 			if err := g.Wait(); err != nil {
