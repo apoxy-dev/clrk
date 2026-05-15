@@ -485,7 +485,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			if err := bootstrapClrkAPIService(gctx, state.k3s, cmIP, 8443); err != nil {
 				return fmt.Errorf("registering clrk APIService: %w", err)
 			}
-			if err := state.k3s.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 18000); err != nil {
+			if err := state.k3s.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 8082, 18000); err != nil {
 				return fmt.Errorf("bridging controller-manager: %w", err)
 			}
 			slog.Info("Controller-manager registered + bridged", "backend", cmIP)

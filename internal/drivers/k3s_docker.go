@@ -353,10 +353,11 @@ subsets:
 //     plane bootstrap dials `envoy-gateway.${ENVOY_GATEWAY_NAMESPACE}.svc:18000`,
 //     so this Service name is fixed; only the namespace floats with
 //     the runtime ns.
-func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, clrkNS, cmIP string, grpcPort, extProcPort, xdsPort int32) error {
+func (d *K3sDriver) ApplyControllerManagerBridge(ctx context.Context, clrkNS, cmIP string, grpcPort, extProcPort, healthPort, xdsPort int32) error {
 	yaml := multiPortServiceBridge(clrkNS, "clrk-controller-manager", cmIP, []bridgePort{
 		{Name: "grpc", Port: grpcPort},
 		{Name: "extproc", Port: extProcPort},
+		{Name: "health", Port: healthPort},
 	}) + serviceBridge(clrkNS, "envoy-gateway", cmIP, xdsPort)
 	return d.KubectlApply(ctx, "-", []byte(yaml))
 }
