@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
@@ -173,6 +174,19 @@ func main() {
 	}
 
 	cm := mgr.CtrlManager()
+
+	// Kube probes hit :8082 directly on the controller-manager pod;
+	// EG is deliberately not in this path. healthz.Ping is sufficient
+	// — controller-runtime only serves /readyz once Start reaches the
+	// Runnables phase, so it doubles as a cache-synced signal.
+	if err := cm.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		log.Error(err, "Unable to register healthz check")
+		os.Exit(1)
+	}
+	if err := cm.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		log.Error(err, "Unable to register readyz check")
+		os.Exit(1)
+	}
 
 	// Portable reconcilers: run in all modes.
 	if err := (&controller.WorkerPoolStatusReconciler{
