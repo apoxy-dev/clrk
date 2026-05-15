@@ -1959,6 +1959,11 @@ func (in *TaskAgentSpec) DeepCopyInto(out *TaskAgentSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.WarmPoolIdleTTL != nil {
+		in, out := &in.WarmPoolIdleTTL, &out.WarmPoolIdleTTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
 	if in.Schedule != nil {
 		in, out := &in.Schedule, &out.Schedule
 		*out = new(string)

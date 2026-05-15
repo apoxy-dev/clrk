@@ -73,16 +73,13 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// alongside in-flight changes.
 	warmPool := NewWarmPool(sandboxMgr, r.Client, router, active.Notifier(), r.PoolName, r.PodName, 0)
 	disp.SetWarmPool(warmPool)
-	go func() {
-		if err := warmPool.Run(ctx); err != nil {
-			log.Error(err, "Warm pool reconciler exited")
-		}
-	}()
+	if err := warmPool.SetupWithManager(r.Manager); err != nil {
+		return fmt.Errorf("setting up warm pool reconciler: %w", err)
+	}
 
-	// Set up SandboxState watcher. The dispatcher reference is no
-	// longer needed — ActiveExecutions accounting moved to the
-	// WorkerStatusService gRPC stream consumed by the controller.
-	_ = disp
+	// Set up SandboxState watcher. ActiveExecutions accounting lives
+	// in the WorkerStatusService gRPC stream consumed by the
+	// controller — the watcher only owns image-pull + heartbeat.
 	watcher := &sandboxWatcher{
 		Client:     r.Client,
 		sandboxMgr: sandboxMgr,
@@ -135,13 +132,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Block until context is cancelled.
 	<-ctx.Done()
 
-	// Order: stop warm fills → drain in-flight HTTP (bounded to 30s
-	// by disp.Run's srv.Shutdown) → drain daemons → destroy
-	// unconsumed warm sandboxes → SIGTERM + grace + Destroy on
-	// anything still running. DestroyAll runs after the dispatcher
-	// has stopped accepting requests so warm sandboxes are guaranteed
-	// to be unconsumed.
+	// Order: flip the dispatcher to 503 new dispatches → stop warm
+	// fills → drain in-flight HTTP (bounded to 30s by disp.Run's
+	// srv.Shutdown) → drain daemons → destroy unconsumed warm
+	// sandboxes → SIGTERM + grace + Destroy on anything still
+	// running. Drain() comes before StopFill so the picker upstream
+	// stops sending us work while srv.Shutdown is still inside the
+	// 30s cooperative window.
 	log.Info("Shutting down worker runtime")
+	disp.Drain()
 	warmPool.StopFill()
 	<-dispDone
 	daemonMgr.Shutdown()

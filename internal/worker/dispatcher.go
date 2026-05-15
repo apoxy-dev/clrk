@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -128,6 +129,12 @@ type Dispatcher struct {
 	// across requests for the same agent, and resized lazily when the
 	// spec.maxConcurrent value changes.
 	semaphores sync.Map // types.NamespacedName -> *sema
+
+	// draining is flipped by Drain() once worker shutdown begins so
+	// new dispatches get a synchronous 503 (the ingress picker
+	// retries on the next worker) while in-flight requests finish
+	// inside the cooperative srv.Shutdown grace.
+	draining atomic.Bool
 }
 
 // WarmAcquirer is the subset of *WarmPool the dispatcher uses on the
@@ -162,6 +169,12 @@ func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podNam
 // cold path (Create + Start). Call once during runtime startup before
 // the dispatcher accepts traffic.
 func (d *Dispatcher) SetWarmPool(w WarmAcquirer) { d.warmPool = w }
+
+// Drain flips the dispatcher into shutdown mode: subsequent
+// ServeHTTP calls return 503 before any sandbox work, while
+// already-running requests continue to completion under the
+// cooperative srv.Shutdown grace.
+func (d *Dispatcher) Drain() { d.draining.Store(true) }
 
 // NewActiveCounter returns an empty activeCounter usable as the
 // `active` argument to NewDispatcher. Exported so tests can inspect
@@ -213,6 +226,13 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hdr := r.Header.Get(ports.HeaderTaskAgent)
 	if hdr == "" {
 		http.Error(w, "missing "+ports.HeaderTaskAgent+" header", http.StatusBadRequest)
+		return
+	}
+	if d.draining.Load() {
+		// Worker is shutting down. Synchronous 503 so the ingress
+		// picker steers to another worker without burning retry
+		// budget on a connection-level error.
+		http.Error(w, "worker draining", http.StatusServiceUnavailable)
 		return
 	}
 	ns, name, ok := strings.Cut(hdr, "/")

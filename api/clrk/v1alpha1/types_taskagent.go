@@ -60,6 +60,15 @@ type TaskAgentSpec struct {
 	// +kubebuilder:default=0
 	WarmPoolSize *int32 `json:"warmPoolSize,omitempty"`
 
+	// WarmPoolIdleTTL bounds how long a pre-warmed sandbox can sit
+	// in the pool before it is evicted and replaced. Defaults to
+	// 10 minutes when unset. Bounds resource-leak accumulation in
+	// long-idle agent processes (file descriptors, anon memory,
+	// language-runtime caches) at the cost of a cold-fill every
+	// IdleTTL when traffic is sparse.
+	// +optional
+	WarmPoolIdleTTL *metav1.Duration `json:"warmPoolIdleTTL,omitempty"`
+
 	// Schedule adds a cron trigger. Does NOT disable HTTP triggering.
 	// +optional
 	Schedule *string `json:"schedule,omitempty"`

@@ -209,4 +209,9 @@ type SandboxInstance struct {
 	EgressPolicy *egress.SandboxPolicy
 
 	CreatedAt time.Time
+
+	// idleTimer is the AfterFunc that evicts this slot after
+	// WarmPoolIdleTTL elapses. Nil on cold-path sandboxes and on
+	// warm sandboxes once Acquire has Stop'd the timer.
+	idleTimer *time.Timer
 }

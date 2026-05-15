@@ -2022,7 +2022,7 @@ func schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref common.ReferenceCallbac
 					},
 					"dns": {
 						SchemaProps: spec.SchemaProps{
-							Description: "DNS configures the EG-managed Envoy's upstream DNS resolver (dynamic_forward_proxy DNS cache). Defaults to LookupFamily=V4Preferred.",
+							Description: "DNS configures the Egress Gateway's DNS resolver. Defaults to LookupFamily=V4Preferred.",
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDNSSpec"),
 						},
 					},
@@ -3610,6 +3610,12 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentSpec(ref common.ReferenceCallback) c
 							Description: "WarmPoolSize is the per-worker target for pre-Created sandboxes kept Ready (rootfs mounted, TAP+netns provisioned, libcontainer container created but agent process not yet started). A warm sandbox shaves cold-start off the request hot path. Defaults to 0 (no warm pool). Capped by the worker at MaxExecutionsPerWorker/2.",
 							Type:        []string{"integer"},
 							Format:      "int32",
+						},
+					},
+					"warmPoolIdleTTL": {
+						SchemaProps: spec.SchemaProps{
+							Description: "WarmPoolIdleTTL bounds how long a pre-warmed sandbox can sit in the pool before it is evicted and replaced. Defaults to 10 minutes when unset. Bounds resource-leak accumulation in long-idle agent processes (file descriptors, anon memory, language-runtime caches) at the cost of a cold-fill every IdleTTL when traffic is sparse.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
 						},
 					},
 					"schedule": {
