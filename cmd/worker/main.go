@@ -24,6 +24,13 @@ func init() {
 }
 
 func main() {
+	// runsc subcommand demux runs before any other setup. Container.Start
+	// re-execs /proc/self/exe with argv[1] like "boot" or "gofer"; those
+	// invocations must reach gVisor's runsc main, not the controller-
+	// runtime manager. tryDispatchRunsc returns only if argv doesn't
+	// match a runsc subcommand.
+	tryDispatchRunsc()
+
 	// Single logging pipeline: stdlib slog (text) is the default for our
 	// own slog.Info/Error sites; controller-runtime's logr is bridged into
 	// the same handler so reconciler logs share format with everything
