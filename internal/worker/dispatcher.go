@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -481,18 +480,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		go func() { _, _ = io.Copy(io.Discard, sb.Stdout) }()
 	}
 
-	state, waitErr := waitOrStop(ctx, d.sandboxMgr, sandboxID)
-
-	exitCode := -1
-	success := false
-	if state != nil {
-		success = state.Success()
-		if success {
-			exitCode = 0
-		} else if ws, ok := state.Sys().(interface{ ExitStatus() int }); ok {
-			exitCode = ws.ExitStatus()
-		}
-	}
+	exitCode, waitErr := waitOrStop(ctx, d.sandboxMgr, sandboxID)
+	success := waitErr == nil && exitCode == 0
 
 	// Sandbox is gone; cancel any pending Metadata-mode response so
 	// downstream selects unblock.
@@ -692,23 +681,23 @@ func streamWithFlush(dst io.Writer, src io.Reader, flusher http.Flusher) bool {
 // cancellation triggers a sandbox Stop and lets Wait return. Mirrors
 // the daemon path's waitOrCancel; duplicated to avoid coupling the
 // dispatcher to a daemon-only file.
-func waitOrStop(ctx context.Context, mgr SandboxRuntime, id SandboxID) (*os.ProcessState, error) {
+func waitOrStop(ctx context.Context, mgr SandboxRuntime, id SandboxID) (int, error) {
 	type result struct {
-		state *os.ProcessState
-		err   error
+		code int
+		err  error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		s, e := mgr.Wait(context.Background(), id)
-		ch <- result{state: s, err: e}
+		c, e := mgr.Wait(context.Background(), id)
+		ch <- result{code: c, err: e}
 	}()
 	select {
 	case r := <-ch:
-		return r.state, r.err
+		return r.code, r.err
 	case <-ctx.Done():
 		_ = mgr.Stop(context.Background(), id)
 		r := <-ch
-		return r.state, r.err
+		return r.code, r.err
 	}
 }
 

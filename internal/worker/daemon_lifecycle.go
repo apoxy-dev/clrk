@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -294,7 +293,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			})
 		}
 
-		state, waitErr := m.waitOrCancel(ctx, sandboxID)
+		exitCode, waitErr := m.waitOrCancel(ctx, sandboxID)
 		if lifetimeTimer != nil {
 			lifetimeTimer.Stop()
 		}
@@ -313,10 +312,10 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 		if waitErr != nil {
 			log.Error(waitErr, "Sandbox wait failed")
 		}
-		log.Info("Sandbox exited", "ranFor", ranFor, "state", processStateString(state))
+		log.Info("Sandbox exited", "ranFor", ranFor, "exitCode", exitCode)
 
 		nextAttempt := attempt + 1
-		decision := decideRestart(da.Spec.RestartPolicy, state, nextAttempt, da.Spec.MaxRestarts)
+		decision := decideRestart(da.Spec.RestartPolicy, exitCode, waitErr, nextAttempt, da.Spec.MaxRestarts)
 		switch decision {
 		case daemonDecisionStop:
 			m.patchStatus(ctx, da, daemonStatusUpdate{
@@ -352,29 +351,29 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 // unwinds. Without this escalation a non-cooperating sandbox strands
 // its supervisor goroutine forever, blocking GCMissing/Stop callers
 // and ultimately the heartbeat loop.
-func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID) (*os.ProcessState, error) {
+func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID) (int, error) {
 	type waitResult struct {
-		state *os.ProcessState
-		err   error
+		code int
+		err  error
 	}
 	const sigtermGrace = 5 * time.Second
 	ch := make(chan waitResult, 1)
 	go func() {
-		s, e := m.sandboxMgr.Wait(context.Background(), id)
-		ch <- waitResult{state: s, err: e}
+		c, e := m.sandboxMgr.Wait(context.Background(), id)
+		ch <- waitResult{code: c, err: e}
 	}()
 	select {
 	case r := <-ch:
-		return r.state, r.err
+		return r.code, r.err
 	case <-ctx.Done():
 		_ = m.sandboxMgr.Stop(context.Background(), id)
 		select {
 		case r := <-ch:
-			return r.state, r.err
+			return r.code, r.err
 		case <-time.After(sigtermGrace):
 			_ = m.sandboxMgr.Kill(context.Background(), id)
 			r := <-ch
-			return r.state, r.err
+			return r.code, r.err
 		}
 	}
 }
@@ -403,11 +402,11 @@ const (
 
 // decideRestart maps RestartPolicy + exit state + attempt count to a
 // supervisor decision.
-func decideRestart(policy clrkv1alpha1.RestartPolicy, state *os.ProcessState, nextAttempt int32, maxRestarts *int32) daemonDecision {
+func decideRestart(policy clrkv1alpha1.RestartPolicy, exitCode int, waitErr error, nextAttempt int32, maxRestarts *int32) daemonDecision {
 	if maxRestarts != nil && *maxRestarts > 0 && nextAttempt > *maxRestarts {
 		return daemonDecisionStop
 	}
-	success := state != nil && state.Success()
+	success := waitErr == nil && exitCode == 0
 	switch policy {
 	case clrkv1alpha1.RestartPolicyAlways, "":
 		return daemonDecisionRestart
@@ -420,13 +419,6 @@ func decideRestart(policy clrkv1alpha1.RestartPolicy, state *os.ProcessState, ne
 		return daemonDecisionStop
 	}
 	return daemonDecisionStop
-}
-
-func processStateString(state *os.ProcessState) string {
-	if state == nil {
-		return "<nil>"
-	}
-	return state.String()
 }
 
 type daemonStatusUpdate struct {

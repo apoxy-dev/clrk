@@ -7,11 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/opencontainers/runc/libcontainer/configs"
-	"golang.org/x/sys/unix"
-
-	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
 const (
@@ -97,19 +92,3 @@ func dirBytesUpTo(root string, cap int64) (int64, error) {
 	return total, err
 }
 
-// buildStateMount constructs the libcontainer bind-mount entry for
-// the persistent state dir. Source is the on-host directory,
-// destination is AgentState.MountPath (or defaultStateGuestMount).
-// Read-write so agents can persist data across executions.
-func buildStateMount(hostPath string, state *clrkv1alpha1.AgentState) *configs.Mount {
-	dest := defaultStateGuestMount
-	if state != nil && state.MountPath != "" {
-		dest = state.MountPath
-	}
-	return &configs.Mount{
-		Source:      hostPath,
-		Destination: dest,
-		Device:      "bind",
-		Flags:       unix.MS_BIND | unix.MS_REC,
-	}
-}

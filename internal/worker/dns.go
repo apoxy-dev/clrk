@@ -7,10 +7,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/docker/docker/libnetwork/resolvconf"
-	"github.com/opencontainers/runc/libcontainer/configs"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -77,13 +75,3 @@ func (m *SandboxManager) removeSandboxNetConfig(id SandboxID) {
 	_ = os.RemoveAll(filepath.Join(m.rootDir, string(id)+"-net"))
 }
 
-// buildResolvMount returns a bind mount of the per-sandbox resolv.conf
-// over /etc/resolv.conf inside the container.
-func buildResolvMount(source string) *configs.Mount {
-	return &configs.Mount{
-		Source:      source,
-		Destination: "/etc/resolv.conf",
-		Device:      "bind",
-		Flags:       syscall.MS_BIND | syscall.MS_RDONLY,
-	}
-}

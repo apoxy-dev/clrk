@@ -122,7 +122,7 @@ type SandboxRuntime interface {
 	Start(ctx context.Context, id SandboxID) error
 	Stop(ctx context.Context, id SandboxID) error
 	Kill(ctx context.Context, id SandboxID) error
-	Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error)
+	Wait(ctx context.Context, id SandboxID) (exitCode int, err error)
 	Delete(ctx context.Context, id SandboxID) error
 }
 
@@ -161,7 +161,8 @@ type SandboxInstance struct {
 	TAPName   string     // TAP device name in the netns.
 	TAPFD     *os.File   // Host-side TAP fd for netstack (APO-536).
 	RootFS    string     // Extracted rootfs path.
-	SandboxIP netip.Addr // Per-NIC source IP on the shared RevisionStack.
+	SandboxIP netip.Addr // Per-sandbox container IP (eth0 in the in-Sentry stack).
+	GatewayIP netip.Addr // Per-sandbox /30 gateway IP. Cosmetic with sentrystack — the in-Sentry forwarder never sends frames to it — but exposed so `ip route` inside the sandbox shows a sane default route.
 
 	// stack is the (TaskAgent, revision) shared netstack attachment
 	// for this sandbox: holds the NIC ID + sandbox IP and routes
@@ -180,12 +181,27 @@ type SandboxInstance struct {
 	Stdout io.ReadCloser
 	Stderr io.ReadCloser
 
-	// stdinChild / stdoutChild / stderrChild are the libcontainer-Process-
-	// facing ends of the stdio pipes. Held here so Start can hand them to
-	// the Process and Delete can close them; not exposed to callers.
+	// stdinChild / stdoutChild / stderrChild are the Sentry-facing
+	// ends of the stdio pipes. Passed to the runsc-create subprocess
+	// as its cmd.Stdin/Stdout/Stderr; the subprocess donates them to
+	// the Sentry boot child as the sandboxed process's stdio.
 	stdinChild  *os.File
 	stdoutChild *os.File
 	stderrChild *os.File
+
+	// stdoutInternalR / stderrInternalR are the worker-side read ends
+	// of the Sentry's stdout/stderr pipes. drainSentryStdio reads
+	// from these and fans bytes out to the slog sink and (in stdio
+	// mode) the dispatcher-facing outer pipe.
+	stdoutInternalR *os.File
+	stderrInternalR *os.File
+
+	// stdoutToDispatcher / stderrToDispatcher are the write ends of
+	// the dispatcher-facing outer pipes (paired with sb.Stdout /
+	// sb.Stderr). Only allocated when stdio=true; nil otherwise so
+	// the drain goroutine knows to skip the dispatcher fan-out.
+	stdoutToDispatcher *os.File
+	stderrToDispatcher *os.File
 
 	Sandbox   clrkv1alpha1.AgentSandbox
 	Resources clrkv1alpha1.ExecutionResources

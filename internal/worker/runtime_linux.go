@@ -15,7 +15,11 @@ import (
 )
 
 const (
-	clrkStateDir  = "/run/clrk/state"
+	// clrkStateDir is the runsc --root directory (was libcontainer's
+	// state dir). runsc writes one subdirectory per sandbox keyed by
+	// container ID; the same on-disk path is used across Create,
+	// Start, Wait, Kill, Delete.
+	clrkStateDir  = "/run/clrk/runsc"
 	clrkRootDir   = "/run/clrk/rootfs"
 	clrkImagesDir = "/run/clrk/images"
 	clrkLogsDir   = workerlog.Dir

@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 
+	"gvisor.dev/gvisor/runsc/cli/maincli"
+
 	// Side-effect import: registers the clrk PluginStack and AF_INET /
 	// AF_INET6 socket providers in this process. Required in BOTH the
 	// worker process (for PreInit) and any re-exec'd Sentry boot child
 	// (for Init), so the blank-import lives next to the runsc dispatch.
-	_ "github.com/apoxy-dev/clrk/internal/sentrystack"
+	"github.com/apoxy-dev/clrk/internal/sentrystack"
 )
 
 // runscSubcommands is the set of argv[1] tokens that mean "this process
@@ -62,19 +64,28 @@ var runscSubcommands = map[string]struct{}{
 	"flags":           {},
 }
 
-// tryDispatchRunsc fails loud if a runsc subcommand is invoked and
-// returns silently otherwise so the worker boots its controller-runtime
-// manager. Runsc dispatch isn't wired yet — the worker still spawns
-// sandboxes via libcontainer — so nothing should be re-execing us as
-// runsc; if it does, we want a clear error rather than a confusing
-// fall-through into the controller-runtime path.
+// tryDispatchRunsc hands off to gVisor's runsc entrypoint when the
+// process was re-exec'd as a runsc subcommand. The worker-side helpers
+// in internal/worker/runsc_exec_linux.go put runsc-level flags (e.g.
+// --root, --network) BEFORE the subcommand, mirroring the runsc CLI;
+// so scan past leading flag-shaped argv tokens before checking for a
+// known subcommand. maincli.Main never returns (cli.Run terminates
+// via os.Exit), so this function only returns when argv contained no
+// recognized subcommand at all.
 func tryDispatchRunsc() {
-	if len(os.Args) < 2 {
+	for _, a := range os.Args[1:] {
+		if len(a) > 0 && a[0] == '-' {
+			continue
+		}
+		if _, ok := runscSubcommands[a]; !ok {
+			return
+		}
+		if sentrystack.Singleton() == nil {
+			fmt.Fprintf(os.Stderr,
+				"worker: runsc subcommand %q invoked but sentrystack PluginStack not registered\n", a)
+			os.Exit(1)
+		}
+		maincli.Main()
 		return
 	}
-	if _, ok := runscSubcommands[os.Args[1]]; !ok {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "worker: runsc subcommand %q invoked but runsc dispatch is not enabled\n", os.Args[1])
-	os.Exit(1)
 }

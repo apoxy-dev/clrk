@@ -4,29 +4,19 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/opencontainers/runc/libcontainer"
-	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/devices"
-	"github.com/opencontainers/runc/libcontainer/specconv"
-	"golang.org/x/sys/unix"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-
-	// Enable cgroup manager to manage devices. runc v1.3 split this out of
-	// the runc module into opencontainers/cgroups.
-	_ "github.com/opencontainers/cgroups/devices"
-	// nsenter is required for libcontainer container init.
-	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
@@ -37,60 +27,31 @@ import (
 // Compile-time guard: *SandboxManager satisfies SandboxRuntime.
 var _ SandboxRuntime = (*SandboxManager)(nil)
 
-func init() {
-	if len(os.Args) > 1 && os.Args[1] == "init" {
-		// This is the golang entry point for runc init, executed
-		// before main() but after libcontainer/nsenter's nsexec().
-		libcontainer.Init()
-	}
-}
-
-// SandboxManager manages the lifecycle of sandbox containers via libcontainer.
+// SandboxManager manages sandbox lifecycle via gVisor runsc
+// subprocesses. The runsc dispatch lives in cmd/worker/cli_linux.go
+// (gVisor maincli import).
 type SandboxManager struct {
-	stateDir   string // libcontainer state dir (e.g. /run/clrk/state).
-	rootDir    string // Per-sandbox rootfs overlay dir (e.g. /run/clrk/rootfs).
-	logsDir    string // Per-agent stdio log files (e.g. /run/clrk/logs).
-	podName    string // Worker pod name; stamped on every sandbox's libcontainer Labels.
+	stateDir   string // runsc --root.
+	rootDir    string // Per-sandbox rootfs overlay + trust + net config.
+	logsDir    string // Per-agent stdio log files.
+	podName    string
 	imageStore *ImageStore
 
-	// revStackMgr owns one shared gVisor netstack per (TaskAgent,
-	// revision) on this worker. Sandbox.Create attaches a NIC for
-	// itself; Sandbox.Delete detaches; the manager tears stacks down
-	// after a grace period when the last sandbox for the key leaves.
+	// TODO(phase5): retire — sentrystack replaces the shared netstack.
 	revStackMgr *RevisionStackManager
 
 	mu        sync.Mutex
 	sandboxes map[SandboxID]*SandboxInstance
-	// containers retains the *libcontainer.Container returned by Create so
-	// Start can call ctr.Start() directly. libcontainer only writes
-	// state.json once Start runs, so a Create→Load handoff fails with
-	// "container does not exist" — the in-memory handle is the source of
-	// truth between those two calls.
-	containers map[SandboxID]*libcontainer.Container
-	// processes retains the libcontainer.Process for each running sandbox
-	// so callers (Wait) can block on its exit. Kept off SandboxInstance to
-	// avoid leaking a linux-only type into the cross-platform types.go.
-	processes map[SandboxID]*libcontainer.Process
-	// stdLogs retains the line-splitting writers and the per-agent log
-	// file wrapping each running sandbox's stdout/stderr so Wait can
-	// flush tail buffers and close the file when the init process exits.
-	// Same linux-only-leak rationale as `processes`.
-	stdLogs map[SandboxID]sandboxLogs
+	waiters   map[SandboxID]context.CancelFunc
+	stdLogs   map[SandboxID]sandboxLogs
 }
 
-// sandboxLogs bundles the two line-splitting writers wrapping a running
-// sandbox's stdio with the shared per-agent file they tee into. Both
-// writers prefix their lines with `[stdout]` / `[stderr]` so a single
-// log file is enough.
 type sandboxLogs struct {
 	stdout *sandboxLineWriter
 	stderr *sandboxLineWriter
 	file   *os.File
 }
 
-// NewSandboxManager creates a new SandboxManager. revStackMgr is the
-// shared per-(TaskAgent, revision) netstack manager — sandboxes
-// attach NICs to its stacks instead of standing up one stack each.
 func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *ImageStore, revStackMgr *RevisionStackManager) *SandboxManager {
 	return &SandboxManager{
 		stateDir:    stateDir,
@@ -100,25 +61,14 @@ func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *I
 		imageStore:  imageStore,
 		revStackMgr: revStackMgr,
 		sandboxes:   make(map[SandboxID]*SandboxInstance),
-		containers:  make(map[SandboxID]*libcontainer.Container),
-		processes:   make(map[SandboxID]*libcontainer.Process),
+		waiters:     make(map[SandboxID]context.CancelFunc),
 		stdLogs:     make(map[SandboxID]sandboxLogs),
 	}
 }
 
-// Create pulls the image, sets up the network namespace and TAP device,
-// and creates a libcontainer container. The container is created but NOT
-// started, leaving it in the Ready phase for warm pool use.
-//
-// agentRef, identity, and resources come from the parent agent (TaskAgent
-// or DaemonAgent), since AgentSandboxRevision (the watched resource) only
-// carries the immutable image+command snapshot.
-//
-// When stdio is true the returned instance carries os.Pipe-backed
-// Stdin/Stdout/Stderr that Start will splice into the libcontainer
-// Process. The dispatcher uses this to feed an HTTP request body in
-// and stream the response body out; daemons leave stdio false and
-// keep Process.Stdin = nil.
+// Create pulls the image, builds an OCI bundle, and runs `runsc
+// create` to spawn the Sentry. The sandbox is left in the Ready phase
+// for warm pool use — Start is a separate call.
 func (m *SandboxManager) Create(
 	ctx context.Context,
 	id SandboxID,
@@ -142,96 +92,73 @@ func (m *SandboxManager) Create(
 
 	log.Info("Creating sandbox")
 
-	// 1. Pull image + extract rootfs.
 	imgInfo, err := m.imageStore.EnsureImage(ctx, sandbox.Image)
 	if err != nil {
 		return nil, fmt.Errorf("ensuring image: %w", err)
 	}
-
-	// Use the shared image rootfs directly. Multiple sandboxes share the same
-	// extracted image since the rootfs is mounted read-only by libcontainer.
 	sandboxRootFS := imgInfo.RootFS
 
-	// 3. Setup per-run netns + TAP.
+	// The kernel netns is a placeholder under runsc + sentrystack — the
+	// Sentry's PluginStack is the only network the sandbox sees — but
+	// runsc still requires the path to exist (OCI namespace bind-mount).
 	nsCfg, err := SetupNetNS(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("setting up netns: %w", err)
 	}
 
-	// 4. Attach a NIC for this sandbox on the shared per-revision
-	// netstack. The manager lazily constructs the stack on the first
-	// attach for (ns, agent, revision) and ref-counts attachments;
-	// the IMDS listener, IdentityDialer, and DNS cache are all
-	// per-revision rather than per-sandbox.
+	// Unwinds in LIFO order on error; cleared on success.
+	var cleanup []func()
+	defer func() {
+		for i := len(cleanup) - 1; i >= 0; i-- {
+			cleanup[i]()
+		}
+	}()
+	pushCleanup := func(f func()) { cleanup = append(cleanup, f) }
+	pushCleanup(func() { TeardownNetNS(nsCfg) })
+
 	revAttach, err := m.revStackMgr.Attach(identity, nsCfg.TAPFD, nsCfg.GW, nsCfg.IP)
 	if err != nil {
-		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("attaching sandbox to revision netstack: %w", err)
 	}
+	pushCleanup(revAttach.Detach)
 
-	// 5. Build libcontainer config.
-	cfg := baseConfig(string(id), sandboxRootFS, resources)
-	// Stamp API lineage as libcontainer Labels so the on-disk
-	// state.json carries it. Surfaces via `runc state <id>` and
-	// becomes the basis for future restart-time recovery /
-	// stale-revision GC paths.
-	cfg.Labels = BuildSandboxLabels(identity, m.podName, attempt)
-
-	// 5a. Stage the agent's MITM CA and bind-mount it over every well-known
-	// system trust path that exists in the sandbox rootfs. The rootfs is
-	// read-only, so we can only overlay files that already exist — hence
-	// the env-var fallback in Start.
+	var extraMounts []specs.Mount
 	if len(caPEM) > 0 {
 		caPath, err := m.writeAgentCA(id, caPEM)
 		if err != nil {
-			revAttach.Detach()
-			TeardownNetNS(nsCfg)
 			return nil, fmt.Errorf("staging agent CA: %w", err)
 		}
-		cfg.Mounts = append(cfg.Mounts, buildTrustMounts(sandboxRootFS, caPath)...)
+		pushCleanup(func() { m.removeAgentCA(id) })
+		extraMounts = append(extraMounts, buildTrustMountsSpec(sandboxRootFS, caPath)...)
 	}
-
-	// 5b. Stage a per-sandbox /etc/resolv.conf pointing at the netns
-	// gateway IP, so DNS queries route via the TAP device into the
-	// gVisor netstack. The IdentityDialer rewrites :53 dials back to
-	// the worker's actual resolver — see dns.go for the rationale.
 	resolvPath, err := m.writeSandboxResolvConf(id, nsCfg.GW)
 	if err != nil {
-		m.removeAgentCA(id)
-		revAttach.Detach()
-		TeardownNetNS(nsCfg)
 		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
 	}
-	cfg.Mounts = append(cfg.Mounts, buildResolvMount(resolvPath))
-
-	// 5c. Persistent agent state — bind-mount /var/lib/clrk/state/<ns>/<agent>/
-	// into the sandbox at AgentState.MountPath. Pre-Create du-check
-	// against sizeLimitMB; over-cap returns ErrStateOverLimit which
-	// the dispatcher maps to 507. Per-(ns,agent) directory is shared
-	// across all executions for the same TaskAgent on this worker.
+	pushCleanup(func() { m.removeSandboxNetConfig(id) })
+	extraMounts = append(extraMounts, buildResolvMountSpec(resolvPath))
 	if state != nil {
 		hostPath, err := ensureStateDir(identity.Namespace, agentRef, state.SizeLimitMB)
 		if err != nil {
-			m.removeSandboxNetConfig(id)
-			m.removeAgentCA(id)
-			revAttach.Detach()
-			TeardownNetNS(nsCfg)
 			return nil, err
 		}
-		cfg.Mounts = append(cfg.Mounts, buildStateMount(hostPath, state))
+		extraMounts = append(extraMounts, buildStateMountSpec(hostPath, state))
 	}
 
-	// 6. Create container (does NOT start it).
-	ctr, err := libcontainer.Create(m.stateDir, string(id), cfg)
+	args := resolveProcessArgs(sandbox, imgInfo.Entrypoint)
+	env := buildProcessEnv(sandbox.Env)
+	annotations := buildSandboxAnnotations(identity, m.podName, attempt)
+	spec := buildSpec(string(id), sandboxRootFS, args, env, resources, nsCfg.NSPath, extraMounts, annotations)
+
+	bundleDir, err := m.ensureRunscBundleDir(id)
 	if err != nil {
-		m.removeSandboxNetConfig(id)
-		m.removeAgentCA(id)
-		revAttach.Detach()
-		TeardownNetNS(nsCfg)
-		return nil, fmt.Errorf("creating container: %w", err)
+		return nil, err
+	}
+	pushCleanup(func() { m.removeRunscBundleDir(id) })
+	if err := writeConfigJSON(bundleDir, spec); err != nil {
+		return nil, fmt.Errorf("writing OCI bundle: %w", err)
 	}
 
-	// 7. Track instance.
 	sb := &SandboxInstance{
 		ID:        id,
 		AgentRef:  agentRef,
@@ -241,6 +168,7 @@ func (m *SandboxManager) Create(
 		TAPName:   nsCfg.TAPName,
 		TAPFD:     nsCfg.TAPFD,
 		SandboxIP: nsCfg.IP,
+		GatewayIP: nsCfg.GW,
 		stack:     revAttach,
 		Sandbox:   sandbox,
 		Resources: resources,
@@ -248,113 +176,54 @@ func (m *SandboxManager) Create(
 		CreatedAt: time.Now(),
 	}
 
-	// 7a. Wire stdio pipes when requested. Caller writes to Stdin and
-	// reads from Stdout/Stderr; the libcontainer Process gets the other
-	// ends in Start. Failure here unwinds the same state Create owns.
-	if stdio {
-		inR, inW, err := os.Pipe()
-		if err != nil {
-			m.removeSandboxNetConfig(id)
-			m.removeAgentCA(id)
-			revAttach.Detach()
-			TeardownNetNS(nsCfg)
-			return nil, fmt.Errorf("creating stdin pipe: %w", err)
-		}
-		outR, outW, err := os.Pipe()
-		if err != nil {
-			inR.Close()
-			inW.Close()
-			m.removeSandboxNetConfig(id)
-			m.removeAgentCA(id)
-			revAttach.Detach()
-			TeardownNetNS(nsCfg)
-			return nil, fmt.Errorf("creating stdout pipe: %w", err)
-		}
-		errR, errW, err := os.Pipe()
-		if err != nil {
-			inR.Close()
-			inW.Close()
-			outR.Close()
-			outW.Close()
-			m.removeSandboxNetConfig(id)
-			m.removeAgentCA(id)
-			revAttach.Detach()
-			TeardownNetNS(nsCfg)
-			return nil, fmt.Errorf("creating stderr pipe: %w", err)
-		}
-		sb.Stdin = inW
-		sb.Stdout = outR
-		sb.Stderr = errR
-		sb.stdinChild = inR
-		sb.stdoutChild = outW
-		sb.stderrChild = errW
+	if err := wireSandboxStdio(sb, stdio); err != nil {
+		return nil, err
+	}
+	pushCleanup(func() {
+		closeStdioChildren(sb)
+		closeStdioParents(sb)
+		closeStdioInternals(sb)
+	})
+
+	initStr, err := buildSandboxInitStr(sb)
+	if err != nil {
+		return nil, fmt.Errorf("building InitStr: %w", err)
 	}
 
+	createErr := runscCreate(ctx, runscCreateOpts{
+		id:        string(id),
+		rootDir:   m.stateDir,
+		bundleDir: bundleDir,
+		initStr:   initStr,
+		stdin:     sb.stdinChild,
+		stdout:    sb.stdoutChild,
+		stderr:    sb.stderrChild,
+	})
+	if createErr != nil {
+		return nil, fmt.Errorf("creating sandbox via runsc: %w", createErr)
+	}
+
+	cleanup = nil // success — keep all allocated resources.
 	m.mu.Lock()
 	m.sandboxes[id] = sb
-	m.containers[id] = ctr
 	m.mu.Unlock()
 
 	log.Info("Sandbox created")
 	return sb, nil
 }
 
-// Start starts the container's init process.
+// Start fires the Sentry's spec.Process. The user binary is running
+// inside the sandbox after this returns.
 func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
-	ctr := m.containers[id]
 	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
-	if ctr == nil {
-		return fmt.Errorf("no container handle for %s (Create not called on this manager)", id)
-	}
 
-	// Build process args from spec, falling back to image entrypoint.
-	// Copy the command slice to avoid aliasing the spec's backing array.
-	var args []string
-	if len(sb.Sandbox.Command) > 0 {
-		args = append([]string(nil), sb.Sandbox.Command...)
-	} else {
-		imgInfo, err := m.imageStore.EnsureImage(ctx, sb.Sandbox.Image)
-		if err != nil {
-			return fmt.Errorf("getting image info: %w", err)
-		}
-		args = append([]string(nil), imgInfo.Entrypoint...)
-	}
-	args = append(args, sb.Sandbox.Args...)
-
-	// Prepend MITM trust env vars so that user-supplied env can override
-	// them if an agent explicitly wants a different trust store.
-	env := append([]string(nil), trustEnv("/etc/ssl/certs/ca-certificates.crt")...)
-	// IMDS metadata URLs are constants — same address for every
-	// sandbox (link-local IMDS convention). Set unconditionally
-	// regardless of delivery.mode: harmless for Stdin agents, and
-	// agents that don't care can ignore it.
-	env = append(env,
-		fmt.Sprintf("CLRK_METADATA_URL=http://%s/v1", ports.MetadataAddrV4),
-		fmt.Sprintf("CLRK_METADATA_URL_V6=http://[%s]/v1", ports.MetadataAddrV6),
-	)
-	env = append(env, envVarsToStrings(sb.Sandbox.Env)...)
-	// Ensure PATH is set.
-	hasPath := false
-	for _, e := range env {
-		if len(e) >= 5 && e[:5] == "PATH=" {
-			hasPath = true
-			break
-		}
-	}
-	if !hasPath {
-		env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-	}
-
-	// Wrap the sandbox's stdio in line-splitting slog writers so each
-	// line of agent output becomes a structured record attributed to the
-	// owning agent.
 	sbLogger := slog.With(
 		slog.String("sandbox.id", string(id)),
 		slog.String("agent.namespace", sb.Identity.Namespace),
@@ -364,59 +233,34 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	)
 	logFile, err := openAgentLogFile(m.logsDir, sb.Identity.Namespace, sb.Identity.Name)
 	if err != nil {
-		// Tee-to-file is best-effort; agent stdio still flows to slog.
 		log.Error(err, "Opening agent log file (continuing without file tee)")
 	}
 	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout", logFile)
 	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr", logFile)
 
-	// When the sandbox was Created with stdio pipes, splice them into
-	// libcontainer's Process: agent reads from the dispatcher via stdin,
-	// and stdout/stderr fan out to both the dispatcher (for the response
-	// body) and the per-agent log sink so structured logging keeps
-	// working unchanged.
-	var (
-		procStdin  io.Reader = nil
-		procStdout io.Writer = stdoutLog
-		procStderr io.Writer = stderrLog
-	)
-	if sb.stdinChild != nil {
-		procStdin = sb.stdinChild
+	// Explicit nil-interface for the daemon case so drainSentryStdio's
+	// nil-check actually fires (a typed-nil *os.File would slip through).
+	var outSink, errSink io.WriteCloser
+	if sb.stdoutToDispatcher != nil {
+		outSink = sb.stdoutToDispatcher
 	}
-	if sb.stdoutChild != nil {
-		procStdout = io.MultiWriter(sb.stdoutChild, stdoutLog)
+	if sb.stderrToDispatcher != nil {
+		errSink = sb.stderrToDispatcher
 	}
-	if sb.stderrChild != nil {
-		procStderr = io.MultiWriter(sb.stderrChild, stderrLog)
+	if sb.stdoutInternalR != nil {
+		go drainSentryStdio(sb.stdoutInternalR, outSink, stdoutLog)
+	}
+	if sb.stderrInternalR != nil {
+		go drainSentryStdio(sb.stderrInternalR, errSink, stderrLog)
 	}
 
-	p := &libcontainer.Process{
-		Args:            args,
-		Env:             env,
-		UID:             0,
-		GID:             0,
-		Cwd:             "/",
-		NoNewPrivileges: ptr.To(true),
-		Stdin:           procStdin,
-		Stdout:          procStdout,
-		Stderr:          procStderr,
-		Init:            true,
-	}
-
-	log.Info("Starting sandbox", "args", args)
-
-	// The shared RevisionStack is already pumping packets — Attach
-	// spawned the per-NIC pump and Start was called once at stack
-	// construction. Nothing more to do at the netstack level here.
-
-	if err := ctr.Run(p); err != nil {
-		ctr.Destroy()
-		return fmt.Errorf("running container: %w", err)
+	log.Info("Starting sandbox")
+	if err := runscStart(ctx, m.stateDir, string(id)); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
 	sb.Phase = SandboxRunning
-	m.processes[id] = p
 	m.stdLogs[id] = sandboxLogs{stdout: stdoutLog, stderr: stderrLog, file: logFile}
 	m.mu.Unlock()
 
@@ -424,11 +268,23 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	return nil
 }
 
+// drainSentryStdio fans the Sentry's stdio writes into the slog sink
+// and (in stdio mode) the dispatcher-facing pipe. dispatcherSink is
+// nil for daemons; closing it on EOF makes the dispatcher's sb.Stdout
+// reader return cleanly.
+func drainSentryStdio(src io.Reader, dispatcherSink io.WriteCloser, logSink io.Writer) {
+	w := io.Writer(logSink)
+	if dispatcherSink != nil {
+		w = io.MultiWriter(dispatcherSink, logSink)
+	}
+	_, _ = io.Copy(w, src)
+	if dispatcherSink != nil {
+		_ = dispatcherSink.Close()
+	}
+}
+
 // SetEgressBackends configures the per-listener EG egress backends
-// for a sandbox between Create and Start. Empty / nil disables PROXY
-// v2 framing and direct-dials upstream. Writes into the shared
-// RevisionStack's per-sandbox slot keyed by SandboxIP — the dialer
-// reads it per-dial.
+// for a sandbox between Create and Start.
 func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -443,11 +299,8 @@ func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.Backe
 	return nil
 }
 
-// SetEgressPolicy attaches the per-sandbox SandboxPolicy handle for a
-// sandbox between Create and Start. The handle is consulted by the
-// IdentityDialer before backend selection, so DefaultPolicy=DenyAll
-// denies even traffic that would otherwise match a backend listener.
-// Nil disables enforcement (used for agents with no EgressRefs).
+// SetEgressPolicy attaches the per-sandbox policy handle. Nil
+// disables enforcement.
 func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -463,9 +316,7 @@ func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPol
 }
 
 // SetInvocationID stamps the per-dispatch InvocationID into the
-// sandbox's slot on the shared RevisionStack. Called by the
-// dispatcher once per dispatch — cold and warm path alike — so warm
-// reruns get a fresh InvocationID for proxyproto TLVs.
+// sandbox's slot. Called once per dispatch (cold and warm path).
 func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) error {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -480,39 +331,39 @@ func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) erro
 	return nil
 }
 
-// Wait blocks until the sandbox's init process exits. Returns ErrNotFound
-// if the sandbox is unknown or was never Started. The caller is responsible
-// for calling Delete after Wait returns.
-func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessState, error) {
+// Wait blocks until the sandbox's init process exits and returns its
+// exit code. ErrNotFound if the sandbox is unknown. The caller is
+// responsible for calling Delete after Wait returns.
+func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (int, error) {
 	m.mu.Lock()
-	p, ok := m.processes[id]
+	_, ok := m.sandboxes[id]
 	m.mu.Unlock()
 	if !ok {
-		return nil, ErrNotFound
+		return -1, ErrNotFound
 	}
 
-	state, err := p.Wait()
+	waitCtx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.waiters[id] = cancel
+	m.mu.Unlock()
+
+	exitCode, err := runscWait(waitCtx, m.stateDir, string(id))
 
 	m.mu.Lock()
 	sb, sbOK := m.sandboxes[id]
 	if sbOK {
 		sb.Phase = SandboxStopped
 	}
-	delete(m.processes, id)
+	delete(m.waiters, id)
+	cancel()
 	logs, hasLogs := m.stdLogs[id]
 	delete(m.stdLogs, id)
 	m.mu.Unlock()
 
-	// Close the child ends of the stdio pipes now that the process has
-	// exited. This makes the dispatcher's stdout reader see EOF and lets
-	// it return cleanly without waiting for Delete.
 	if sbOK {
 		closeStdioChildren(sb)
 	}
 
-	// Emit any tail bytes the agent wrote without a trailing newline
-	// before exit so the last line of output isn't dropped, then close
-	// the per-agent tee file.
 	if hasLogs {
 		if logs.stdout != nil {
 			logs.stdout.Flush()
@@ -525,67 +376,49 @@ func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (*os.ProcessSta
 		}
 	}
 
-	return state, err
+	if err != nil {
+		return -1, err
+	}
+	return exitCode, nil
 }
 
-// Stop sends SIGTERM to all processes in the sandbox.
+// Stop sends SIGTERM to the sandbox's init via runsc.
 func (m *SandboxManager) Stop(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.Unlock()
-		return ErrNotFound
-	}
 	m.mu.Unlock()
-
-	ctr, err := libcontainer.Load(m.stateDir, string(id))
-	if err == libcontainer.ErrNotExist {
+	if !ok {
 		return ErrNotFound
 	}
-	if err != nil {
-		return fmt.Errorf("loading container: %w", err)
-	}
 
-	status, err := ctr.Status()
+	st, err := runscState(ctx, m.stateDir, string(id))
 	if err != nil {
-		return fmt.Errorf("getting container status: %w", err)
+		if isRunscNotExist(err) {
+			return ErrNotFound
+		}
+		return err
 	}
-	if status == libcontainer.Stopped {
+	if st.Status == runscStatusStopped {
 		m.mu.Lock()
 		sb.Phase = SandboxStopped
 		m.mu.Unlock()
 		return nil
 	}
 
-	ps, err := ctr.Processes()
-	if err != nil {
-		return fmt.Errorf("getting container processes: %w", err)
-	}
-	for _, pid := range ps {
-		p, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("finding process %d: %w", pid, err)
-		}
-		log.Info("Sending SIGTERM to process", "pid", pid)
-		if err := p.Signal(syscall.SIGTERM); err != nil {
-			log.Error(err, "Failed to send SIGTERM", "pid", pid)
-		}
+	log.Info("Sending SIGTERM to sandbox", "pid", st.Pid)
+	if err := runscKill(ctx, m.stateDir, string(id), "SIGTERM"); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
 	sb.Phase = SandboxStopping
 	m.mu.Unlock()
-
 	return nil
 }
 
-// Kill sends SIGKILL to the container's init via libcontainer. With a
-// private PID namespace, killing init reaps every process in the
-// namespace; with a shared one, libcontainer falls back to walking
-// the cgroup. Used as the SIGTERM-escalation path for daemons whose
-// PID 1 ignores SIGTERM (e.g. a bash `while true` loop).
+// Kill sends SIGKILL to the sandbox's init via runsc.
 func (m *SandboxManager) Kill(ctx context.Context, id SandboxID) error {
 	m.mu.Lock()
 	_, ok := m.sandboxes[id]
@@ -594,52 +427,37 @@ func (m *SandboxManager) Kill(ctx context.Context, id SandboxID) error {
 		return ErrNotFound
 	}
 
-	ctr, err := libcontainer.Load(m.stateDir, string(id))
-	if err == libcontainer.ErrNotExist {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("loading container: %w", err)
-	}
-	if err := ctr.Signal(syscall.SIGKILL); err != nil {
-		return fmt.Errorf("SIGKILL container: %w", err)
+	if err := runscKill(ctx, m.stateDir, string(id), "SIGKILL"); err != nil {
+		if isRunscNotExist(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("SIGKILL sandbox: %w", err)
 	}
 	return nil
 }
 
-// Delete destroys the container, tears down the network namespace, and
-// removes the sandbox from tracking.
+// Delete destroys the sandbox and tears down the network namespace.
+// `runsc delete --force` SIGKILLs anything still running.
 func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
+	m.mu.Unlock()
 	if !ok {
-		m.mu.Unlock()
 		return ErrNotFound
 	}
-	m.mu.Unlock()
 
-	// Detach this sandbox from the shared revision netstack. The
-	// stack itself outlives this sandbox unless this was the last
-	// attachment for the (ns, agent, revision) — RevisionStackManager
-	// handles ref-counting + grace-period close.
 	if sb.stack != nil {
 		sb.stack.Detach()
 	}
 
-	ctr, err := libcontainer.Load(m.stateDir, string(id))
-	if err != nil && err != libcontainer.ErrNotExist {
-		return fmt.Errorf("loading container: %w", err)
-	}
-	if err == nil {
-		if err := ctr.Destroy(); err != nil {
-			log.Error(err, "Failed to destroy container")
-		}
+	if err := runscDelete(ctx, m.stateDir, string(id)); err != nil && !isRunscNotExist(err) {
+		log.Error(err, "Failed to destroy sandbox via runsc")
 	}
 
 	if err := TeardownNetNS(&NetNSConfig{
-		NSName: fmt.Sprintf("run-%s", id),
+		NSName: netnsName(id),
 		NSPath: sb.NetNS,
 		TAPFD:  sb.TAPFD,
 	}); err != nil {
@@ -648,16 +466,18 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 
 	m.removeAgentCA(id)
 	m.removeSandboxNetConfig(id)
+	m.removeRunscBundleDir(id)
 
-	// Close any stdio pipe ends still open. closeStdioChildren is safe
-	// to call multiple times (each *os.File close is idempotent under
-	// our usage); Wait may have closed the child ends already.
 	closeStdioChildren(sb)
 	closeStdioParents(sb)
+	closeStdioInternals(sb)
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)
-	delete(m.containers, id)
+	if c, ok := m.waiters[id]; ok {
+		c()
+		delete(m.waiters, id)
+	}
 	if logs, ok := m.stdLogs[id]; ok && logs.file != nil {
 		_ = logs.file.Close()
 	}
@@ -672,33 +492,25 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 func (m *SandboxManager) Status(ctx context.Context, id SandboxID) (*SandboxInstance, error) {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
+	m.mu.Unlock()
 	if !ok {
-		m.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	m.mu.Unlock()
 
-	// Refresh phase from libcontainer.
-	ctr, err := libcontainer.Load(m.stateDir, string(id))
-	if err == libcontainer.ErrNotExist {
-		m.mu.Lock()
-		sb.Phase = SandboxStopped
-		m.mu.Unlock()
-		return sb, nil
-	}
+	st, err := runscState(ctx, m.stateDir, string(id))
 	if err != nil {
-		return nil, fmt.Errorf("loading container: %w", err)
-	}
-
-	cStatus, err := ctr.Status()
-	if err != nil {
-		return nil, fmt.Errorf("getting container status: %w", err)
+		if isRunscNotExist(err) {
+			m.mu.Lock()
+			sb.Phase = SandboxStopped
+			m.mu.Unlock()
+			return sb, nil
+		}
+		return nil, fmt.Errorf("getting runsc state: %w", err)
 	}
 
 	m.mu.Lock()
-	sb.Phase = phaseFromStatus(cStatus)
+	sb.Phase = phaseFromRunscState(st.Status)
 	m.mu.Unlock()
-
 	return sb, nil
 }
 
@@ -714,73 +526,112 @@ func (m *SandboxManager) List() []*SandboxInstance {
 	return result
 }
 
-// Cleanup removes orphaned containers from a previous worker incarnation.
+// Cleanup removes orphaned sandboxes from a previous worker
+// incarnation. Scans the runsc --root dir directly rather than forking
+// `runsc list` — same information, no subprocess.
 func (m *SandboxManager) Cleanup(ctx context.Context) error {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Cleaning up orphaned containers")
+	log.Info("Cleaning up orphaned sandboxes")
 
 	entries, err := os.ReadDir(m.stateDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("reading state dir: %w", err)
+		return fmt.Errorf("listing orphaned sandboxes: %w", err)
 	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		log.Info("Found orphaned container, destroying", "id", entry.Name())
-		m.Purge(ctx, SandboxID(entry.Name()))
+		log.Info("Found orphaned sandbox, destroying", "id", e.Name())
+		m.Purge(ctx, SandboxID(e.Name()))
 	}
 	return nil
 }
 
-// Purge tears down any libcontainer + netns state left behind for id, even
-// if the in-process SandboxManager has no record of it. Safe to call before
-// Create as a guard against the "container with given ID already exists"
-// error that surfaces when a previous Create attempt left partial state
-// (libcontainer.Create writes the state directory before validating cgroup
-// / namespace setup, so a failure midway through can leave a directory
-// behind that Load won't touch but the next Create rejects). Fully best-
-// effort: any errors here are logged, not returned, since we're about to
-// try a fresh Create anyway.
+// Purge tears down any runsc + netns state left behind for id. Safe
+// to call before Create against a stale ID; runsc delete is idempotent
+// for not-found containers.
 func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
-	m.mu.Lock()
-	delete(m.containers, id)
-	m.mu.Unlock()
+	if err := runscDelete(ctx, m.stateDir, string(id)); err != nil && !isRunscNotExist(err) {
+		log.Error(err, "Destroy of orphaned sandbox failed; falling back to RemoveAll")
+	}
+	if err := os.RemoveAll(filepath.Join(m.stateDir, string(id))); err != nil {
+		log.Error(err, "RemoveAll of state dir failed")
+	}
+	m.removeRunscBundleDir(id)
+	TeardownNetNS(&NetNSConfig{NSName: netnsName(id)})
+}
 
-	stateEntry := filepath.Join(m.stateDir, string(id))
-	if _, err := os.Stat(stateEntry); err != nil {
-		// Nothing to clean up — common path on the first attempt.
+// wireSandboxStdio allocates pipes for the Sentry's stdio. Two
+// pipes per stream in stdio mode: an inner pipe (Sentry writes →
+// drain goroutine reads) and an outer pipe (drain goroutine writes →
+// dispatcher reads). Daemons skip the outer pipe; everything still
+// flows into the slog sink.
+func wireSandboxStdio(sb *SandboxInstance, stdio bool) error {
+	var toClose []*os.File
+	cleanup := func() {
+		for _, f := range toClose {
+			_ = f.Close()
+		}
+	}
+	pipe := func() (r, w *os.File, err error) {
+		r, w, err = os.Pipe()
+		if err == nil {
+			toClose = append(toClose, r, w)
+		}
 		return
 	}
 
-	if ctr, err := libcontainer.Load(m.stateDir, string(id)); err == nil {
-		if derr := ctr.Destroy(); derr != nil {
-			log.Error(derr, "Destroy of orphaned container failed; falling back to RemoveAll")
-		}
-	} else if err != libcontainer.ErrNotExist {
-		log.Error(err, "Load of orphaned container failed; falling back to RemoveAll")
+	outChildR, outChildW, err := pipe()
+	if err != nil {
+		return fmt.Errorf("creating stdout child pipe: %w", err)
+	}
+	sb.stdoutChild = outChildW
+	sb.stdoutInternalR = outChildR
+
+	errChildR, errChildW, err := pipe()
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("creating stderr child pipe: %w", err)
+	}
+	sb.stderrChild = errChildW
+	sb.stderrInternalR = errChildR
+
+	if !stdio {
+		return nil
 	}
 
-	// Even on a successful Destroy, libcontainer occasionally leaves the
-	// dir behind on some kernels — RemoveAll unconditionally so the next
-	// Create gets a clean slate.
-	if err := os.RemoveAll(stateEntry); err != nil {
-		log.Error(err, "RemoveAll of state dir failed")
+	inR, inW, err := pipe()
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("creating stdin pipe: %w", err)
 	}
+	sb.Stdin = inW
+	sb.stdinChild = inR
 
-	TeardownNetNS(&NetNSConfig{NSName: fmt.Sprintf("run-%s", id)})
+	outerOutR, outerOutW, err := pipe()
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("creating outer stdout pipe: %w", err)
+	}
+	sb.Stdout = outerOutR
+	sb.stdoutToDispatcher = outerOutW
+
+	outerErrR, outerErrW, err := pipe()
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("creating outer stderr pipe: %w", err)
+	}
+	sb.Stderr = outerErrR
+	sb.stderrToDispatcher = outerErrW
+
+	return nil
 }
 
-// closeStdioChildren closes the libcontainer-Process-facing pipe ends.
-// Called after Wait returns (so the parent reader sees EOF) and again
-// from Delete defensively. Each *os.File.Close is safe to call twice;
-// the second returns a "file already closed" error we discard.
 func closeStdioChildren(sb *SandboxInstance) {
 	if sb == nil {
 		return
@@ -799,9 +650,6 @@ func closeStdioChildren(sb *SandboxInstance) {
 	}
 }
 
-// closeStdioParents closes the dispatcher-facing pipe ends. Called
-// from Delete; the dispatcher itself typically closes Stdin once it's
-// done writing the request body, so this is a defensive sweep.
 func closeStdioParents(sb *SandboxInstance) {
 	if sb == nil {
 		return
@@ -820,135 +668,81 @@ func closeStdioParents(sb *SandboxInstance) {
 	}
 }
 
-// phaseFromStatus maps libcontainer.Status to SandboxPhase.
-func phaseFromStatus(status libcontainer.Status) SandboxPhase {
+func closeStdioInternals(sb *SandboxInstance) {
+	if sb == nil {
+		return
+	}
+	if sb.stdoutInternalR != nil {
+		_ = sb.stdoutInternalR.Close()
+		sb.stdoutInternalR = nil
+	}
+	if sb.stderrInternalR != nil {
+		_ = sb.stderrInternalR.Close()
+		sb.stderrInternalR = nil
+	}
+	if sb.stdoutToDispatcher != nil {
+		_ = sb.stdoutToDispatcher.Close()
+		sb.stdoutToDispatcher = nil
+	}
+	if sb.stderrToDispatcher != nil {
+		_ = sb.stderrToDispatcher.Close()
+		sb.stderrToDispatcher = nil
+	}
+}
+
+// runsc emits these OCI status values; see runsc/container/status.go.
+const (
+	runscStatusCreating = "creating"
+	runscStatusCreated  = "created"
+	runscStatusRunning  = "running"
+	runscStatusStopped  = "stopped"
+)
+
+func phaseFromRunscState(status string) SandboxPhase {
 	switch status {
-	case libcontainer.Running:
-		return SandboxRunning
-	case libcontainer.Stopped:
-		return SandboxStopped
-	case libcontainer.Paused:
+	case runscStatusCreating:
+		return SandboxCreating
+	case runscStatusCreated:
 		return SandboxReady
+	case runscStatusRunning:
+		return SandboxRunning
 	default:
 		return SandboxStopped
 	}
 }
 
-// baseConfig creates the base container configuration, ported and adapted
-// from apoxy-cli pkg/edgefunc/runc/runc.go:40-197.
-func baseConfig(id, rootFS string, resources clrkv1alpha1.ExecutionResources) *configs.Config {
-	devs := make([]*devices.Rule, len(specconv.AllowedDevices))
-	for i, d := range specconv.AllowedDevices {
-		devs[i] = &d.Rule
+// isRunscNotExist reports whether err is runsc's "container not
+// found" shape. runsc folds the phrase into stderr from CombinedOutput.
+func isRunscNotExist(err error) bool {
+	if err == nil {
+		return false
 	}
+	msg := err.Error()
+	return strings.Contains(msg, "does not exist")
+}
 
-	caps := []string{"CAP_NET_BIND_SERVICE"}
-
-	c := &configs.Config{
-		Rootfs:     rootFS,
-		Readonlyfs: true,
-		Capabilities: &configs.Capabilities{
-			Bounding:  caps,
-			Effective: caps,
-			Permitted: caps,
-			Ambient:   caps,
-		},
-		Namespaces: configs.Namespaces([]configs.Namespace{
-			{Type: configs.NEWNS},
-			{Type: configs.NEWUTS},
-			{Type: configs.NEWIPC},
-			{Type: configs.NEWPID},
-			{Type: configs.NEWNET, Path: fmt.Sprintf("/run/netns/run-%s", id)},
-			{Type: configs.NEWCGROUP},
-		}),
-		Devices:  specconv.AllowedDevices,
-		Hostname: id,
-		MaskPaths: []string{
-			"/proc/kcore",
-			"/sys/firmware",
-		},
-		ReadonlyPaths: []string{
-			"/proc/sys", "/proc/sysrq-trigger", "/proc/irq", "/proc/bus",
-		},
-		NoNewKeyring: true,
-		Networks: []*configs.Network{
-			{
-				Type:    "loopback",
-				Address: "127.0.0.1/0",
-				Gateway: "localhost",
-			},
-		},
-		Cgroups: &configs.Cgroup{
-			Name:   id,
-			Parent: "system",
-			Resources: &configs.Resources{
-				MemorySwappiness: nil,
-				Devices:          devs,
-			},
-		},
-		Mounts: []*configs.Mount{
-			{
-				Source:      "proc",
-				Destination: "/proc",
-				Device:      "proc",
-				Flags:       syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV,
-			},
-			{
-				Source:      "tmpfs",
-				Destination: "/dev",
-				Device:      "tmpfs",
-				Flags:       syscall.MS_NOSUID | syscall.MS_STRICTATIME,
-				Data:        "mode=755",
-			},
-			{
-				Source:      "sysfs",
-				Destination: "/sys",
-				Device:      "sysfs",
-				Flags:       syscall.MS_RDONLY | syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV,
-			},
-			{
-				Source:      "cgroup",
-				Destination: "/sys/fs/cgroup",
-				Device:      "cgroup",
-				Flags:       syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_RELATIME | syscall.MS_RDONLY,
-			},
-			{
-				Source:      "devpts",
-				Destination: "/dev/pts",
-				Device:      "devpts",
-				Flags:       syscall.MS_NOSUID | syscall.MS_NOEXEC,
-				Data:        "newinstance,ptmxmode=0666,mode=0620,gid=5",
-			},
-			{
-				Source:      "tmpfs",
-				Destination: "/tmp",
-				Device:      "tmpfs",
-				Flags:       syscall.MS_NOSUID | syscall.MS_STRICTATIME,
-				Data:        "mode=1777,size=100M",
-			},
-		},
-		Rlimits: []configs.Rlimit{
-			{
-				Type: unix.RLIMIT_NOFILE,
-				Hard: 1024,
-				Soft: 1024,
-			},
-		},
+// buildProcessEnv assembles the env passed to the sandbox process via
+// the OCI spec. Order: TLS trust overrides, IMDS URL constants, then
+// user-supplied AgentSandbox.Env. PATH is appended only if not already
+// set.
+func buildProcessEnv(userEnv []corev1.EnvVar) []string {
+	env := append([]string(nil), trustEnv("/etc/ssl/certs/ca-certificates.crt")...)
+	env = append(env,
+		fmt.Sprintf("CLRK_METADATA_URL=http://%s/v1", ports.MetadataAddrV4),
+		fmt.Sprintf("CLRK_METADATA_URL_V6=http://[%s]/v1", ports.MetadataAddrV6),
+	)
+	env = append(env, envVarsToStrings(userEnv)...)
+	hasPath := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+			break
+		}
 	}
-
-	// Apply resource limits from the parent agent's spec.
-	if !resources.Memory.IsZero() {
-		c.Cgroups.Resources.Memory = resources.Memory.Value()
+	if !hasPath {
+		env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
-	if !resources.CPU.IsZero() {
-		// Convert CPU quantity (e.g. "1" = 1 core, "500m" = 0.5 core) to CFS quota.
-		// quota = millicores * period / 1000
-		millis := resources.CPU.MilliValue()
-		c.Cgroups.Resources.CpuQuota = millis * 100000 / 1000
-		c.Cgroups.Resources.CpuPeriod = 100000
-	}
-
-	return c
+	return env
 }
 
 // envVarsToStrings converts corev1.EnvVar slice to "KEY=VALUE" strings.

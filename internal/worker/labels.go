@@ -23,36 +23,48 @@ const (
 	LabelCreatedAt    = "clrk.apoxy.dev/created-at"
 )
 
-// BuildSandboxLabels returns the libcontainer Labels slice for a sandbox.
-// Empty fields are omitted so the label set is self-describing — a missing
-// invocation-id label means "DaemonAgent or pre-bind warm sandbox", not
-// "value happens to be empty".
+// BuildSandboxLabels returns the lineage labels for a sandbox, encoded
+// as "k=v" strings. Empty fields are omitted so the set is
+// self-describing — a missing invocation-id means "DaemonAgent or
+// pre-bind warm sandbox", not "value happens to be empty".
 //
-// Exported so apoxy-cloud//clrk/worker unit tests can lock down the label
-// format without reaching into unexported package internals.
+// Exported so apoxy-cloud//clrk/worker unit tests can lock down the
+// label format without reaching into unexported package internals.
 func BuildSandboxLabels(identity proxyproto.AgentIdentity, podName string, attempt int32) []string {
-	labels := []string{
-		fmt.Sprintf("%s=%s", LabelAgentKind, kindString(identity.Kind)),
-		fmt.Sprintf("%s=%s", LabelAgentName, identity.Name),
-		fmt.Sprintf("%s=%s", LabelNamespace, identity.Namespace),
-		fmt.Sprintf("%s=%s", LabelCreatedAt, time.Now().UTC().Format(time.RFC3339)),
+	m := buildSandboxLabelMap(identity, podName, attempt)
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// buildSandboxLabelMap is the single source of truth for sandbox
+// lineage labels. BuildSandboxLabels (libcontainer-style "k=v" slice)
+// and buildSandboxAnnotations (OCI map) both project from here.
+func buildSandboxLabelMap(identity proxyproto.AgentIdentity, podName string, attempt int32) map[string]string {
+	m := map[string]string{
+		LabelAgentKind: kindString(identity.Kind),
+		LabelAgentName: identity.Name,
+		LabelNamespace: identity.Namespace,
+		LabelCreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if identity.UID != "" {
-		labels = append(labels, fmt.Sprintf("%s=%s", LabelAgentUID, identity.UID))
+		m[LabelAgentUID] = identity.UID
 	}
 	if identity.Revision != "" {
-		labels = append(labels, fmt.Sprintf("%s=%s", LabelRevisionName, identity.Revision))
+		m[LabelRevisionName] = identity.Revision
 	}
 	if identity.InvocationID != "" {
-		labels = append(labels, fmt.Sprintf("%s=%s", LabelInvocationID, identity.InvocationID))
+		m[LabelInvocationID] = identity.InvocationID
 	}
 	if attempt > 0 {
-		labels = append(labels, fmt.Sprintf("%s=%d", LabelAttempt, attempt))
+		m[LabelAttempt] = fmt.Sprintf("%d", attempt)
 	}
 	if podName != "" {
-		labels = append(labels, fmt.Sprintf("%s=%s", LabelPodName, podName))
+		m[LabelPodName] = podName
 	}
-	return labels
+	return m
 }
 
 func kindString(k proxyproto.AgentKind) string {

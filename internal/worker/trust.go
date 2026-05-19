@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
-
-	"github.com/opencontainers/runc/libcontainer/configs"
 )
 
 // wellKnownTrustPaths lists CA bundle locations that common Linux
@@ -17,10 +14,10 @@ import (
 // bundle (OpenSSL via the distro path, curl, Python's ssl module, etc.)
 // trust our MITM CA.
 var wellKnownTrustPaths = []string{
-	"/etc/ssl/certs/ca-certificates.crt",  // Debian / Ubuntu.
-	"/etc/pki/tls/certs/ca-bundle.crt",    // RHEL / Fedora / CentOS.
+	"/etc/ssl/certs/ca-certificates.crt",                // Debian / Ubuntu.
+	"/etc/pki/tls/certs/ca-bundle.crt",                  // RHEL / Fedora / CentOS.
 	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // Fedora 22+.
-	"/etc/ssl/cert.pem",                   // Alpine / macOS-style.
+	"/etc/ssl/cert.pem",                                 // Alpine / macOS-style.
 }
 
 // trustEnvVars are env vars respected by various TLS client libraries. We
@@ -28,14 +25,15 @@ var wellKnownTrustPaths = []string{
 // bundles are picked up by programs that honor env over the default path.
 var trustEnvVars = []string{
 	"SSL_CERT_FILE",
-	"REQUESTS_CA_BUNDLE", // Python requests.
-	"CURL_CA_BUNDLE",     // curl.
-	"GIT_SSL_CAINFO",     // git.
+	"REQUESTS_CA_BUNDLE",  // Python requests.
+	"CURL_CA_BUNDLE",      // curl.
+	"GIT_SSL_CAINFO",      // git.
 	"NODE_EXTRA_CA_CERTS", // Node.js.
 }
 
 // writeAgentCA stores the agent's CA PEM in a per-sandbox file on the host
-// so that libcontainer bind mounts can reference it. Returns the host path.
+// so that the OCI spec's bind mounts can reference it. Returns the host
+// path.
 func (m *SandboxManager) writeAgentCA(id SandboxID, caPEM []byte) (string, error) {
 	dir := filepath.Join(m.rootDir, string(id)+"-trust")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -51,26 +49,6 @@ func (m *SandboxManager) writeAgentCA(id SandboxID, caPEM []byte) (string, error
 // removeAgentCA cleans up the per-sandbox trust dir on sandbox delete.
 func (m *SandboxManager) removeAgentCA(id SandboxID) {
 	_ = os.RemoveAll(filepath.Join(m.rootDir, string(id)+"-trust"))
-}
-
-// buildTrustMounts returns the subset of wellKnownTrustPaths that exist in
-// the image rootfs, as libcontainer bind mounts whose source is the agent's
-// CA PEM. Non-existent targets are skipped because the rootfs is mounted
-// read-only and libcontainer cannot create the mount point.
-func buildTrustMounts(rootfs, caPath string) []*configs.Mount {
-	mounts := make([]*configs.Mount, 0, len(wellKnownTrustPaths))
-	for _, target := range wellKnownTrustPaths {
-		if _, err := os.Stat(filepath.Join(rootfs, target)); err != nil {
-			continue
-		}
-		mounts = append(mounts, &configs.Mount{
-			Source:      caPath,
-			Destination: target,
-			Device:      "bind",
-			Flags:       syscall.MS_BIND | syscall.MS_RDONLY | syscall.MS_REC,
-		})
-	}
-	return mounts
 }
 
 // trustEnv returns env vars pointing every common TLS trust override at the

@@ -26,6 +26,10 @@ import (
 // a constant). It does not appear on the wire outside the TAP.
 const imdsTapV6Self = "fd00:ec2::ffff"
 
+// netnsName returns the named-netns label used for a sandbox id.
+// Single source of truth so Delete/Purge/SetupNetNS stay in sync.
+func netnsName(id SandboxID) string { return "run-" + string(id) }
+
 // NetNSConfig holds the network namespace and TAP device configuration
 // for a single sandbox.
 type NetNSConfig struct {
@@ -70,7 +74,7 @@ func allocateIPs() (gw netip.Addr, container netip.Addr, err error) {
 func SetupNetNS(ctx context.Context, id SandboxID) (*NetNSConfig, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
-	nsName := fmt.Sprintf("run-%s", id)
+	nsName := netnsName(id)
 	nsPath := fmt.Sprintf("/run/netns/%s", nsName)
 	tapName := "tap0"
 
