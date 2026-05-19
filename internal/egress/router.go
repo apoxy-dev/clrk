@@ -111,8 +111,10 @@ func (r *Router) Route(_ context.Context, dst netip.AddrPort, proto clrkv1alpha1
 	return &RouteResult{Action: ActionPassthrough}
 }
 
-// DialContext implements the netstack.Dialer interface. It consults the routing
-// table and applies the egress policy before dialing.
+// DialContext consults the routing table and applies the egress
+// policy before dialing. Retained as a worker-side helper for the
+// future urpc-driven router-side enforcement path; the data-plane
+// dialer now lives inside each Sentry's sentrystack forwarder.
 func (r *Router) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	dst, err := netip.ParseAddrPort(addr)
 	if err != nil {

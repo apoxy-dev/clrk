@@ -121,6 +121,11 @@ type Dispatcher struct {
 	podName    string
 	namespace  string
 
+	// metaReg is the worker-wide IMDS entry registry. Metadata-mode
+	// dispatches Register against it; the central IMDS HTTP server
+	// reads from it on every request via SandboxID lookup.
+	metaReg *metadata.Registry
+
 	active *activeCounter
 
 	// semaphores caps in-flight executions per (TaskAgent ns, name).
@@ -152,7 +157,12 @@ type sema struct {
 // NewDispatcher constructs a Dispatcher. Production callers pass a
 // real *SandboxManager (which satisfies SandboxRuntime) and a real
 // *egress.Router; tests pass fakes / nil where appropriate.
-func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podName, namespace string, active *activeCounter) *Dispatcher {
+//
+// metaReg is the worker-wide IMDS registry that Metadata-mode
+// dispatches use to expose the per-execution *metadata.Entry to the
+// central IMDS HTTP server. May be nil in tests that exercise only
+// the Stdin delivery path.
+func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podName, namespace string, active *activeCounter, metaReg *metadata.Registry) *Dispatcher {
 	return &Dispatcher{
 		client:     c,
 		sandboxMgr: mgr,
@@ -160,6 +170,7 @@ func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podNam
 		podName:    podName,
 		namespace:  namespace,
 		active:     active,
+		metaReg:    metaReg,
 	}
 }
 
@@ -412,7 +423,11 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch deliveryMode {
 	case clrkv1alpha1.AgentDeliveryMetadata:
 		mdEntry = metadata.NewEntry(ceID, r.Header.Get("Content-Type"), bodyBytes, ceAttrs)
-		srv, err := registerMetadataEntry(sb, mdEntry)
+		if d.metaReg == nil {
+			http.Error(w, "metadata delivery not enabled", http.StatusInternalServerError)
+			return
+		}
+		srv, err := registerMetadataEntry(d.metaReg, sb, mdEntry)
 		if err != nil {
 			log.Error(err, "Failed to register metadata entry")
 			http.Error(w, "metadata server failed", http.StatusInternalServerError)

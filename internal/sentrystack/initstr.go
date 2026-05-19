@@ -80,6 +80,44 @@ type InitStr struct {
 	// gateway IP keeps tools like `ip route` happy.
 	GatewayV4 string `json:"gw_v4,omitempty"`
 	GatewayV6 string `json:"gw_v6,omitempty"`
+
+	// IMDSHostAddr is the worker-process address (typically
+	// "127.0.0.1:<WorkerIMDSPort>") the Sentry's TCP forwarder dials
+	// when it sees an outbound SYN to 169.254.169.254:80 /
+	// [fd00:ec2::254]:80. The Sentry writes a PROXY v2 frame with
+	// SandboxID TLV onto the dialed conn so the worker can demux.
+	// Empty disables IMDS bridging — the dst falls through to
+	// direct dial, which will fail since there's no in-Sentry IMDS
+	// listener anymore.
+	IMDSHostAddr string `json:"imds_host_addr,omitempty"`
+
+	// EgressHostAddr is the worker-process address (typically
+	// "127.0.0.1:<WorkerEgressPort>") the Sentry's TCP forwarder
+	// dials for every non-IMDS, non-DNS outbound stream so the
+	// worker stays the central egress dispatcher (policy + MITM
+	// backend selection + identity/InvocationID PROXY v2 TLVs all
+	// live there). The Sentry writes a SandboxID-bearing PROXY v2
+	// frame onto the dialed conn so the worker can demux; empty
+	// disables egress bridging and the Sentry direct-dials through
+	// its host netns (useful for tests, but loses MITM + policy).
+	EgressHostAddr string `json:"egress_host_addr,omitempty"`
+
+	// IMDSV4 / IMDSV6 are the link-local IMDS addresses the
+	// sandbox-side resolver answers; the forwarder matches outbound
+	// dst against these to decide IMDS-vs-direct routing. Strings
+	// over netip.AddrPort so the wire payload stays self-describing.
+	IMDSV4 string `json:"imds_v4,omitempty"`
+	IMDSV6 string `json:"imds_v6,omitempty"`
+
+	// DNSResolvers is the list of host-side DNS resolver addrs
+	// ("ip:port") the forwarder dials when an outbound UDP SYN
+	// targets :53. The Sentry never serves DNS itself — it bridges
+	// every query to the worker's resolvers and ships the response
+	// back over the same flow. Empty disables DNS interception (UDP
+	// :53 falls through to direct dial, which inside the Sentry
+	// would mean dialing through the host netns — workable but not
+	// the intended path).
+	DNSResolvers []string `json:"dns_resolvers,omitempty"`
 }
 
 // Encode serializes an InitStr. Empty SandboxID is allowed in Phase 1.

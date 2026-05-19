@@ -5,9 +5,11 @@ package sentrystack
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -16,6 +18,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
+
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
 // tcpForwarderMaxInFlight bounds the number of half-open TCP forwarder
@@ -25,24 +29,18 @@ import (
 // pre-handoff.
 const tcpForwarderMaxInFlight = 65535
 
-// dialFunc is the upstream-dial path used by onTCP. Phase 2 uses a plain
-// net.Dialer; Phase 3 replaces this with a function that examines the
-// dst and either dials the worker's host-bound IMDS port (with PROXY-v2
-// sandbox-id TLV) or the Envoy MITM listener (with PROXY-v2 identity +
-// dst-name TLVs). Keeping it as a field on Stack means swap-out is a
-// single assignment in Init.
-type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+// tcpDialFunc is the upstream-dial path used by onTCP. Receives the
+// original (sandbox-visible) src and dst so the implementation can
+// route (e.g. dial the host-bound IMDS port for IMDS dsts, dial the
+// MITM for everything else) and emit a PROXY v2 frame carrying the
+// original tuple.
+type tcpDialFunc func(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error)
 
 // installTCPForwarder registers a tcp.NewForwarder on the stack that
-// handles every TCP SYN. Caller passes the dial function that the
-// forwarder uses to reach upstream; for Phase 2 this is a stdlib
-// net.Dialer talking to the original dst.
-//
-// The forwarder is registered once at Init time and lives for the
-// stack's lifetime. tcp.NewForwarder hooks itself onto the TCP protocol
-// handler — there's nothing to unregister at shutdown beyond closing
-// the stack.
-func (s *Stack) installTCPForwarder(dial dialFunc) {
+// handles every TCP SYN. The forwarder is registered once at Init
+// time and lives for the stack's lifetime — there's nothing to
+// unregister at shutdown beyond closing the stack.
+func (s *Stack) installTCPForwarder(dial tcpDialFunc) {
 	ts := s.tcpipStack()
 	fwd := tcp.NewForwarder(ts, 0, tcpForwarderMaxInFlight, s.makeTCPHandler(dial))
 	ts.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
@@ -51,23 +49,13 @@ func (s *Stack) installTCPForwarder(dial dialFunc) {
 // makeTCPHandler returns the onTCP callback. Each accepted SYN spawns a
 // goroutine that:
 //
-//   1. Creates the local (sandbox-side) endpoint via req.CreateEndpoint.
-//   2. Dials the upstream via dial.
-//   3. Bidirectionally splices until either side closes.
-//
-// Mirrors internal/netstack/tcp_forwarder.go's tcpHandler in shape. The
-// main differences from that file:
-//
-//   - No SourceAddr ctx threading. Under per-sandbox Sentry the sandbox
-//     identity is implicit in the process; there's no slot table to look
-//     up by source IP. Phase 3's MITM dial path encodes it into the
-//     PROXY-v2 header explicitly instead.
-//   - No "in-band response" path (req.Complete called on the sandbox
-//     endpoint) — same as today; FIN-on-clean-close, RST-on-error.
-func (s *Stack) makeTCPHandler(dial dialFunc) func(req *tcp.ForwarderRequest) {
+//  1. Creates the local (sandbox-side) endpoint via req.CreateEndpoint.
+//  2. Dials the upstream via dial, passing original src + dst.
+//  3. Bidirectionally splices until either side closes.
+func (s *Stack) makeTCPHandler(dial tcpDialFunc) func(req *tcp.ForwarderRequest) {
 	return func(req *tcp.ForwarderRequest) {
 		details := req.ID()
-		srcAddrPort := netip.AddrPortFrom(addrFromTcpip(details.RemoteAddress), details.RemotePort)
+		srcAddrPort := netip.AddrPortFrom(unmap4in6(addrFromTcpip(details.RemoteAddress)), details.RemotePort)
 		dstAddrPort := netip.AddrPortFrom(unmap4in6(addrFromTcpip(details.LocalAddress)), details.LocalPort)
 
 		logger := slog.With(
@@ -75,14 +63,23 @@ func (s *Stack) makeTCPHandler(dial dialFunc) func(req *tcp.ForwarderRequest) {
 			slog.String("dst", dstAddrPort.String()),
 		)
 
-		go s.handleTCP(req, dstAddrPort, dial, logger)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("TCP forwarder goroutine panic",
+						slog.Any("recover", r),
+						slog.String("stack", string(debug.Stack())))
+				}
+			}()
+			s.handleTCP(req, srcAddrPort, dstAddrPort, dial, logger)
+		}()
 	}
 }
 
 func (s *Stack) handleTCP(
 	req *tcp.ForwarderRequest,
-	dstAddrPort netip.AddrPort,
-	dial dialFunc,
+	srcAddrPort, dstAddrPort netip.AddrPort,
+	dial tcpDialFunc,
 	logger *slog.Logger,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,7 +112,7 @@ func (s *Stack) handleTCP(
 	local := gonet.NewTCPConn(&wq, ep)
 	defer local.Close()
 
-	remote, err := dial(ctx, "tcp", dstAddrPort.String())
+	remote, err := dial(ctx, srcAddrPort, dstAddrPort)
 	if err != nil {
 		logger.Warn("Failed to dial upstream", slog.Any("error", err))
 		req.Complete(true) // RST
@@ -138,14 +135,140 @@ func (s *Stack) handleTCP(
 	req.Complete(false) // FIN
 }
 
-// directDialer is the Phase 2 dial function — dials the original dst via
-// stdlib. Phase 3 will replace this with a wrapper that branches on
-// dst (IMDS / MITM / direct) and writes PROXY-v2 headers.
-func directDialer() dialFunc {
-	d := net.Dialer{}
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return d.DialContext(ctx, network, addr)
+// routedDialer is the Sentry-side TCP routing layer. The forwarder
+// hands it the original src + dst the sandbox tried to reach; the
+// dialer chooses an upstream (worker IMDS bridge, worker egress
+// bridge, or direct) and writes a PROXY v2 frame carrying SandboxID
+// so the upstream can demux without keying on the local endpoint.
+//
+// Worker-as-central-dispatcher: identity, InvocationID, Backends,
+// and Policy live on the worker side — when the Sentry tunnels to
+// the egress bridge, the worker enriches the PROXY v2 frame with
+// the full identity / dst-name on the way to Envoy MITM. That keeps
+// SetEgressBackends / SetEgressPolicy / SetInvocationID live-
+// updatable without a urpc channel into a running Sentry.
+type routedDialer struct {
+	// sandboxID is the worker-side opaque identifier echoed back over
+	// TLVSandboxID. Used by both the IMDS bridge and the egress
+	// bridge to demux the shared 127.0.0.1 listener.
+	sandboxID string
+
+	// imdsHostAddr is the worker-bound dial target for IMDS streams
+	// (typically "127.0.0.1:<WorkerIMDSPort>"). Empty disables IMDS
+	// routing entirely — outbound :80 to 169.254.169.254 falls
+	// through to direct dial.
+	imdsHostAddr string
+
+	// imdsTargets is the set of (sandbox-visible) AddrPorts the
+	// forwarder treats as IMDS-bound. Resolved once at Init from
+	// initStr so the per-flow match is a cheap map lookup.
+	imdsTargets map[netip.AddrPort]struct{}
+
+	// egressHostAddr is the worker-bound dial target for every
+	// non-IMDS outbound TCP stream (typically
+	// "127.0.0.1:<WorkerEgressPort>"). Empty disables egress
+	// bridging — outbound TCP falls through to direct dial, which
+	// loses MITM + policy enforcement and is intended only for tests
+	// driving the sentrystack in isolation.
+	egressHostAddr string
+
+	// dnsCache resolves a sandbox-visible dst IP back to the qname
+	// the agent looked up moments earlier (populated by the UDP
+	// forwarder's :53 response path). Looked up on every egress dial;
+	// the result becomes the PROXY v2 TLVDstName so the worker
+	// bridge and Envoy MITM can attribute the connection by name.
+	// nil disables the lookup; dialWithProxyHeader still works.
+	dnsCache *dnsCache
+
+	// fallback is the dial path for traffic that doesn't match any
+	// routed branch. Plain net.Dialer through the Sentry's host
+	// netns (which equals the worker process's netns under runsc +
+	// sentrystack since the OCI spec omits NetworkNamespace).
+	fallback *net.Dialer
+}
+
+// DialTCP implements tcpDialFunc. Branches on dst:
+//
+//   - IMDS dst (169.254.169.254:80 or [fd00:ec2::254]:80) → worker
+//     IMDS bridge with SandboxID TLV.
+//   - Everything else, if egressHostAddr is set → worker egress
+//     bridge with SandboxID TLV (worker enriches identity + MITM
+//     decision).
+//   - Otherwise → direct dial via the Sentry's host netns.
+func (d *routedDialer) DialTCP(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error) {
+	if d.imdsHostAddr != "" {
+		if _, isIMDS := d.imdsTargets[dst]; isIMDS {
+			// IMDS dials don't need dst-name (the worker keys on
+			// SandboxID, not on hostname), but it's harmless to
+			// pass through if the cache happens to bind it.
+			return d.dialWithProxyHeader(ctx, d.imdsHostAddr, src, dst, d.dstNameFor(dst), "IMDS")
+		}
 	}
+	if d.egressHostAddr != "" {
+		return d.dialWithProxyHeader(ctx, d.egressHostAddr, src, dst, d.dstNameFor(dst), "egress")
+	}
+	return d.fallback.DialContext(ctx, "tcp", dst.String())
+}
+
+// dstNameFor returns the cached qname the agent looked up to reach
+// dst's IP, or "" when no live binding exists.
+func (d *routedDialer) dstNameFor(dst netip.AddrPort) string {
+	if d.dnsCache == nil {
+		return ""
+	}
+	return d.dnsCache.Lookup(dst.Addr())
+}
+
+// dialWithProxyHeader dials hostAddr (worker-bound 127.0.0.1 port)
+// and writes a PROXY v2 frame announcing the sandbox-visible (src,
+// dst) tuple plus the SandboxID + (optional) DstName TLVs. label is
+// included in error strings so log readers can tell IMDS-bridge
+// dials from egress-bridge dials apart.
+func (d *routedDialer) dialWithProxyHeader(ctx context.Context, hostAddr string, src, dst netip.AddrPort, dstName, label string) (net.Conn, error) {
+	conn, err := d.fallback.DialContext(ctx, "tcp", hostAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s host %s: %w", label, hostAddr, err)
+	}
+	// PROXY v2 requires matching address families. We pass the
+	// sandbox-visible tuple verbatim, so v4/v6 dst → v4/v6 src
+	// (both eth0 IPs) naturally match.
+	hdr, err := proxyproto.EncodeHeader(src, dst, proxyproto.AgentIdentity{
+		SandboxID: d.sandboxID,
+	}, dstName)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("encode PROXY v2 (%s): %w", label, err)
+	}
+	if _, err := conn.Write(hdr); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("write PROXY v2 (%s): %w", label, err)
+	}
+	return conn, nil
+}
+
+// newRoutedTCPDialer builds the Sentry-side dialer from initStr.
+// Empty IMDS/egress fields fall through to direct dial. dnsCache is
+// optional; nil disables IP → qname lookup (TLVDstName stays empty).
+func newRoutedTCPDialer(init *InitStr, dnsCache *dnsCache) *routedDialer {
+	d := &routedDialer{
+		sandboxID:      init.SandboxID,
+		imdsHostAddr:   init.IMDSHostAddr,
+		egressHostAddr: init.EgressHostAddr,
+		imdsTargets:    make(map[netip.AddrPort]struct{}),
+		dnsCache:       dnsCache,
+		fallback:       &net.Dialer{},
+	}
+	if init.IMDSV4 != "" {
+		if ap, err := netip.ParseAddrPort(init.IMDSV4); err == nil {
+			d.imdsTargets[ap] = struct{}{}
+		}
+	}
+	if init.IMDSV6 != "" {
+		if ap, err := netip.ParseAddrPort(init.IMDSV6); err == nil {
+			d.imdsTargets[ap] = struct{}{}
+		}
+	}
+	return d
 }
 
 // addrFromTcpip converts a tcpip.Address into a netip.Addr. Handles both
@@ -174,9 +297,7 @@ func unmap4in6(a netip.Addr) netip.Addr {
 
 // isBenignPeerClose tells routine close-on-write (ECONNRESET after the
 // upstream finished writing, broken pipe in the reverse direction)
-// apart from real forwarding failures. Same heuristic as the existing
-// internal/netstack forwarder so log noise stays consistent across the
-// migration.
+// apart from real forwarding failures.
 func isBenignPeerClose(err error) bool {
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
 		return true

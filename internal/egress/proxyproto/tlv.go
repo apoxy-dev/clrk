@@ -13,6 +13,7 @@ const (
 	TLVAgentRevision  byte = 0xE4 // UTF-8 (AgentSandboxRevision name)
 	TLVInvocationID   byte = 0xE5 // UTF-8 (TaskAgent UID; empty for DaemonAgent)
 	TLVDstName        byte = 0xE6 // UTF-8 (DNS-bound destination name; empty when nothing was bound)
+	TLVSandboxID      byte = 0xE7 // UTF-8 (worker's opaque SandboxID; demuxes the host-bound IMDS listener and per-sandbox MITM streams)
 )
 
 // AgentKind encodes the agent type carried in TLVAgentKind.
@@ -33,4 +34,10 @@ type AgentIdentity struct {
 	UID          string
 	Revision     string
 	InvocationID string // Empty for DaemonAgent.
+
+	// SandboxID is the worker's opaque per-sandbox identifier. Encoded
+	// into TLVSandboxID so the worker-side IMDS listener can demux the
+	// shared 127.0.0.1 listener and route /v1/event + /v1/response to
+	// the right metadata.Entry without keying on r.RemoteAddr.
+	SandboxID string
 }

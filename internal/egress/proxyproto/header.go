@@ -98,6 +98,9 @@ func encodeTLVs(id AgentIdentity, dstName string) []byte {
 	if id.InvocationID != "" {
 		out = appendTLV(out, TLVInvocationID, []byte(id.InvocationID))
 	}
+	if id.SandboxID != "" {
+		out = appendTLV(out, TLVSandboxID, []byte(id.SandboxID))
+	}
 	if dstName != "" {
 		out = appendTLV(out, TLVDstName, []byte(dstName))
 	}

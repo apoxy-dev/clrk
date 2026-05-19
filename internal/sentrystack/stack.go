@@ -211,13 +211,28 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 
 	ts.SetRouteTable(routes)
 
-	// Install the TCP forwarder. With promiscuous + spoofing on eth0,
-	// every outbound SYN loops back into the protocol layer and falls
-	// through to the forwarder (no listening endpoint matches). The
-	// forwarder dials upstream from the Sentry process. Phase 2 dials
-	// directly; Phase 3 swaps directDialer for a routing dialer that
-	// branches on dst (IMDS / MITM / direct) and writes PROXY-v2.
-	s.installTCPForwarder(directDialer())
+	// Install TCP + UDP forwarders. With promiscuous + spoofing on
+	// eth0, every outbound packet loops back into the protocol layer
+	// and falls through to a forwarder (no listening endpoint
+	// matches). The forwarders dial upstream from the Sentry
+	// process and bridge bytes both directions.
+	//
+	// TCP: routedDialer branches on dst — IMDS dsts go to the
+	// worker's host-bound 127.0.0.1 listener with a PROXY v2 frame
+	// carrying SandboxID; everything else dials the egress bridge.
+	// The frame's TLVDstName is filled from dnsCache (populated by
+	// the UDP forwarder's :53 response path) so the worker bridge
+	// and Envoy MITM can attribute the connection by hostname.
+	//
+	// UDP: routedUDPDialer branches on port — :53 dials the worker's
+	// resolver list (from initStr); everything else dials direct.
+	// The forwarder feeds every :53 response payload into dnsCache
+	// before forwarding it back to the sandbox.
+	dns := newDNSCache()
+	tcpDial := newRoutedTCPDialer(init, dns)
+	s.installTCPForwarder(tcpDial.DialTCP)
+	udpDial := newRoutedUDPDialer(init)
+	s.installUDPForwarder(udpDial.DialUDP, dns)
 
 	return nil
 }

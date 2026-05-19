@@ -18,11 +18,23 @@ const ociSpecVersion = "1.0.0"
 // buildSpec returns the OCI runtime spec for a sandbox. Args and Env
 // are baked in here because runsc's Start has no per-call override —
 // the spec on disk is the final word.
+//
+// NetworkNamespace is explicitly pinned to the worker's netns. Under
+// --network=plugin, runsc otherwise creates a fresh empty netns for the
+// Sentry (gvisor.dev/gvisor/runsc/sandbox/sandbox.go:1045-1053), which
+// would strand the Sentry's forwarder dials — DNS upstream resolvers,
+// IMDS bridge on 127.0.0.1, and the egress MITM bridge are all reached
+// via Linux net.Dial from inside the Sentry process. Pinning to
+// /proc/self/ns/net resolves (in runsc) to runsc's own netns, which is
+// inherited from the worker; the Sentry then setns()es into that same
+// netns and gains reachability to 127.0.0.1:<port> on the worker. The
+// sandboxed application never touches the worker's netns — it only
+// sees the in-Sentry PluginStack — so this doesn't widen the security
+// perimeter.
 func buildSpec(
 	id, rootfs string,
 	args, env []string,
 	resources clrkv1alpha1.ExecutionResources,
-	netnsPath string,
 	mounts []specs.Mount,
 	annotations map[string]string,
 ) *specs.Spec {
@@ -59,8 +71,8 @@ func buildSpec(
 				{Type: specs.UTSNamespace},
 				{Type: specs.IPCNamespace},
 				{Type: specs.PIDNamespace},
-				{Type: specs.NetworkNamespace, Path: netnsPath},
 				{Type: specs.CgroupNamespace},
+				{Type: specs.NetworkNamespace, Path: "/proc/self/ns/net"},
 			},
 			MaskedPaths: []string{
 				"/proc/kcore",
@@ -101,14 +113,29 @@ func defaultSpecMounts() []specs.Mount {
 }
 
 // buildTrustMountsSpec returns bind mounts for every well-known trust
-// path that already exists in the read-only rootfs. Missing targets
-// are skipped — runsc rejects a mount whose destination doesn't exist,
-// and the env-var fallback in buildProcessEnv covers programs that
-// honor SSL_CERT_FILE.
+// path that already exists as a regular file in the read-only rootfs.
+// Missing targets are skipped — runsc rejects a mount whose destination
+// doesn't exist, and the env-var fallback in buildProcessEnv covers
+// programs that honor SSL_CERT_FILE.
+//
+// We Lstat instead of Stat so symlink targets like Wolfi's
+// /etc/ssl/cert.pem → certs/ca-certificates.crt don't get bind-mounted
+// twice over the same underlying file. Two bind mounts whose
+// destinations resolve to the same inode confuse gVisor's gofer:
+// the gofer's chroot-side opens both at the canonical path and reports
+// them as duplicates, the Sentry's StartRoot pairs Sentry-side bind
+// FDs to gofer-side serving FDs by spec order, and the mismatch causes
+// `runsc start` to error out with urpc EOF on containerManager.StartRoot
+// after a partially-mounted root. Mounting over the canonical target
+// alone already covers any symlinked path that resolves to it.
 func buildTrustMountsSpec(rootfs, caPath string) []specs.Mount {
 	out := make([]specs.Mount, 0, len(wellKnownTrustPaths))
 	for _, target := range wellKnownTrustPaths {
-		if _, err := os.Stat(filepath.Join(rootfs, target)); err != nil {
+		info, err := os.Lstat(filepath.Join(rootfs, target))
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 		out = append(out, specs.Mount{

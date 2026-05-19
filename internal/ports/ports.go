@@ -19,6 +19,33 @@ const DispatchPort int32 = 8090
 // feeds the in-memory routing state map.
 const WorkerStatusPort int32 = 8091
 
+// WorkerIMDSPort is the host-bound TCP port each worker process
+// listens on for IMDS requests proxied from in-Sentry forwarders.
+// Bound on 127.0.0.1 only — the per-sandbox Sentry inherits the
+// worker process's netns under runsc + sentrystack, so loopback
+// reaches this port without crossing a netns boundary. Each
+// incoming connection is fronted with a PROXY v2 frame carrying
+// the originating SandboxID TLV so the shared handler can resolve
+// the live metadata.Entry without keying on r.RemoteAddr.
+const WorkerIMDSPort int32 = 8092
+
+// WorkerEgressPort is the host-bound TCP port the worker listens on
+// for outbound traffic intercepted by the in-Sentry TCP forwarder.
+// Each accepted conn is fronted with a PROXY v2 frame carrying
+// SandboxID + original (sandbox-visible) src/dst; the worker uses
+// SandboxID to look up the per-sandbox egress state (Identity,
+// InvocationID, Backends, Policy) and decide direct-vs-MITM, then
+// dials the chosen upstream and bridges.
+//
+// Centralising egress decisions in the worker (rather than baking
+// the policy into each Sentry's initStr) keeps SetEgressBackends /
+// SetEgressPolicy / SetInvocationID live-updatable without a urpc
+// channel into the running Sentry — the dispatcher's existing call
+// order between Create and Start continues to work, and warm-pool
+// sandboxes pick up their per-dispatch InvocationID at Acquire time
+// like they always have.
+const WorkerEgressPort int32 = 8093
+
 // IngressExtProcBackendName is the name of the per-namespace EG
 // Backend that the per-TaskAgent EnvoyExtensionPolicy points its
 // extProc.backendRefs at. The Backend's FQDN/IP+port is filled in

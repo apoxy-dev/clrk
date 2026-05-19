@@ -75,21 +75,33 @@ func (e *loopether) SetMTU(mtu uint32) {
 	e.mtu = mtu
 }
 
-// Capabilities advertises checksum offload (the stack short-circuits it
-// for loopback anyway). We intentionally omit CapabilityResolutionRequired
-// — there are no real link peers, so ARP is a no-op, and asking the stack
-// to resolve neighbors would just stall outbound packets waiting for
-// replies that never come.
+// Capabilities advertises CapabilityLoopback so the stack uses the
+// loopback fast-path (no link-layer framing, no neighbor resolution,
+// PacketBuffer goes straight from WritePackets to DeliverNetworkPacket).
+// Without it the stack treats us as a real Ethernet NIC, which means
+// it reserves header.EthernetMinimumSize bytes at the front for an
+// Ethernet header that we never actually emit — DeliverNetworkPacket
+// then sees garbage where it expects the network header and the packet
+// dies before reaching the TCP/UDP forwarders.
+//
+// CapabilityResolutionRequired is intentionally omitted: there are no
+// real link peers, so ARP would just stall outbound packets waiting
+// for replies that never come.
 func (*loopether) Capabilities() stack.LinkEndpointCapabilities {
-	return stack.CapabilityRXChecksumOffload | stack.CapabilityTXChecksumOffload
+	return stack.CapabilityRXChecksumOffload |
+		stack.CapabilityTXChecksumOffload |
+		stack.CapabilityLoopback |
+		stack.CapabilitySaveRestore
 }
 
-// MaxHeaderLength reserves space for an Ethernet header. The header is
-// never actually transmitted (loopback semantics), but the stack uses
-// this value to size packet buffers and trims headers off on the inbound
-// side.
+// MaxHeaderLength returns 0 because loopback semantics skip the link
+// header entirely — packets flow from WritePackets straight into
+// DeliverNetworkPacket without any framing in between. The Ethernet
+// pretense (ARPHardwareEther, non-zero LinkAddress) is purely visible
+// to userspace introspection (`ip link`, getifaddrs); the wire-level
+// framing stays loopback-flat.
 func (*loopether) MaxHeaderLength() uint16 {
-	return header.EthernetMinimumSize
+	return 0
 }
 
 func (e *loopether) LinkAddress() tcpip.LinkAddress {

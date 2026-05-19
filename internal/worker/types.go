@@ -82,19 +82,6 @@ func deleteSandboxBounded(mgr SandboxRuntime, id SandboxID, log logr.Logger, msg
 	}
 }
 
-// revisionStackAttachment is the platform-agnostic view of one
-// sandbox's slot on the (TaskAgent, revision) shared RevisionStack.
-// The linux-only *RevisionStackHandle in revstack.go implements it;
-// non-linux builds get a no-op stub from revstack_other.go so the
-// cross-platform types.go compiles everywhere.
-type revisionStackAttachment interface {
-	SandboxIP() netip.Addr
-	SetEgressBackends(backends []egress.BackendListener)
-	SetEgressPolicy(policy *egress.SandboxPolicy)
-	SetInvocationID(invocationID string)
-	Detach()
-}
-
 // SandboxRuntime is the subset of SandboxManager the dispatcher relies
 // on. Defined as an interface so unit tests can supply a fake runtime
 // (the linux-only libcontainer plumbing makes the concrete manager
@@ -157,20 +144,9 @@ type SandboxInstance struct {
 	AgentRef  string
 	Namespace string
 	Phase     SandboxPhase
-	NetNS     string     // /run/netns/run-<id>
-	TAPName   string     // TAP device name in the netns.
-	TAPFD     *os.File   // Host-side TAP fd for netstack (APO-536).
 	RootFS    string     // Extracted rootfs path.
-	SandboxIP netip.Addr // Per-sandbox container IP (eth0 in the in-Sentry stack).
-	GatewayIP netip.Addr // Per-sandbox /30 gateway IP. Cosmetic with sentrystack — the in-Sentry forwarder never sends frames to it — but exposed so `ip route` inside the sandbox shows a sane default route.
-
-	// stack is the (TaskAgent, revision) shared netstack attachment
-	// for this sandbox: holds the NIC ID + sandbox IP and routes
-	// per-dispatch setters (Backends, Policy, InvocationID, IMDS
-	// Entry) into the shared slot table. Untyped at this level so the
-	// platform-agnostic types.go doesn't depend on the linux-only
-	// RevisionStackHandle.
-	stack revisionStackAttachment
+	SandboxIP netip.Addr // Per-sandbox container IP, written into the in-Sentry PluginStack eth0 via initStr.
+	GatewayIP netip.Addr // Per-sandbox /30 gateway IP. Cosmetic with sentrystack — the in-Sentry forwarder never delivers frames to it — but exposed so `ip route` inside the sandbox shows a sane default route, and so the sandbox's /etc/resolv.conf has a destination that triggers the in-Sentry UDP/DNS forwarder.
 
 	// Stdin/Stdout/Stderr are populated when the sandbox was Created with
 	// stdio=true. The dispatcher uses these to stream the HTTP request
@@ -223,6 +199,14 @@ type SandboxInstance struct {
 	// EgressRefs). The handle is stable across CRD edits — the
 	// router updates its underlying state in place.
 	EgressPolicy *egress.SandboxPolicy
+
+	// initStr is the per-sandbox sentrystack init payload computed at
+	// Create. Retained on the instance so runscStart can re-pass it
+	// through the runsc-start subprocess's env — gVisor calls
+	// PluginStack.PreInit from inside `runsc start` (sandbox/network.go
+	// initPluginStack), not from `runsc create`, so the create-time
+	// env doesn't reach where PreInit reads it.
+	initStr string
 
 	CreatedAt time.Time
 

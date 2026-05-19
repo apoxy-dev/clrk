@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -11,6 +13,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/ports"
+	"github.com/apoxy-dev/clrk/internal/sandbox/metadata"
 	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
@@ -48,15 +51,35 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Initialize egress router.
 	router := egress.NewRouter(clrkv1alpha1.EgressPolicyAllowAll)
 
-	// Shared per-(TaskAgent, revision) netstack manager. One gVisor
-	// stack hosts every sandbox of a given revision on this worker;
-	// the IMDS listener, IdentityDialer, and DNS cache are paid once
-	// per revision instead of once per sandbox.
-	revStackMgr := NewRevisionStackManager(router, readWorkerResolvers())
+	// Worker-wide IMDS plumbing. Replaces the per-(TaskAgent, revision)
+	// gonet listener: one host-bound HTTP server on 127.0.0.1:<port>
+	// accepts PROXY v2 frames from the in-Sentry TCP forwarder of
+	// every sandbox on this worker and demuxes by SandboxID TLV.
+	metaReg := metadata.NewRegistry()
+	imdsHostAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(ports.WorkerIMDSPort)))
+	imdsServer, err := metadata.New(imdsHostAddr, metaReg.Lookup)
+	if err != nil {
+		return fmt.Errorf("starting IMDS server on %s: %w", imdsHostAddr, err)
+	}
+	defer imdsServer.Close()
 
-	// Initialize components.
+	// Worker-wide egress bridge. Every non-IMDS, non-DNS outbound TCP
+	// from the Sentry's PluginStack lands here for central policy +
+	// MITM dispatch. Same SandboxID demux as the IMDS listener.
+	egressHostAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(ports.WorkerEgressPort)))
+
+	// Initialize components. Resolvers feed every Sentry's UDP/DNS
+	// forwarder via InitStr.DNSResolvers — the in-Sentry forwarder
+	// dials the worker's host resolvers for any :53 traffic.
+	resolvers := readWorkerResolvers()
 	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, revStackMgr)
+	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, imdsHostAddr, egressHostAddr, resolvers)
+
+	egressBridge, err := NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)
+	if err != nil {
+		return fmt.Errorf("starting egress bridge on %s: %w", egressHostAddr, err)
+	}
+	defer egressBridge.Close()
 
 	// Clean up orphaned containers from previous incarnation.
 	if err := sandboxMgr.Cleanup(ctx); err != nil {
@@ -70,7 +93,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// this pod by the per-TaskAgent HTTPRoute and executes one
 	// short-lived sandbox per request.
 	active := NewActiveCounter()
-	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active)
+	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active, metaReg)
 
 	// Warm pool shares the activeCounter's notifier so warm
 	// fills/evictions push deltas to the WorkerStatusService stream
@@ -150,7 +173,6 @@ func (r *Runtime) Start(ctx context.Context) error {
 	daemonMgr.Shutdown()
 	warmPool.DestroyAll(context.Background())
 	shutdown(sandboxMgr)
-	revStackMgr.Shutdown()
 
 	return nil
 }

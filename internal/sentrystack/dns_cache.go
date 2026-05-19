@@ -1,4 +1,8 @@
-package netstack
+// The DNS cache is pure Go and shared between the Sentry-side UDP
+// forwarder (writer) and the Sentry-side TCP forwarder (reader). It
+// has no gvisor dependencies — leave it without a //go:build constraint
+// so cross-platform unit tests in apoxy-cloud//clrk can exercise it.
+package sentrystack
 
 import (
 	"container/list"
@@ -9,10 +13,10 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// Per-sandbox DNS-answer cache: resolved IP → name. Populated by
-// UDPForwarder on the UDP/53 response path; consulted on TCP
-// connect to attach the agent's stated intent (the qname they
-// asked for) to PROXY v2 frames and L4 telemetry.
+// Per-sandbox DNS-answer cache: resolved IP → name. Populated by the
+// UDP forwarder on the UDP/53 response path; consulted on TCP connect
+// to attach the agent's stated intent (the qname they asked for) to
+// PROXY v2 frames and L4 telemetry.
 
 const (
 	dnsCacheCapacity = 4096
@@ -25,13 +29,11 @@ const (
 	dnsTTLCeiling = 10 * time.Minute
 )
 
-// DNSCache is a bounded LRU keyed by resolved destination IP.
-type DNSCache struct {
+// dnsCache is a bounded LRU keyed by resolved destination IP.
+type dnsCache struct {
 	cap int
 	now func() time.Time
 
-	// mu guards lru + byIP (the LRU's Element pointers index into lru,
-	// so they have to move atomically with it).
 	mu   sync.Mutex
 	lru  *list.List
 	byIP map[netip.Addr]*list.Element
@@ -43,9 +45,8 @@ type dnsEntry struct {
 	expiresAt time.Time
 }
 
-// NewDNSCache returns an empty cache with the default capacity.
-func NewDNSCache() *DNSCache {
-	return &DNSCache{
+func newDNSCache() *dnsCache {
+	return &dnsCache{
 		cap:  dnsCacheCapacity,
 		lru:  list.New(),
 		byIP: make(map[netip.Addr]*list.Element),
@@ -53,9 +54,9 @@ func NewDNSCache() *DNSCache {
 	}
 }
 
-// Bind associates resolvedIP → name with the given TTL clamped to
+// Bind associates resolvedIP → name with ttl clamped to
 // [dnsTTLFloor, dnsTTLCeiling]. Last write wins on collision.
-func (c *DNSCache) Bind(resolvedIP netip.Addr, name string, ttl time.Duration) {
+func (c *dnsCache) Bind(resolvedIP netip.Addr, name string, ttl time.Duration) {
 	if !resolvedIP.IsValid() || name == "" {
 		return
 	}
@@ -94,7 +95,7 @@ func (c *DNSCache) Bind(resolvedIP netip.Addr, name string, ttl time.Duration) {
 
 // Lookup returns the bound name for resolvedIP, or "" if no live
 // binding exists. Expired entries are pruned lazily on access.
-func (c *DNSCache) Lookup(resolvedIP netip.Addr) string {
+func (c *dnsCache) Lookup(resolvedIP netip.Addr) string {
 	if !resolvedIP.IsValid() {
 		return ""
 	}
@@ -115,20 +116,18 @@ func (c *DNSCache) Lookup(resolvedIP netip.Addr) string {
 	return ent.name
 }
 
-// IngestResponse parses a DNS response message and binds every
-// A/AAAA answer's IP to the agent's stated intent — the qname they
-// asked for, even when the answer arrived through a CNAME chain. The
-// qname is always the *last* Bind, so last-write-wins semantics in
-// the cache surface it to Lookup. Errors and malformed messages are
-// silently dropped so a busted reply never disrupts DNS forwarding.
-func (c *DNSCache) IngestResponse(msg []byte) {
+// IngestResponse parses a DNS response and binds every A/AAAA answer
+// IP to the agent's stated intent — the qname they asked for, even
+// when the answer arrived through a CNAME chain. The qname is always
+// the *last* Bind so last-write-wins surfaces it to Lookup. Errors
+// and malformed messages are silently dropped so a busted reply
+// never disrupts DNS forwarding.
+func (c *dnsCache) IngestResponse(msg []byte) {
 	var p dnsmessage.Parser
 	if _, err := p.Start(msg); err != nil {
 		return
 	}
 
-	// Collect qnames (what the agent actually typed). Multiple
-	// questions in one packet are unusual but legal; treat them all.
 	var qnames []string
 	for {
 		q, err := p.Question()
@@ -147,9 +146,6 @@ func (c *DNSCache) IngestResponse(msg []byte) {
 		ttl  uint32
 	}
 	var ips []aRR
-	// cnames stays nil for the common no-CNAME response (saves the
-	// map alloc on the hot path); reads on a nil map return zero —
-	// the chain walker below handles that fine.
 	var cnames map[string]string
 
 	for {

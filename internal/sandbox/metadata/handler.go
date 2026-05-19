@@ -1,25 +1,47 @@
 package metadata
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/netip"
 	"strings"
 )
 
 const contentTypeCloudEventsJSON = "application/cloudevents+json"
 
+// ctxKey types the request-context lookup for the SandboxID extracted
+// from the PROXY v2 frame on the per-connection wrapper. Unexported so
+// only the metadata package can stash/read it.
+type ctxKey struct{}
+
+// WithSandboxID returns ctx tagged with sandboxID. The PROXY v2-aware
+// listener installs it on each request context so the HTTP handler
+// can resolve the live Entry without keying on r.RemoteAddr.
+func WithSandboxID(ctx context.Context, sandboxID string) context.Context {
+	return context.WithValue(ctx, ctxKey{}, sandboxID)
+}
+
+// SandboxIDFromContext returns the SandboxID stashed by the wrapper.
+// Empty when no frame was parsed (e.g. tests using httptest with a
+// plain net.Conn) — the handler answers 404 in that case.
+func SandboxIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKey{}).(string)
+	return v
+}
+
 // NewHandler returns the IMDS HTTP routes. lookup resolves the live
-// *Entry for the requesting sandbox from its source IP (the per-NIC
-// IP on the shared RevisionStack). Returns 404 when no dispatch is
-// in progress for the source — e.g. a warm sandbox polling /v1/event
-// before the dispatcher has registered it.
+// *Entry for the requesting sandbox from the SandboxID carried in the
+// request context (set by the PROXY v2 listener wrapper). Returns 404
+// when no dispatch is in progress for that SandboxID — e.g. a warm
+// sandbox polling /v1/event before the dispatcher has registered it.
 //
 // The linux-only Server in server.go uses this to assemble its
-// gVisor-bound http.Server; tests can use it directly with
-// httptest.NewServer by passing a closure-backed EntryLookup.
+// net.Listen-backed http.Server; tests can use it directly with
+// httptest.NewServer by passing a closure-backed EntryLookup and
+// either setting r = r.WithContext(WithSandboxID(...)) or driving
+// the wrapped listener through the same Accept path.
 func NewHandler(lookup EntryLookup) http.Handler {
 	h := &handler{lookup: lookup}
 	mux := http.NewServeMux()
@@ -33,22 +55,17 @@ type handler struct {
 }
 
 // resolveEntry returns the live *Entry for the requesting sandbox or
-// nil. The HTTP RemoteAddr parses as host:port; we strip the port and
-// the IPv4-in-IPv6 mapping so the lookup key matches the per-NIC
-// sandbox IP the RevisionStack registered.
+// nil. Reads the SandboxID stashed on the request context by the
+// PROXY v2 listener wrapper.
 func (h *handler) resolveEntry(r *http.Request) *Entry {
 	if h.lookup == nil {
 		return nil
 	}
-	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil {
+	id := SandboxIDFromContext(r.Context())
+	if id == "" {
 		return nil
 	}
-	src := addrPort.Addr()
-	if src.Is4In6() {
-		src = src.Unmap()
-	}
-	return h.lookup(src)
+	return h.lookup(id)
 }
 
 // handleEvent serves the request envelope. Binary mode by default

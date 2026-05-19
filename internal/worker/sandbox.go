@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,13 +38,29 @@ type SandboxManager struct {
 	podName    string
 	imageStore *ImageStore
 
-	// TODO(phase5): retire — sentrystack replaces the shared netstack.
-	revStackMgr *RevisionStackManager
+	// imdsHostAddr is the worker-process IMDS dial target the Sentry
+	// writes into the in-Sentry InitStr; the per-sandbox TCP forwarder
+	// dials it (with a PROXY v2 SandboxID TLV) when it sees outbound
+	// traffic to 169.254.169.254:80 / [fd00:ec2::254]:80.
+	imdsHostAddr string
 
-	mu        sync.Mutex
-	sandboxes map[SandboxID]*SandboxInstance
-	waiters   map[SandboxID]context.CancelFunc
-	stdLogs   map[SandboxID]sandboxLogs
+	// egressHostAddr is the worker-process egress dial target. The
+	// in-Sentry TCP forwarder routes every non-IMDS, non-DNS
+	// outbound stream here with a PROXY v2 SandboxID TLV so the
+	// worker can look up identity/InvocationID/Backends/Policy and
+	// take the central egress decision.
+	egressHostAddr string
+
+	// workerResolvers is the host-side DNS resolver list shipped to
+	// each Sentry via InitStr.DNSResolvers. Captured once at worker
+	// startup; never re-read.
+	workerResolvers []netip.AddrPort
+
+	mu           sync.Mutex
+	sandboxes    map[SandboxID]*SandboxInstance
+	waiters      map[SandboxID]context.CancelFunc
+	stdLogs      map[SandboxID]sandboxLogs
+	egressStates map[SandboxID]*EgressState
 }
 
 type sandboxLogs struct {
@@ -52,18 +69,63 @@ type sandboxLogs struct {
 	file   *os.File
 }
 
-func NewSandboxManager(stateDir, rootDir, logsDir, podName string, imageStore *ImageStore, revStackMgr *RevisionStackManager) *SandboxManager {
+// NewSandboxManager constructs the worker's sandbox lifecycle manager.
+//
+// imdsHostAddr is the worker-bound IMDS dial target (typically
+// "127.0.0.1:<WorkerIMDSPort>") shipped to each Sentry via initStr.
+// egressHostAddr is the worker-bound egress bridge target shipped via
+// initStr.EgressHostAddr — every non-IMDS/DNS outbound TCP from the
+// Sentry lands here for central policy + MITM dispatch. resolvers is
+// the host-side resolver list shipped via initStr for the Sentry's
+// UDP/DNS forwarder.
+func NewSandboxManager(
+	stateDir, rootDir, logsDir, podName string,
+	imageStore *ImageStore,
+	imdsHostAddr, egressHostAddr string,
+	resolvers []netip.AddrPort,
+) *SandboxManager {
 	return &SandboxManager{
-		stateDir:    stateDir,
-		rootDir:     rootDir,
-		logsDir:     logsDir,
-		podName:     podName,
-		imageStore:  imageStore,
-		revStackMgr: revStackMgr,
-		sandboxes:   make(map[SandboxID]*SandboxInstance),
-		waiters:     make(map[SandboxID]context.CancelFunc),
-		stdLogs:     make(map[SandboxID]sandboxLogs),
+		stateDir:        stateDir,
+		rootDir:         rootDir,
+		logsDir:         logsDir,
+		podName:         podName,
+		imageStore:      imageStore,
+		imdsHostAddr:    imdsHostAddr,
+		egressHostAddr:  egressHostAddr,
+		workerResolvers: resolvers,
+		sandboxes:       make(map[SandboxID]*SandboxInstance),
+		waiters:         make(map[SandboxID]context.CancelFunc),
+		stdLogs:         make(map[SandboxID]sandboxLogs),
+		egressStates:    make(map[SandboxID]*EgressState),
 	}
+}
+
+// LookupEgressState returns the per-sandbox egress snapshot consulted
+// by the worker's egress bridge on every accepted conn. Returns
+// (zero, false) when no sandbox is registered — the bridge drops
+// stray dials from unknown SandboxIDs rather than open-egress them.
+//
+// Exposed as a method (not a closure) so the bridge can hold a stable
+// reference to the manager across sandbox lifecycle events.
+func (m *SandboxManager) LookupEgressState(sandboxID string) (EgressState, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, ok := m.egressStates[SandboxID(sandboxID)]
+	if !ok || st == nil {
+		return EgressState{}, false
+	}
+	return *st, true
+}
+
+// egressStateLocked returns the per-sandbox state record, creating
+// it lazily on first write. Must be called with m.mu held.
+func (m *SandboxManager) egressStateLocked(id SandboxID) *EgressState {
+	st, ok := m.egressStates[id]
+	if !ok {
+		st = &EgressState{}
+		m.egressStates[id] = st
+	}
+	return st
 }
 
 // Create pulls the image, builds an OCI bundle, and runs `runsc
@@ -98,12 +160,14 @@ func (m *SandboxManager) Create(
 	}
 	sandboxRootFS := imgInfo.RootFS
 
-	// The kernel netns is a placeholder under runsc + sentrystack — the
-	// Sentry's PluginStack is the only network the sandbox sees — but
-	// runsc still requires the path to exist (OCI namespace bind-mount).
-	nsCfg, err := SetupNetNS(ctx, id)
+	// Allocate the per-sandbox /30 (gw + container IP). No real netns
+	// or TAP under sentrystack — the Sentry's PluginStack is the only
+	// network the sandbox sees, the host-side OCI runtime inherits the
+	// worker process's netns so the Sentry can dial 127.0.0.1 for the
+	// IMDS bridge. The IPs only feed initStr + resolv.conf.
+	gw, sandboxIP, err := allocateIPs()
 	if err != nil {
-		return nil, fmt.Errorf("setting up netns: %w", err)
+		return nil, fmt.Errorf("allocating sandbox IPs: %w", err)
 	}
 
 	// Unwinds in LIFO order on error; cleared on success.
@@ -114,13 +178,6 @@ func (m *SandboxManager) Create(
 		}
 	}()
 	pushCleanup := func(f func()) { cleanup = append(cleanup, f) }
-	pushCleanup(func() { TeardownNetNS(nsCfg) })
-
-	revAttach, err := m.revStackMgr.Attach(identity, nsCfg.TAPFD, nsCfg.GW, nsCfg.IP)
-	if err != nil {
-		return nil, fmt.Errorf("attaching sandbox to revision netstack: %w", err)
-	}
-	pushCleanup(revAttach.Detach)
 
 	var extraMounts []specs.Mount
 	if len(caPEM) > 0 {
@@ -131,7 +188,7 @@ func (m *SandboxManager) Create(
 		pushCleanup(func() { m.removeAgentCA(id) })
 		extraMounts = append(extraMounts, buildTrustMountsSpec(sandboxRootFS, caPath)...)
 	}
-	resolvPath, err := m.writeSandboxResolvConf(id, nsCfg.GW)
+	resolvPath, err := m.writeSandboxResolvConf(id, gw)
 	if err != nil {
 		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
 	}
@@ -148,7 +205,7 @@ func (m *SandboxManager) Create(
 	args := resolveProcessArgs(sandbox, imgInfo.Entrypoint)
 	env := buildProcessEnv(sandbox.Env)
 	annotations := buildSandboxAnnotations(identity, m.podName, attempt)
-	spec := buildSpec(string(id), sandboxRootFS, args, env, resources, nsCfg.NSPath, extraMounts, annotations)
+	spec := buildSpec(string(id), sandboxRootFS, args, env, resources, extraMounts, annotations)
 
 	bundleDir, err := m.ensureRunscBundleDir(id)
 	if err != nil {
@@ -164,12 +221,8 @@ func (m *SandboxManager) Create(
 		AgentRef:  agentRef,
 		Phase:     SandboxReady,
 		RootFS:    sandboxRootFS,
-		NetNS:     nsCfg.NSPath,
-		TAPName:   nsCfg.TAPName,
-		TAPFD:     nsCfg.TAPFD,
-		SandboxIP: nsCfg.IP,
-		GatewayIP: nsCfg.GW,
-		stack:     revAttach,
+		SandboxIP: sandboxIP,
+		GatewayIP: gw,
 		Sandbox:   sandbox,
 		Resources: resources,
 		Identity:  identity,
@@ -185,10 +238,11 @@ func (m *SandboxManager) Create(
 		closeStdioInternals(sb)
 	})
 
-	initStr, err := buildSandboxInitStr(sb)
+	initStr, err := buildSandboxInitStr(sb, m.imdsHostAddr, m.egressHostAddr, m.workerResolvers)
 	if err != nil {
 		return nil, fmt.Errorf("building InitStr: %w", err)
 	}
+	sb.initStr = initStr
 
 	createErr := runscCreate(ctx, runscCreateOpts{
 		id:        string(id),
@@ -206,6 +260,12 @@ func (m *SandboxManager) Create(
 	cleanup = nil // success — keep all allocated resources.
 	m.mu.Lock()
 	m.sandboxes[id] = sb
+	// Seed the egress state record with the sandbox's identity so
+	// the bridge has something useful to log before SetEgressBackends
+	// / SetEgressPolicy / SetInvocationID fire (which they may not at
+	// all, for DaemonAgents with no EgressRefs).
+	st := m.egressStateLocked(id)
+	st.Identity = identity
 	m.mu.Unlock()
 
 	log.Info("Sandbox created")
@@ -255,7 +315,7 @@ func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
 	}
 
 	log.Info("Starting sandbox")
-	if err := runscStart(ctx, m.stateDir, string(id)); err != nil {
+	if err := runscStart(ctx, m.stateDir, string(id), sb.initStr); err != nil {
 		return err
 	}
 
@@ -283,51 +343,51 @@ func drainSentryStdio(src io.Reader, dispatcherSink io.WriteCloser, logSink io.W
 	}
 }
 
-// SetEgressBackends configures the per-listener EG egress backends
-// for a sandbox between Create and Start.
+// SetEgressBackends updates the per-listener EG egress backends both
+// on the sandbox record (legacy reference) and on the worker-side
+// egress state map consulted by the egress bridge on every dial.
 func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
-	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	sb.EgressBackends = backends
-	if sb.stack != nil {
-		sb.stack.SetEgressBackends(backends)
-	}
+	m.egressStateLocked(id).Backends = backends
 	return nil
 }
 
-// SetEgressPolicy attaches the per-sandbox policy handle. Nil
-// disables enforcement.
+// SetEgressPolicy updates the per-sandbox policy handle. Nil disables
+// enforcement; the bridge interprets a nil Policy as "allow all" so
+// DaemonAgents without EgressRefs keep their direct-dial behaviour.
 func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
-	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	sb.EgressPolicy = policy
-	if sb.stack != nil {
-		sb.stack.SetEgressPolicy(policy)
-	}
+	m.egressStateLocked(id).Policy = policy
 	return nil
 }
 
-// SetInvocationID stamps the per-dispatch InvocationID into the
-// sandbox's slot. Called once per dispatch (cold and warm path).
+// SetInvocationID stamps the per-dispatch InvocationID into both the
+// sandbox's identity record (read by status / logs) and the egress
+// state map (read by the egress bridge on every backend dial so the
+// PROXY v2 TLV announces the current invocation).
 func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
-	m.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	sb.Identity.InvocationID = invocationID
-	if sb.stack != nil {
-		sb.stack.SetInvocationID(invocationID)
-	}
+	st := m.egressStateLocked(id)
+	st.Identity.InvocationID = invocationID
+	st.InvocationID = invocationID
 	return nil
 }
 
@@ -448,25 +508,16 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 		return ErrNotFound
 	}
 
-	if sb.stack != nil {
-		sb.stack.Detach()
-	}
-
 	if err := runscDelete(ctx, m.stateDir, string(id)); err != nil && !isRunscNotExist(err) {
 		log.Error(err, "Failed to destroy sandbox via runsc")
-	}
-
-	if err := TeardownNetNS(&NetNSConfig{
-		NSName: netnsName(id),
-		NSPath: sb.NetNS,
-		TAPFD:  sb.TAPFD,
-	}); err != nil {
-		log.Error(err, "Failed to teardown netns")
 	}
 
 	m.removeAgentCA(id)
 	m.removeSandboxNetConfig(id)
 	m.removeRunscBundleDir(id)
+	// removeSandboxDebugLog intentionally NOT called — keep per-sandbox
+	// Sentry logs for post-mortem inspection during the LLM-hang +
+	// start-crash investigation. Re-enable after diagnosis.
 
 	closeStdioChildren(sb)
 	closeStdioParents(sb)
@@ -482,6 +533,7 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 		_ = logs.file.Close()
 	}
 	delete(m.stdLogs, id)
+	delete(m.egressStates, id)
 	m.mu.Unlock()
 
 	log.Info("Sandbox deleted")
@@ -550,9 +602,9 @@ func (m *SandboxManager) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-// Purge tears down any runsc + netns state left behind for id. Safe
-// to call before Create against a stale ID; runsc delete is idempotent
-// for not-found containers.
+// Purge tears down any runsc state left behind for id. Safe to call
+// before Create against a stale ID; runsc delete is idempotent for
+// not-found containers.
 func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
@@ -563,7 +615,6 @@ func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 		log.Error(err, "RemoveAll of state dir failed")
 	}
 	m.removeRunscBundleDir(id)
-	TeardownNetNS(&NetNSConfig{NSName: netnsName(id)})
 }
 
 // wireSandboxStdio allocates pipes for the Sentry's stdio. Two

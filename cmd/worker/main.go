@@ -31,6 +31,13 @@ func main() {
 	// match a runsc subcommand.
 	tryDispatchRunsc()
 
+	// Reap orphan zombies. When `runsc create` exits, the Sentry and
+	// gofer it spawned are re-parented to us (we're PID 1 in our
+	// container). Without an explicit reaper they sit as zombies, and
+	// `runsc wait`'s kill(pid, 0) liveness probe sees them as alive for
+	// the full 2-minute waitForStopped backoff. See reaper_linux.go.
+	startChildReaper()
+
 	// Single logging pipeline: stdlib slog (text) is the default for our
 	// own slog.Info/Error sites; controller-runtime's logr is bridged into
 	// the same handler so reconciler logs share format with everything
