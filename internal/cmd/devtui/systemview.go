@@ -2,6 +2,7 @@ package devtui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type systemView struct {
 
 	viewport viewport.Model
 	watcher  watcherState
+	forwards map[string]int // key = "<ns>/<name>", value = host port
 }
 
 func newSystemView(componentNames []string) *systemView {
@@ -70,6 +72,12 @@ func (v *systemView) applyLog(source, line string, stream LogStream, focused boo
 	if focused && c == v.current() {
 		v.refreshViewport(true)
 	}
+}
+
+// applyForwards replaces the rendered "Exposed Services" block with the
+// supplied snapshot. The reconciler sends a fresh map on every change.
+func (v *systemView) applyForwards(m map[string]int) {
+	v.forwards = m
 }
 
 func (v *systemView) applyWatcher(msg WatcherMsg) {
@@ -151,7 +159,8 @@ func (v *systemView) render(width, bodyHeight int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, logPane)
 }
 
-// renderSidebar paints the component list and the watcher status block.
+// renderSidebar paints the component list and any trailing status blocks
+// (exposed services, watcher) stacked at the bottom of the sidebar.
 func (v *systemView) renderSidebar(budget int) string {
 	now := time.Now()
 	rows := make([]string, 0, len(v.components))
@@ -166,16 +175,23 @@ func (v *systemView) renderSidebar(budget int) string {
 	}
 	listBlock := strings.Join(rows, "\n")
 
-	watcher := renderWatcherBlock(v.watcher)
-	if watcher == "" {
+	trailing := make([]string, 0, 2)
+	if fwd := renderForwardsBlock(v.forwards); fwd != "" {
+		trailing = append(trailing, fwd)
+	}
+	if w := renderWatcherBlock(v.watcher); w != "" {
+		trailing = append(trailing, w)
+	}
+	if len(trailing) == 0 {
 		return listBlock
 	}
-	used := lipgloss.Height(listBlock) + lipgloss.Height(watcher)
+	tail := strings.Join(trailing, "\n\n")
+	used := lipgloss.Height(listBlock) + lipgloss.Height(tail)
 	pad := budget - used - 1
 	if pad < 1 {
 		pad = 1
 	}
-	return listBlock + strings.Repeat("\n", pad) + watcher
+	return listBlock + strings.Repeat("\n", pad) + tail
 }
 
 func renderComponentRow(c *component, now time.Time) string {
@@ -200,6 +216,31 @@ func renderComponentRow(c *component, now time.Time) string {
 		pad = 0
 	}
 	return glyph + " " + name + strings.Repeat(" ", pad) + " " + uptime
+}
+
+// renderForwardsBlock paints "ns/name → :PORT" lines for every auto-
+// exposed Service. Returns "" when nothing is forwarded so the caller
+// can skip the section entirely.
+func renderForwardsBlock(m map[string]int) string {
+	if len(m) == 0 {
+		return ""
+	}
+	header := mutedStyle.Render("─ exposed ─")
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys)+1)
+	lines = append(lines, header)
+	for _, k := range keys {
+		line := fmt.Sprintf("%s → :%d", k, m[k])
+		if lipgloss.Width(line) > sidebarWidth-2 {
+			line = line[:sidebarWidth-3] + "…"
+		}
+		lines = append(lines, statusReadyStyle.Render(line))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func renderWatcherBlock(w watcherState) string {

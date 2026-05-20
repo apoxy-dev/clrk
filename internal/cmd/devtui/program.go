@@ -111,6 +111,13 @@ func (p *Program) SendWatcher(event WatcherEvent, prefix string, dur time.Durati
 	p.send(msg)
 }
 
+// SendExposedForwards replaces the sidebar's "Exposed Services" block
+// with the supplied snapshot. Caller transfers ownership of the map —
+// don't mutate it after sending.
+func (p *Program) SendExposedForwards(m map[string]int) {
+	p.send(ExposedForwardsMsg(m))
+}
+
 // MarkSyntheticReady flips a synthetic component (e.g. otel-logs) to
 // StatusReady so its sidebar glyph shows green from the start. Use
 // this for components that have no driver lifecycle to track —

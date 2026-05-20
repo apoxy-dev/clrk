@@ -15,6 +15,7 @@ const (
 	labelGeneration = clrkv1alpha1.LabelGeneration
 	labelWorkerPool = clrkv1alpha1.LabelWorkerPool
 	labelComponent  = "clrk.apoxy.dev/component"
+	labelExpose     = clrkv1alpha1.LabelExpose
 )
 
 const (

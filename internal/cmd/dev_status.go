@@ -40,22 +40,29 @@ func newDevStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			sess, _ := readDevSession(dataDir)
 			if jsonOut {
-				out := map[string]ComponentState{}
-				// session may have a registry port that's useful for
-				// scripts; expose under a synthetic key.
-				if sess, sErr := readDevSession(dataDir); sErr == nil {
+				// The JSON shape stays back-compat for scripts that
+				// `jq .controller-manager.ready` etc.; registryPort
+				// and forwards are sibling keys for the same reason.
+				out := map[string]any{}
+				if sess != nil {
 					out["registryPort"] = ComponentState{
 						Name:   "registryPort",
 						Status: fmt.Sprintf("%d", sess.RegistryHostPort),
 					}
+					out["forwards"] = sess.Forwards
 				}
 				for _, s := range states {
 					out[s.Name] = s
 				}
 				return json.NewEncoder(os.Stdout).Encode(out)
 			}
-			return writeStatusTable(os.Stdout, states)
+			if err := writeStatusTable(os.Stdout, states); err != nil {
+				return err
+			}
+			writeForwardsBlock(os.Stdout, sess)
+			return nil
 		},
 	}
 
@@ -173,6 +180,26 @@ func inspectPod(ctx context.Context, kc kubernetes.Interface, ns, selector strin
 		}
 	}
 	return st
+}
+
+// writeForwardsBlock prints the auto-exposed Service forwards as a
+// small "EXPOSED SERVICES" table below the component table. Empty
+// state prints a one-line hint pointing at the opt-in label so users
+// know the feature exists without reading the docs.
+func writeForwardsBlock(w *os.File, sess *devSession) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "EXPOSED SERVICES")
+	if sess == nil || len(sess.Forwards) == 0 {
+		fmt.Fprintln(w, "(none — label a Service with clrk.apoxy.dev/expose=true to auto-forward it)")
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "URL\tTARGET")
+	for _, f := range sess.Forwards {
+		fmt.Fprintf(tw, "http://localhost:%d\t%s/%s:%d\n",
+			f.HostPort, f.Namespace, f.Name, f.ServicePort)
+	}
+	_ = tw.Flush()
 }
 
 func writeStatusTable(w *os.File, states []ComponentState) error {

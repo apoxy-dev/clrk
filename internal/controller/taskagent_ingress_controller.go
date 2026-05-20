@@ -252,6 +252,11 @@ func desiredEnvoyProxy(ta *clrkv1alpha1.TaskAgent) *egv1alpha1.EnvoyProxy {
 					EnvoyService: &egv1alpha1.KubernetesServiceSpec{
 						Name: ptr.To(taskAgentEnvoyProxyName(ta)),
 						Type: &svcType,
+						// labelExpose opts this Service into the
+						// `clrk dev` host-port auto-forwarder so the
+						// TaskAgent is reachable from the host without
+						// a manual `kubectl port-forward`.
+						Labels: map[string]string{labelExpose: "true"},
 					},
 					EnvoyDeployment: &egv1alpha1.KubernetesDeploymentSpec{
 						Patch: fastEnvoyProbesPatch(),

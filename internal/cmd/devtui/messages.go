@@ -52,3 +52,8 @@ type WatcherMsg struct {
 	Duration time.Duration
 	Err      string
 }
+
+// ExposedForwardsMsg replaces the sidebar's "Exposed Services" block
+// with the supplied snapshot. Keyed by "<namespace>/<name>", value is
+// the host port the auto-forwarder bound. An empty map hides the block.
+type ExposedForwardsMsg map[string]int

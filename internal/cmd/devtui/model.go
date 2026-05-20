@@ -100,6 +100,10 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.system.applyWatcher(msg)
 		return m, nil
 
+	case ExposedForwardsMsg:
+		m.system.applyForwards(msg)
+		return m, nil
+
 	case tickMsg:
 		return m, tickCmd()
 	}

@@ -24,15 +24,29 @@ const devSessionFileName = "dev.json"
 // devSession persists everything `clrk dev reload <component>` needs
 // without re-parsing flags. Kept intentionally small — fields are
 // extracted from devOpts at end-of-bringUp and serialized verbatim.
+// The Forwards slice is the auto-expose reconciler's mirror; it owns
+// rewrites via rewriteForwards while the rest of the session stays
+// immutable for the lifetime of the dev process.
 type devSession struct {
-	DataDir          string `json:"data_dir"`
-	Workers          int    `json:"workers"`
-	ControllerImage  string `json:"controller_image"`
-	WorkerImage      string `json:"worker_image"`
-	Pull             string `json:"pull"`
-	Watch            bool   `json:"watch"`
-	OtelEndpoint     string `json:"otel_endpoint"`
-	RegistryHostPort int    `json:"registry_host_port"`
+	DataDir          string            `json:"data_dir"`
+	Workers          int               `json:"workers"`
+	ControllerImage  string            `json:"controller_image"`
+	WorkerImage      string            `json:"worker_image"`
+	Pull             string            `json:"pull"`
+	Watch            bool              `json:"watch"`
+	OtelEndpoint     string            `json:"otel_endpoint"`
+	RegistryHostPort int               `json:"registry_host_port"`
+	Forwards         []ExposedForward  `json:"forwards,omitempty"`
+}
+
+// ExposedForward is one auto-opened host-port forward managed by the
+// `clrk dev` expose reconciler. Mirrored into dev.json on every change
+// so `clrk dev status` can introspect without contacting the cluster.
+type ExposedForward struct {
+	Namespace   string `json:"namespace"`
+	Name        string `json:"name"`
+	HostPort    int    `json:"host_port"`
+	ServicePort int32  `json:"service_port"`
 }
 
 // writeDevSession serializes the effective devOpts state to
@@ -57,6 +71,36 @@ func writeDevSession(o *devOpts, state *devState) error {
 		return err
 	}
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// rewriteForwards atomically rewrites the Forwards slice in dev.json.
+// Reads the current session, swaps the slice, writes back via the same
+// temp-file + rename dance writeDevSession uses. Safe for the expose
+// reconciler to call from any goroutine; missing dev.json (e.g. before
+// bringUp finishes) is treated as a no-op rather than an error.
+func rewriteForwards(dataDir string, fs []ExposedForward) error {
+	path := filepath.Join(dataDir, devSessionFileName)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var s devSession
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+	s.Forwards = fs
+	out, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

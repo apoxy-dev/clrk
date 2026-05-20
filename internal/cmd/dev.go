@@ -200,6 +200,7 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 		streamPodLogsPlain(ctx, state.cluster.HostKubeconfigPath(),
 			"default", podSelectorWorkers, i, workerComponent(i))
 	}
+	go startExposeReconciler(ctx, state.cluster.HostKubeconfigPath(), o.dataDir, nil)
 
 	go forwardOtel(ctx, receiver, nil, func(name, line string) {
 		fmt.Fprintf(os.Stdout, "[%s] %s\n", name, line)
@@ -281,6 +282,7 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 			go streamPodLogsTUI(orchestrateCtx, prog, kubeconfig,
 				"default", podSelectorWorkers, i, workerComponent(i))
 		}
+		go startExposeReconciler(orchestrateCtx, kubeconfig, o.dataDir, prog)
 		go forwardOtel(orchestrateCtx, receiver, store, func(name, line string) {
 			prog.SendLog(name, line, devtui.StreamStdout)
 		})

@@ -16,6 +16,18 @@ const (
 	// LabelWorkerPool is the name of the WorkerPool the revision is
 	// targeted at. Workers filter the watch by this label.
 	LabelWorkerPool = "clrk.apoxy.dev/worker-pool"
+	// LabelExpose opts a Service into the `clrk dev` host-port
+	// auto-forwarder. Set on TaskAgent ingress data-plane Services by
+	// the ingress controller; users can also stamp it on their own
+	// Services to expose them to the host without a manual
+	// `kubectl port-forward`.
+	LabelExpose = "clrk.apoxy.dev/expose"
+	// LabelExposePort is an optional per-Service host-port hint for the
+	// `clrk dev` auto-forwarder. When set to a parsable port number and
+	// the port is free, the forwarder binds that exact port; otherwise
+	// it falls back to the next free port in its range. The ingress
+	// controller does not set this; it's user-facing only.
+	LabelExposePort = "clrk.apoxy.dev/expose-port"
 )
 
 // AgentKind values written into LabelAgentKind. Workers branch on this to

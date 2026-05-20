@@ -59,10 +59,16 @@ re-apply.
 ## Invoke
 
 The TaskAgent ingress controller materializes an Envoy data-plane
-Service named `clrk-jq-bot` in the `clrk` namespace:
+Service named `clrk-jq-bot` in the `clrk` namespace, labeled
+`clrk.apoxy.dev/expose=true`. `clrk dev` auto-forwards every labeled
+Service to a host port in the 18080–18099 range; jq-bot is typically
+the first one and lands on `:18080`. Confirm with:
 
 ```bash
-kubectl port-forward -n clrk svc/clrk-jq-bot 18080:80 &
+clrk dev status
+# EXPOSED SERVICES
+# URL                       TARGET
+# http://localhost:18080    clrk/clrk-jq-bot:80
 ```
 
 POST `{input, want}`. The `X-Clrk-TaskAgent` header is required —
@@ -89,6 +95,10 @@ Actual response from a working run (Haiku, ~11s end-to-end):
 ```json
 {"filter":"[.[] | select(.role == \"eng\")] | sort_by(.age) | map(.name)","output":["carol","alice"]}
 ```
+
+Outside `clrk dev` (e.g. running against a non-dev cluster) the
+auto-forwarder isn't present; fall back to the classic
+`kubectl port-forward -n clrk svc/clrk-jq-bot 18080:80 &`.
 
 Other prompts that work:
 
