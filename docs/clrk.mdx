@@ -60,7 +60,7 @@ clrk agents get NAME [flags]
 ```
   -h, --help                help for get
       --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local               Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string    Target namespace (default: kubeconfig context).
 ```
 
@@ -91,7 +91,7 @@ clrk agents list [flags]
   -A, --all-namespaces      List across all namespaces.
   -h, --help                help for list
       --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local               Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string    Target namespace (default: kubeconfig context).
 ```
 
@@ -122,7 +122,7 @@ clrk agents logs NAME [flags]
   -f, --follow              Follow the log stream (kubectl-style; default false).
   -h, --help                help for logs
       --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local               Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string    Target namespace (default: kubeconfig context).
       --tail int            Number of trailing lines to print (0 = entire log).
 ```
@@ -158,7 +158,7 @@ clrk apply [flags]
   -f, --filename stringArray   YAML/JSON file or directory to apply (repeatable; positional args also accepted).
   -h, --help                   help for apply
       --kubeconfig string      Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev         Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host by default).
+      --local                  Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host by default).
   -R, --recursive              Recurse into subdirectories.
 ```
 
@@ -331,10 +331,10 @@ clrk dev [flags]
       --data-dir string           Host path for ~/.clrk state (defaults to --clrk-dir).
   -h, --help                      help for dev
       --k3s-image string          k3s image ref. (default "rancher/k3s:v1.34.1-k3s1")
-      --pull docker run --pull    Forwarded to docker run --pull for every clrk-managed container. Accepted: "always", "missing" (docker default), "never". Use "always" to force a re-pull when a SHA-tagged image was retagged out-of-band.
+      --pull string               Forwarded to 'docker run --pull' for every clrk-managed container. Accepted: "always", "missing" (docker default), "never". Use "always" to force a re-pull when a SHA-tagged image was retagged out-of-band.
   -R, --recursive                 Recurse into subdirectories when --apply targets a directory.
-      --reload-tar worker[-N]     Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is worker[-N] or `controller-manager`. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar
-      --secret _                  Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with _ → `-` (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.
+      --reload-tar stringArray    Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar
+      --secret stringArray        Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with '_' → '-' (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.
       --skip-preflight            Skip the host-readiness checks (docker daemon, /dev/net/tun, IPv6, image-pullable). Use only when the checks are wrong about your environment.
       --tui                       Render the dev TUI (auto-disabled when stdout isn't a TTY). (default true)
       --watch                     Rebuild and hot-reload binaries on source changes (experimental).
@@ -369,10 +369,10 @@ clrk dev logs [flags]
 ### Options
 
 ```
-  -f, --follow                       Follow log output (docker logs -f).
-  -h, --help                         help for logs
-      --tail string                  Number of recent lines per component before following. (default "100")
-      --workers clrk dev --workers   Number of worker replicas to attach to (matches clrk dev --workers). (default 1)
+  -f, --follow        Follow log output (docker logs -f).
+  -h, --help          help for logs
+      --tail string   Number of recent lines per component before following. (default "100")
+      --workers int   Number of worker replicas to attach to (matches 'clrk dev --workers'). (default 1)
 ```
 
 ### Options inherited from parent commands
@@ -403,9 +403,9 @@ clrk dev status [flags]
 ### Options
 
 ```
-  -h, --help                         help for status
-      --json                         Emit JSON keyed by component name.
-      --workers clrk dev --workers   Number of worker replicas to inspect (matches clrk dev --workers). (default 1)
+  -h, --help          help for status
+      --json          Emit JSON keyed by component name.
+      --workers int   Number of worker replicas to inspect (matches 'clrk dev --workers'). (default 1)
 ```
 
 ### Options inherited from parent commands
@@ -489,7 +489,7 @@ clrk pools get NAME [flags]
 ```
   -h, --help                help for get
       --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local               Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string    Target namespace (default: kubeconfig context).
 ```
 
@@ -520,7 +520,7 @@ clrk pools list [flags]
   -A, --all-namespaces      List across all namespaces.
   -h, --help                help for list
       --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local               Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string    Target namespace (default: kubeconfig context).
 ```
 
@@ -581,7 +581,7 @@ clrk secret set NAME [flags]
       --from-literal stringArray   key=VALUE — verbatim string into data[key]. Repeatable.
   -h, --help                       help for set
       --kubeconfig string          Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
-      --local clrk dev             Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+      --local                      Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).
   -n, --namespace string           Target namespace (default: "default").
 ```
 

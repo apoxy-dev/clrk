@@ -363,6 +363,6 @@ func addReadFlags(cmd *cobra.Command, namespace *string, allNamespaces *bool, lo
 	if allNamespaces != nil {
 		cmd.Flags().BoolVarP(allNamespaces, "all-namespaces", "A", false, "List across all namespaces.")
 	}
-	cmd.Flags().BoolVar(local, "local", false, "Target the kubeconfig of the running `clrk dev` session (~/.clrk/kubeconfig.host).")
+	cmd.Flags().BoolVar(local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
 	cmd.Flags().StringVar(kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 }

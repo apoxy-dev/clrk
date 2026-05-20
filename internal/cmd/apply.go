@@ -42,7 +42,7 @@ func newApplyCmd() *cobra.Command {
 
 	cmd.Flags().StringArrayVarP(&files, "filename", "f", nil, "YAML/JSON file or directory to apply (repeatable; positional args also accepted).")
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories.")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running `clrk dev` session (~/.clrk/kubeconfig.host by default).")
+	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host by default).")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	return cmd
 }

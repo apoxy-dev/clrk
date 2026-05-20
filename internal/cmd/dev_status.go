@@ -47,7 +47,7 @@ func newDevStatusCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit JSON keyed by component name.")
-	cmd.Flags().IntVar(&workers, "workers", 1, "Number of worker replicas to inspect (matches `clrk dev --workers`).")
+	cmd.Flags().IntVar(&workers, "workers", 1, "Number of worker replicas to inspect (matches 'clrk dev --workers').")
 	return cmd
 }
 

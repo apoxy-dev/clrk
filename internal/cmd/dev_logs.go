@@ -39,7 +39,7 @@ func newDevLogsCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output (docker logs -f).")
 	cmd.Flags().StringVar(&tail, "tail", "100", "Number of recent lines per component before following.")
-	cmd.Flags().IntVar(&workers, "workers", 1, "Number of worker replicas to attach to (matches `clrk dev --workers`).")
+	cmd.Flags().IntVar(&workers, "workers", 1, "Number of worker replicas to attach to (matches 'clrk dev --workers').")
 	return cmd
 }
 

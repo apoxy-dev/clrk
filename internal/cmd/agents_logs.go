@@ -72,7 +72,7 @@ func newAgentsLogsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running `clrk dev` session (~/.clrk/kubeconfig.host).")
+	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow the log stream (kubectl-style; default false).")
 	cmd.Flags().IntVar(&tailLines, "tail", 0, "Number of trailing lines to print (0 = entire log).")

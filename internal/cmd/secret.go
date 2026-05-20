@@ -69,7 +69,7 @@ func newSecretSetCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&fromLiteral, "from-literal", nil, "key=VALUE — verbatim string into data[key]. Repeatable.")
 	cmd.Flags().StringArrayVar(&fromFile, "from-file", nil, "key=PATH — file contents into data[key]. Repeatable.")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: \"default\").")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running `clrk dev` session (~/.clrk/kubeconfig.host).")
+	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	return cmd
 }
