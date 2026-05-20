@@ -204,6 +204,9 @@ func (m *DaemonLifecycle) Shutdown() {
 }
 
 // run is the per-DaemonAgent supervisor. It blocks until ctx is cancelled.
+// The Create/Start/Wait/Delete sequence for a single attempt lives in
+// runSandboxOnce; the per-iteration restart bookkeeping (egress
+// readiness gate, backoff, restart decision) lives in runIteration.
 func (m *DaemonLifecycle) run(ctx context.Context, da *clrkv1alpha1.DaemonAgent, rev *clrkv1alpha1.AgentSandboxRevision) {
 	log := ctrl.LoggerFrom(ctx).WithName("daemon-lifecycle").WithValues(
 		"daemonAgent", da.Name, "namespace", da.Namespace, "revision", rev.Name,
@@ -213,140 +216,193 @@ func (m *DaemonLifecycle) run(ctx context.Context, da *clrkv1alpha1.DaemonAgent,
 		attempt    int32
 		backoffExp int
 	)
-
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-
-		sandboxID := sandbox.SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, attempt))
-		log := log.WithValues("sandboxID", sandboxID, "attempt", attempt)
-
-		identity := newAgentIdentity(proxyproto.AgentKindDaemon, da.Namespace, da.Name, string(da.UID), rev.Name)
-
-		// Resolve EG dependencies (CA, backend addresses, dialable
-		// backend) BEFORE creating any sandbox state. The EG
-		// controller bring-up can take 30-60s in dev; without this
-		// gate we'd Create + Delete libcontainer state on every retry
-		// and burn the per-attempt backoff multiple times before the
-		// EG is even reachable.
-		caPEM, backends, policy, err := m.waitForEgressReady(ctx, da, log)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Info("EgressGateway not ready; will retry", "error", err)
-			if !m.sleepBackoff(ctx, &backoffExp) {
-				return
-			}
-			continue
-		}
-
-		log.Info("Starting daemon sandbox")
-		// Wipe any libcontainer + netns state left behind by an earlier
-		// half-failed Create attempt at the same id. Without this, a
-		// transient failure on the netstack/libcontainer setup path
-		// strands the state directory and every subsequent retry
-		// rejects with "container with given ID already exists".
-		m.sandboxMgr.Purge(ctx, sandboxID)
-		if _, err := m.sandboxMgr.Create(ctx, sandbox.CreateRequest{
-			ID:        sandboxID,
-			AgentRef:  da.Name,
-			Identity:  identity,
-			CAPEM:     caPEM,
-			Sandbox:   rev.Spec.AgentSandbox,
-			Resources: da.Spec.Resources,
-			Attempt:   attempt,
-		}); err != nil {
-			log.Error(err, "Failed to create sandbox")
-			if !m.sleepBackoff(ctx, &backoffExp) {
-				return
-			}
-			continue
-		}
-		if len(backends) > 0 {
-			if err := m.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
-				log.Error(err, "Set egress backends failed")
-			}
-		}
-		if policy != nil {
-			if err := m.sandboxMgr.SetEgressPolicy(sandboxID, policy); err != nil {
-				log.Error(err, "Set egress policy failed")
-			}
-		}
-		startedAt := time.Now()
-		if err := m.sandboxMgr.Start(ctx, sandboxID); err != nil {
-			log.Error(err, "Failed to start sandbox")
-			_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
-			if !m.sleepBackoff(ctx, &backoffExp) {
-				return
-			}
-			continue
-		}
-
-		now := metav1.NewTime(startedAt)
-		m.patchStatus(ctx, da, daemonStatusUpdate{
-			phase:        clrkv1alpha1.DaemonPhaseRunning,
-			upSince:      &now,
-			restartCount: attempt,
-		})
-
-		var lifetimeTimer *time.Timer
-		if da.Spec.MaxLifetimeSeconds != nil && *da.Spec.MaxLifetimeSeconds > 0 {
-			d := time.Duration(*da.Spec.MaxLifetimeSeconds) * time.Second
-			lifetimeTimer = time.AfterFunc(d, func() {
-				log.Info("MaxLifetimeSeconds reached, stopping sandbox")
-				_ = m.sandboxMgr.Stop(context.Background(), sandboxID)
-			})
-		}
-
-		exitCode, waitErr := m.waitOrCancel(ctx, sandboxID)
-		if lifetimeTimer != nil {
-			lifetimeTimer.Stop()
-		}
-		ranFor := time.Since(startedAt)
-
-		// Best-effort delete; use Background so a cancelled ctx doesn't
-		// abort cleanup of the libcontainer + netns.
-		if err := m.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
-			log.Error(err, "Failed to delete sandbox")
-		}
-
-		if ctx.Err() != nil {
-			// Rollover or shutdown — leave Phase as-is for the next loop.
+		if m.runIteration(ctx, da, rev, log, &attempt, &backoffExp) == restartOutcomeStop {
 			return
 		}
-		if waitErr != nil {
-			log.Error(waitErr, "Sandbox wait failed")
-		}
-		log.Info("Sandbox exited", "ranFor", ranFor, "exitCode", exitCode)
-
-		nextAttempt := attempt + 1
-		decision := decideRestart(da.Spec.RestartPolicy, exitCode, waitErr, nextAttempt, da.Spec.MaxRestarts)
-		switch decision {
-		case daemonDecisionStop:
-			m.patchStatus(ctx, da, daemonStatusUpdate{
-				phase:        clrkv1alpha1.DaemonPhaseStopped,
-				clearUpSince: true,
-				restartCount: attempt,
-			})
-			return
-		case daemonDecisionRestart:
-			if ranFor >= healthyRunThreshold {
-				backoffExp = 0
-			} else {
-				m.patchStatus(ctx, da, daemonStatusUpdate{
-					phase:        clrkv1alpha1.DaemonPhaseCrashLoopBackOff,
-					clearUpSince: true,
-					restartCount: attempt,
-				})
-				if !m.sleepBackoff(ctx, &backoffExp) {
-					return
-				}
-			}
-		}
-		attempt = nextAttempt
 	}
+}
+
+// restartOutcome is the verdict of one runIteration pass — either keep
+// looping (the supervisor will retry / restart) or unwind run() so the
+// per-DaemonAgent goroutine exits.
+type restartOutcome int
+
+const (
+	restartOutcomeContinue restartOutcome = iota
+	restartOutcomeStop
+)
+
+// runIteration drives one full supervised attempt: egress readiness
+// gate, Create/Start/Wait/Delete via runSandboxOnce, then the restart
+// decision and (if applicable) crash-loop backoff. attempt and
+// backoffExp are owned by run() and mutated here so the caller's loop
+// only has to react to the outcome.
+func (m *DaemonLifecycle) runIteration(
+	ctx context.Context,
+	da *clrkv1alpha1.DaemonAgent,
+	rev *clrkv1alpha1.AgentSandboxRevision,
+	baseLog logr.Logger,
+	attempt *int32,
+	backoffExp *int,
+) restartOutcome {
+	sandboxID := sandbox.SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, *attempt))
+	log := baseLog.WithValues("sandboxID", sandboxID, "attempt", *attempt)
+
+	// Resolve EG dependencies (CA, backend addresses, dialable
+	// backend) BEFORE creating any sandbox state. The EG controller
+	// bring-up can take 30-60s in dev; without this gate we'd Create
+	// + Delete libcontainer state on every retry and burn the
+	// per-attempt backoff multiple times before the EG is even
+	// reachable.
+	caPEM, backends, policy, err := m.waitForEgressReady(ctx, da, log)
+	if err != nil {
+		if ctx.Err() != nil {
+			return restartOutcomeStop
+		}
+		log.Info("EgressGateway not ready; will retry", "error", err)
+		if !m.sleepBackoff(ctx, backoffExp) {
+			return restartOutcomeStop
+		}
+		return restartOutcomeContinue
+	}
+
+	identity := newAgentIdentity(proxyproto.AgentKindDaemon, da.Namespace, da.Name, string(da.UID), rev.Name)
+	exitCode, ranFor, runErr := m.runSandboxOnce(ctx, da, rev, sandboxID, identity, caPEM, backends, policy, *attempt, log)
+	if ctx.Err() != nil {
+		// Rollover or shutdown — leave Phase as-is for the next loop.
+		return restartOutcomeStop
+	}
+	if runErr != nil {
+		// Create/Start failure already logged inside runSandboxOnce;
+		// fall through to backoff so a stuck cold-start path doesn't
+		// spin-loop.
+		if !m.sleepBackoff(ctx, backoffExp) {
+			return restartOutcomeStop
+		}
+		return restartOutcomeContinue
+	}
+
+	nextAttempt := *attempt + 1
+	decision := decideRestart(da.Spec.RestartPolicy, exitCode, nil, nextAttempt, da.Spec.MaxRestarts)
+	switch decision {
+	case daemonDecisionStop:
+		m.patchStatus(ctx, da, daemonStatusUpdate{
+			phase:        clrkv1alpha1.DaemonPhaseStopped,
+			clearUpSince: true,
+			restartCount: *attempt,
+		})
+		return restartOutcomeStop
+	case daemonDecisionRestart:
+		if ranFor >= healthyRunThreshold {
+			*backoffExp = 0
+		} else {
+			m.patchStatus(ctx, da, daemonStatusUpdate{
+				phase:        clrkv1alpha1.DaemonPhaseCrashLoopBackOff,
+				clearUpSince: true,
+				restartCount: *attempt,
+			})
+			if !m.sleepBackoff(ctx, backoffExp) {
+				return restartOutcomeStop
+			}
+		}
+	}
+	*attempt = nextAttempt
+	return restartOutcomeContinue
+}
+
+// runSandboxOnce executes one supervised Create/Start/Wait/Delete
+// cycle for the given sandboxID. Returns (exitCode, ranFor, nil) on a
+// completed run (the caller decides whether to restart based on
+// exitCode), or (0, 0, err) on a Create/Start failure that the caller
+// should treat as a failed attempt and back off. Delete is always
+// attempted under context.Background() so a cancelled ctx doesn't
+// abort cleanup.
+func (m *DaemonLifecycle) runSandboxOnce(
+	ctx context.Context,
+	da *clrkv1alpha1.DaemonAgent,
+	rev *clrkv1alpha1.AgentSandboxRevision,
+	sandboxID sandbox.SandboxID,
+	identity proxyproto.AgentIdentity,
+	caPEM []byte,
+	backends []egress.BackendListener,
+	policy *egress.SandboxPolicy,
+	attempt int32,
+	log logr.Logger,
+) (int, time.Duration, error) {
+	log.Info("Starting daemon sandbox")
+	// Wipe any runsc + Sentry PluginStack setup path state left behind
+	// by an earlier half-failed Create attempt at the same id. Without
+	// this, a transient failure strands the state directory and every
+	// subsequent retry rejects with "container with given ID already
+	// exists".
+	m.sandboxMgr.Purge(ctx, sandboxID)
+	if _, err := m.sandboxMgr.Create(ctx, sandbox.CreateRequest{
+		ID:        sandboxID,
+		AgentRef:  da.Name,
+		Identity:  identity,
+		CAPEM:     caPEM,
+		Sandbox:   rev.Spec.AgentSandbox,
+		Resources: da.Spec.Resources,
+		Attempt:   attempt,
+	}); err != nil {
+		log.Error(err, "Failed to create sandbox")
+		return 0, 0, err
+	}
+	if len(backends) > 0 {
+		if err := m.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
+			log.Error(err, "Set egress backends failed")
+		}
+	}
+	if policy != nil {
+		if err := m.sandboxMgr.SetEgressPolicy(sandboxID, policy); err != nil {
+			log.Error(err, "Set egress policy failed")
+		}
+	}
+
+	startedAt := time.Now()
+	if err := m.sandboxMgr.Start(ctx, sandboxID); err != nil {
+		log.Error(err, "Failed to start sandbox")
+		_ = m.sandboxMgr.Delete(context.Background(), sandboxID)
+		return 0, 0, err
+	}
+
+	now := metav1.NewTime(startedAt)
+	m.patchStatus(ctx, da, daemonStatusUpdate{
+		phase:        clrkv1alpha1.DaemonPhaseRunning,
+		upSince:      &now,
+		restartCount: attempt,
+	})
+
+	var lifetimeTimer *time.Timer
+	if da.Spec.MaxLifetimeSeconds != nil && *da.Spec.MaxLifetimeSeconds > 0 {
+		d := time.Duration(*da.Spec.MaxLifetimeSeconds) * time.Second
+		lifetimeTimer = time.AfterFunc(d, func() {
+			log.Info("MaxLifetimeSeconds reached, stopping sandbox")
+			_ = m.sandboxMgr.Stop(context.Background(), sandboxID)
+		})
+	}
+
+	exitCode, waitErr := m.waitOrCancel(ctx, sandboxID)
+	if lifetimeTimer != nil {
+		lifetimeTimer.Stop()
+	}
+	ranFor := time.Since(startedAt)
+
+	// Best-effort delete; use Background so a cancelled ctx doesn't
+	// abort cleanup of the runsc + Sentry stack state.
+	if err := m.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
+		log.Error(err, "Failed to delete sandbox")
+	}
+
+	if waitErr != nil {
+		log.Error(waitErr, "Sandbox wait failed")
+	}
+	log.Info("Sandbox exited", "ranFor", ranFor, "exitCode", exitCode)
+	return exitCode, ranFor, nil
 }
 
 // waitOrCancel blocks on the sandbox's exit, but races against ctx so a

@@ -1,3 +1,5 @@
+//go:build linux
+
 package agents
 
 import (
@@ -15,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,66 +47,6 @@ const (
 	// invoker's per-fire cap so cron and HTTP share the same ceiling.
 	hardTimeoutCap = 5 * time.Minute
 )
-
-// activeCounter tracks in-flight TaskAgent executions per
-// (taskAgentNS, taskAgentName). The WorkerStatusService streams the
-// snapshot to the controller-manager which feeds it into the ingress
-// ext_proc cluster-wide MaxConcurrent enforcement.
-type activeCounter struct {
-	mu       sync.Mutex
-	counts   map[types.NamespacedName]int32
-	notifier *changeNotifier
-}
-
-func newActiveCounter() *activeCounter {
-	return &activeCounter{
-		counts:   make(map[types.NamespacedName]int32),
-		notifier: newChangeNotifier(),
-	}
-}
-
-func (c *activeCounter) inc(key types.NamespacedName) {
-	c.mu.Lock()
-	c.counts[key]++
-	c.mu.Unlock()
-	c.notifier.broadcast()
-}
-
-func (c *activeCounter) dec(key types.NamespacedName) {
-	c.mu.Lock()
-	if c.counts[key] > 0 {
-		c.counts[key]--
-	}
-	if c.counts[key] == 0 {
-		delete(c.counts, key)
-	}
-	c.mu.Unlock()
-	c.notifier.broadcast()
-}
-
-// get returns the current count for key (0 if absent).
-func (c *activeCounter) get(key types.NamespacedName) int32 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.counts[key]
-}
-
-// Snapshot returns a copy of all (key, count) pairs. Used by the
-// WorkerStatusService to build a stream message.
-func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make(map[types.NamespacedName]int32, len(c.counts))
-	for k, v := range c.counts {
-		out[k] = v
-	}
-	return out
-}
-
-// Notifier returns the change notifier for this counter so external
-// publishers (e.g. the WorkerStatusService) can subscribe to inc/dec
-// events.
-func (c *activeCounter) Notifier() *changeNotifier { return c.notifier }
 
 // Dispatcher serves inbound TaskAgent execution requests routed to
 // this worker by the per-TaskAgent HTTPRoute. One shared instance per
@@ -201,11 +144,6 @@ func (d *Dispatcher) SetWarmPool(w WarmAcquirer) { d.warmPool = w }
 // cooperative srv.Shutdown grace.
 func (d *Dispatcher) Drain() { d.draining.Store(true) }
 
-// NewActiveCounter returns an empty activeCounter usable as the
-// `active` argument to NewDispatcher. Exported so tests can inspect
-// the counter independently.
-func NewActiveCounter() *activeCounter { return newActiveCounter() }
-
 // acquire returns a release func on success or nil if the per-TaskAgent
 // MaxConcurrent cap is full. cap == 0 means unlimited (no semaphore
 // allocated).
@@ -245,25 +183,104 @@ func (d *Dispatcher) acquire(key types.NamespacedName, cap int32) func() {
 	}
 }
 
+// reqCtx is the per-request derived state shared across the
+// acceptRequest / acquireSandbox / startAndSetupDelivery /
+// drainResponse phases of Dispatcher.ServeHTTP. Built once at the
+// top and threaded through; lets each phase take what it needs
+// without re-parsing the request.
+type reqCtx struct {
+	ctx          context.Context
+	cancel       context.CancelFunc
+	log          logr.Logger
+	ns           string
+	name         string
+	key          types.NamespacedName
+	ta           clrkv1alpha1.TaskAgent
+	rev          clrkv1alpha1.AgentSandboxRevision
+	identity     proxyproto.AgentIdentity
+	invocationID string
+	release      func()
+}
+
+// deliveryState holds the per-request transport plumbing decided by
+// startAndSetupDelivery and consumed by drainResponse. mdEntry is
+// non-nil iff Mode=Metadata; respCh / stdoutBuf / stdoutBufErr are
+// populated only on their respective Stdin sub-branches.
+type deliveryState struct {
+	mode         clrkv1alpha1.AgentDeliveryMode
+	wrapResponse bool
+	ceID         string
+
+	mdEntry      *metadata.Entry
+	mdUnregister func()
+
+	respCh       chan bool
+	stdoutBuf    *bytes.Buffer
+	stdoutBufErr chan error
+	stdinErr     chan error
+
+	flusher http.Flusher
+}
+
 func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rc, ok := d.acceptRequest(w, r)
+	if !ok {
+		return
+	}
+	defer rc.cancel()
+	defer rc.release()
+	defer d.active.dec(rc.key)
+
+	sb, sandboxID, bundle, ok := d.acquireSandbox(w, rc)
+	if !ok {
+		return
+	}
+	defer deleteSandboxBounded(d.sandboxMgr, sandboxID, rc.log, "Failed to delete sandbox")
+	d.applyEgressAndInvocation(rc, sandboxID, bundle)
+
+	ds, ok := d.startAndSetupDelivery(w, r, rc, sb, sandboxID)
+	if !ok {
+		return
+	}
+	if ds.mdUnregister != nil {
+		defer ds.mdUnregister()
+	}
+	if ds.stdinErr != nil {
+		defer func() { <-ds.stdinErr }()
+	}
+
+	exitCode, waitErr := waitOrStop(rc.ctx, d.sandboxMgr, sandboxID)
+	if ds.mdEntry != nil {
+		ds.mdEntry.CancelIfPending()
+	}
+
+	d.drainResponse(w, rc, ds, exitCode, waitErr)
+}
+
+// acceptRequest parses headers, looks up the TaskAgent + revision,
+// acquires the per-TA concurrency semaphore, and bumps the active
+// counter. Writes the appropriate HTTP error (4xx/5xx) and returns
+// (nil, false) on any failure. Returned reqCtx owns the timeout
+// context, semaphore release, and request-scoped logger.
+func (d *Dispatcher) acceptRequest(w http.ResponseWriter, r *http.Request) (*reqCtx, bool) {
 	log := ctrl.LoggerFrom(r.Context()).WithName("dispatch")
 
 	hdr := r.Header.Get(ports.HeaderTaskAgent)
 	if hdr == "" {
 		http.Error(w, "missing "+ports.HeaderTaskAgent+" header", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	if d.draining.Load() {
 		// Worker is shutting down. Synchronous 503 so the ingress
 		// picker steers to another worker without burning retry
 		// budget on a connection-level error.
 		http.Error(w, "worker draining", http.StatusServiceUnavailable)
-		return
+		return nil, false
 	}
 	ns, name, ok := strings.Cut(hdr, "/")
 	if !ok || ns == "" || name == "" {
 		http.Error(w, "invalid "+ports.HeaderTaskAgent+" header (want ns/name)", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	key := types.NamespacedName{Namespace: ns, Name: name}
 	log = log.WithValues("taskAgent", key.String(), "trigger", r.Header.Get(ports.HeaderTrigger))
@@ -272,16 +289,15 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := d.client.Get(r.Context(), key, &ta); err != nil {
 		if apierrors.IsNotFound(err) {
 			http.Error(w, "TaskAgent not found", http.StatusNotFound)
-			return
+			return nil, false
 		}
 		log.Error(err, "Failed to get TaskAgent")
 		http.Error(w, "TaskAgent lookup failed", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
-
 	if ta.Status.LatestReadyRevisionName == "" {
 		http.Error(w, "TaskAgent has no ready revision", http.StatusServiceUnavailable)
-		return
+		return nil, false
 	}
 
 	maxConcurrent := int32(0)
@@ -291,23 +307,22 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release := d.acquire(key, maxConcurrent)
 	if release == nil {
 		http.Error(w, "TaskAgent at MaxConcurrent on this worker", http.StatusTooManyRequests)
-		return
+		return nil, false
 	}
-	defer release()
-
 	d.active.inc(key)
-	defer d.active.dec(key)
 
 	var rev clrkv1alpha1.AgentSandboxRevision
 	revKey := types.NamespacedName{Namespace: ns, Name: ta.Status.LatestReadyRevisionName}
 	if err := d.client.Get(r.Context(), revKey, &rev); err != nil {
+		release()
+		d.active.dec(key)
 		if apierrors.IsNotFound(err) {
 			http.Error(w, "AgentSandboxRevision not found locally", http.StatusServiceUnavailable)
-			return
+			return nil, false
 		}
 		log.Error(err, "Failed to get AgentSandboxRevision")
 		http.Error(w, "revision lookup failed", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 
 	timeout := hardTimeoutCap
@@ -315,7 +330,6 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		timeout = ta.Spec.Timeout.Duration
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 
 	// Per-invocation id is stamped on the sandbox identity (and thus on
 	// every PROXY v2 frame the IdentityDialer emits) so the egress
@@ -329,218 +343,230 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	identity := newAgentIdentity(proxyproto.AgentKindTask, ns, name, string(ta.UID), rev.Name)
 	identity.InvocationID = invocationID
 
-	// Try the warm pool first. A warm sandbox already has the rootfs
-	// mounted, the libcontainer container Created, the TAP+netns
-	// provisioned, and the EG MITM CA staged into the rootfs — so we
-	// skip Purge + Create and go straight to egress wiring + Start.
-	// CA is captured at warm time; egress backends/policy are
-	// re-resolved here so spec changes that don't bump the revision
-	// (e.g. EgressRefs swap) still take effect at consume time.
+	return &reqCtx{
+		ctx:          ctx,
+		cancel:       cancel,
+		log:          log,
+		ns:           ns,
+		name:         name,
+		key:          key,
+		ta:           ta,
+		rev:          rev,
+		identity:     identity,
+		invocationID: invocationID,
+		release:      release,
+	}, true
+}
+
+// acquireSandbox returns a ready sandbox.Instance for the request:
+// the warm pool's most-recently-warmed entry when one is available
+// for the (ns,agent,revision) key, otherwise a freshly-Created
+// instance. The accompanying EgressBundle is re-resolved on both
+// paths (warm + cold) so spec changes that don't bump the revision
+// (e.g. EgressRefs swap) still take effect at consume time.
+//
+// Writes HTTP errors and returns (nil, "", _, false) on failure.
+// Caller owns the returned sandbox lifecycle and must Delete it.
+func (d *Dispatcher) acquireSandbox(w http.ResponseWriter, rc *reqCtx) (*sandbox.Instance, sandbox.SandboxID, EgressBundle, bool) {
 	var sb *sandbox.Instance
 	var sandboxID sandbox.SandboxID
 	warmHit := false
 	if d.warmPool != nil {
-		if warm := d.warmPool.Acquire(WarmKey{Namespace: ns, Agent: name, Revision: rev.Name}); warm != nil {
+		if warm := d.warmPool.Acquire(WarmKey{Namespace: rc.ns, Agent: rc.name, Revision: rc.rev.Name}); warm != nil {
 			sb = warm
 			sandboxID = warm.ID
 			warmHit = true
-			log = log.WithValues("warm", true, "sandboxID", sandboxID, "invocationID", invocationID)
+			rc.log = rc.log.WithValues("warm", true, "sandboxID", sandboxID, "invocationID", rc.invocationID)
 		}
 	}
 
-	bundle, err := ResolveEgress(ctx, d.client, d.router, ns, ta.Spec.EgressRefs)
+	bundle, err := ResolveEgress(rc.ctx, d.client, d.router, rc.ns, rc.ta.Spec.EgressRefs)
 	if err != nil {
 		if warmHit {
 			// Cleanup the warm sandbox we already pulled — caller will
 			// retry, the warm pool will refill on next Acquire kick.
-			deleteSandboxBounded(d.sandboxMgr, sandboxID, log, "Failed to delete unused warm sandbox")
+			deleteSandboxBounded(d.sandboxMgr, sandboxID, rc.log, "Failed to delete unused warm sandbox")
 		}
-		log.Error(err, "Failed to resolve egress for TaskAgent")
+		rc.log.Error(err, "Failed to resolve egress for TaskAgent")
 		http.Error(w, "egress not ready", http.StatusServiceUnavailable)
-		return
+		return nil, "", EgressBundle{}, false
 	}
 
 	if !warmHit {
-		sandboxID, err = newSandboxID(sandboxIDPrefixTask, ns, name)
+		sandboxID, err = newSandboxID(sandboxIDPrefixTask, rc.ns, rc.name)
 		if err != nil {
-			log.Error(err, "Failed to generate sandbox id")
+			rc.log.Error(err, "Failed to generate sandbox id")
 			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+			return nil, "", EgressBundle{}, false
 		}
-		d.sandboxMgr.Purge(ctx, sandboxID)
-		sb, err = d.sandboxMgr.Create(ctx, sandbox.CreateRequest{
+		d.sandboxMgr.Purge(rc.ctx, sandboxID)
+		sb, err = d.sandboxMgr.Create(rc.ctx, sandbox.CreateRequest{
 			ID:        sandboxID,
-			AgentRef:  name,
-			Identity:  identity,
+			AgentRef:  rc.name,
+			Identity:  rc.identity,
 			CAPEM:     bundle.CAPEM,
-			Sandbox:   rev.Spec.AgentSandbox,
-			Resources: ta.Spec.Resources,
-			State:     ta.Spec.State,
+			Sandbox:   rc.rev.Spec.AgentSandbox,
+			Resources: rc.ta.Spec.Resources,
+			State:     rc.ta.Spec.State,
 			Stdio:     true,
 		})
 		if err != nil {
 			if errors.Is(err, sandbox.ErrStateOverLimit) {
-				log.Info("Refusing dispatch — agent state over size limit", "err", err)
+				rc.log.Info("Refusing dispatch — agent state over size limit", "err", err)
 				http.Error(w, "agent state over size limit", http.StatusInsufficientStorage)
-				return
+				return nil, "", EgressBundle{}, false
 			}
-			log.Error(err, "Failed to create sandbox")
+			rc.log.Error(err, "Failed to create sandbox")
 			http.Error(w, "sandbox create failed", http.StatusInternalServerError)
-			return
+			return nil, "", EgressBundle{}, false
 		}
 	}
-	defer deleteSandboxBounded(d.sandboxMgr, sandboxID, log, "Failed to delete sandbox")
+	return sb, sandboxID, bundle, true
+}
+
+// applyEgressAndInvocation pushes the bundle's Backends/Policy and
+// the per-dispatch InvocationID onto the sandbox's egress state
+// slot. SetInvocationID is mandatory on the warm path (the slot was
+// created at fill time with no invocation) and a no-op rewrite on
+// the cold path — same call shape keeps the two paths identical.
+// Errors are logged but not surfaced; the per-dial fallback in the
+// egress bridge handles missing state gracefully.
+func (d *Dispatcher) applyEgressAndInvocation(rc *reqCtx, sandboxID sandbox.SandboxID, bundle EgressBundle) {
 	if len(bundle.Backends) > 0 {
 		if err := d.sandboxMgr.SetEgressBackends(sandboxID, bundle.Backends); err != nil {
-			log.Error(err, "Set egress backends failed")
+			rc.log.Error(err, "Set egress backends failed")
 		}
 	}
 	if bundle.Policy != nil {
 		if err := d.sandboxMgr.SetEgressPolicy(sandboxID, bundle.Policy); err != nil {
-			log.Error(err, "Set egress policy failed")
+			rc.log.Error(err, "Set egress policy failed")
 		}
 	}
-	// Stamp this dispatch's InvocationID into the shared
-	// RevisionStack's per-sandbox slot. Mandatory on the warm path
-	// (slot was created at fill time with no invocation) and a no-op
-	// rewrite on the cold path (Create already stamped Identity, but
-	// the per-dial lookup reads from the slot regardless — rewriting
-	// here keeps cold and warm code paths identical).
-	if err := d.sandboxMgr.SetInvocationID(sandboxID, invocationID); err != nil {
-		log.Error(err, "Set invocation id failed")
+	if err := d.sandboxMgr.SetInvocationID(sandboxID, rc.invocationID); err != nil {
+		rc.log.Error(err, "Set invocation id failed")
+	}
+}
+
+// startAndSetupDelivery buffers the request body, Starts the
+// sandbox, wires the delivery transport (Stdin envelope vs Metadata
+// registry register), and arms the response capture (direct stream
+// vs CE-wrap buffer vs Metadata response wait). Writes HTTP errors
+// and returns (nil, false) on any setup failure.
+//
+// Returned deliveryState owns mdUnregister (must be defer-called by
+// ServeHTTP) and stdinErr (drained by ServeHTTP at end so the stdin
+// write goroutine doesn't leak).
+func (d *Dispatcher) startAndSetupDelivery(w http.ResponseWriter, r *http.Request, rc *reqCtx, sb *sandbox.Instance, sandboxID sandbox.SandboxID) (*deliveryState, bool) {
+	mode := clrkv1alpha1.AgentDeliveryStdin
+	if rc.ta.Spec.Delivery != nil && rc.ta.Spec.Delivery.Mode != "" {
+		mode = rc.ta.Spec.Delivery.Mode
+	}
+	ceAttrs := cloudevents.AttrsFromRequest(r, &rc.ta)
+	ds := &deliveryState{
+		mode:         mode,
+		wrapResponse: strings.EqualFold(r.Header.Get("Accept"), cloudevents.MediaType),
+		ceID:         ceAttrs[cloudevents.AttrID],
 	}
 
-	// Resolve the delivery transport. Stdin (default) writes a CE
-	// JSON envelope to the agent's stdin; Metadata closes stdin and
-	// exposes the request via the per-sandbox IMDS HTTP service.
-	deliveryMode := clrkv1alpha1.AgentDeliveryStdin
-	if ta.Spec.Delivery != nil && ta.Spec.Delivery.Mode != "" {
-		deliveryMode = ta.Spec.Delivery.Mode
-	}
-
-	// CE attribute set is shared by both transports — Stdin folds it
-	// into the JSON envelope, Metadata serves it via /v1/event headers.
-	ceAttrs := cloudevents.AttrsFromRequest(r, &ta)
-	ceID := ceAttrs[cloudevents.AttrID]
-	wrapResponse := strings.EqualFold(r.Header.Get("Accept"), cloudevents.MediaType)
-
-	// Buffer the request body once. Both delivery modes need the
-	// payload in-memory to produce the envelope/serve it from /v1/event.
 	bodyBytes, err := readBodyBounded(r.Body, requestBodyLimit)
 	if err != nil {
-		log.Error(err, "Failed to read request body")
+		rc.log.Error(err, "Failed to read request body")
 		http.Error(w, "request body read failed", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 
-	if err := d.sandboxMgr.Start(ctx, sandboxID); err != nil {
-		log.Error(err, "Failed to start sandbox")
+	if err := d.sandboxMgr.Start(rc.ctx, sandboxID); err != nil {
+		rc.log.Error(err, "Failed to start sandbox")
 		http.Error(w, "sandbox start failed", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 
-	// Per-mode request delivery + response capture.
-	var (
-		mdEntry      *metadata.Entry
-		mdUnregister func()
-	)
-	switch deliveryMode {
+	// Per-mode request delivery.
+	switch mode {
 	case clrkv1alpha1.AgentDeliveryMetadata:
-		mdEntry = metadata.NewEntry(ceID, r.Header.Get("Content-Type"), bodyBytes, ceAttrs)
+		ds.mdEntry = metadata.NewEntry(ds.ceID, r.Header.Get("Content-Type"), bodyBytes, ceAttrs)
 		if d.metaReg == nil {
 			http.Error(w, "metadata delivery not enabled", http.StatusInternalServerError)
-			return
+			return nil, false
 		}
-		mdUnregister = d.metaReg.Register(string(sb.ID), mdEntry)
-		defer mdUnregister()
+		ds.mdUnregister = d.metaReg.Register(string(sb.ID), ds.mdEntry)
 		// Close stdin immediately so an agent that mistakenly reads
 		// from it sees EOF rather than blocking forever.
 		_ = sb.Stdin.Close()
 
-	case clrkv1alpha1.AgentDeliveryStdin:
-		fallthrough
 	default:
-		// Build a structured-mode CE JSON envelope and stream it to
-		// stdin in the background; close stdin on EOF so the agent's
-		// read returns. The envelope carries the request body (inline
-		// for JSON/text, base64 for everything else) plus all CE
-		// attributes including httpmethod/httpurl/httpquery — so a
-		// body-less GET still reaches the agent with the request line
-		// intact, which a raw-body pipe could not represent.
+		// Stdin (default). Build a structured-mode CE JSON envelope
+		// and stream it to stdin in the background; close stdin on
+		// EOF so the agent's read returns. The envelope carries the
+		// request body (inline for JSON/text, base64 for everything
+		// else) plus all CE attributes including httpmethod /
+		// httpurl / httpquery — so a body-less GET still reaches the
+		// agent with the request line intact, which a raw-body pipe
+		// could not represent.
 		envelope := buildCEEnvelope(ceAttrs, r.Header.Get("Content-Type"), bodyBytes)
-		stdinErr := make(chan error, 1)
+		ds.stdinErr = make(chan error, 1)
 		go func() {
 			_, werr := io.Copy(sb.Stdin, bytes.NewReader(envelope))
 			_ = sb.Stdin.Close()
-			stdinErr <- werr
+			ds.stdinErr <- werr
 		}()
-		defer func() { <-stdinErr }()
 	}
 
-	// Response-side wiring depends on transport. In Stdin mode we
-	// stream stdout straight back (or, if wrapResponse, buffer it
-	// for re-encoding). In Metadata mode we wait for the agent's
-	// POST /v1/response and serve its body.
-	flusher, _ := w.(http.Flusher)
-
-	var (
-		respCh       chan bool
-		stdoutBuf    *bytes.Buffer
-		stdoutBufErr chan error
-	)
+	// Response-side wiring depends on transport. Stdin mode streams
+	// stdout straight back (or, if wrapResponse, buffers it for
+	// re-encoding). Metadata mode waits for the agent's POST
+	// /v1/response and serves its body.
+	ds.flusher, _ = w.(http.Flusher)
 	switch {
-	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && !wrapResponse:
-		// Hot path: stream stdout straight to the wire.
+	case mode == clrkv1alpha1.AgentDeliveryStdin && !ds.wrapResponse:
 		w.Header().Set("Content-Type", "application/octet-stream")
-		respCh = make(chan bool, 1)
-		go func() { respCh <- streamWithFlush(w, sb.Stdout, flusher) }()
+		ds.respCh = make(chan bool, 1)
+		go func() { ds.respCh <- streamWithFlush(w, sb.Stdout, ds.flusher) }()
 
-	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && wrapResponse:
-		// Caller asked for CE response envelope; buffer stdout so we
-		// can re-encode after the agent exits with its full output.
-		stdoutBuf = &bytes.Buffer{}
-		stdoutBufErr = make(chan error, 1)
+	case mode == clrkv1alpha1.AgentDeliveryStdin && ds.wrapResponse:
+		ds.stdoutBuf = &bytes.Buffer{}
+		ds.stdoutBufErr = make(chan error, 1)
 		go func() {
-			_, copyErr := io.Copy(stdoutBuf, sb.Stdout)
-			stdoutBufErr <- copyErr
+			_, copyErr := io.Copy(ds.stdoutBuf, sb.Stdout)
+			ds.stdoutBufErr <- copyErr
 		}()
 
-	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata:
+	case mode == clrkv1alpha1.AgentDeliveryMetadata:
 		// Drain stdout to the per-agent log only — we don't surface
-		// it to the caller. The agent's POST /v1/response is the
-		// response body. Discard avoids a goroutine leak when the
+		// it to the caller. Discard avoids a goroutine leak when the
 		// agent writes anything to stdout.
 		go func() { _, _ = io.Copy(io.Discard, sb.Stdout) }()
 	}
+	return ds, true
+}
 
-	exitCode, waitErr := waitOrStop(ctx, d.sandboxMgr, sandboxID)
+// drainResponse writes the response body based on transport + exit
+// shape, then maps any non-success exit/wait/timeout outcome onto
+// the appropriate HTTP error. Headers may already be flushed when
+// this runs (streaming Stdin mode), in which case errors are folded
+// into the (best-effort) HeaderExitCode trailer rather than a fresh
+// http.Error.
+func (d *Dispatcher) drainResponse(w http.ResponseWriter, rc *reqCtx, ds *deliveryState, exitCode int, waitErr error) {
 	success := waitErr == nil && exitCode == 0
-
-	// Sandbox is gone; cancel any pending Metadata-mode response so
-	// downstream selects unblock.
-	if mdEntry != nil {
-		mdEntry.CancelIfPending()
-	}
-
 	wroteAnyBytes := false
 
 	switch {
-	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && !wrapResponse:
-		wroteAnyBytes = <-respCh
+	case ds.mode == clrkv1alpha1.AgentDeliveryStdin && !ds.wrapResponse:
+		wroteAnyBytes = <-ds.respCh
 
-	case deliveryMode == clrkv1alpha1.AgentDeliveryStdin && wrapResponse:
-		<-stdoutBufErr
+	case ds.mode == clrkv1alpha1.AgentDeliveryStdin && ds.wrapResponse:
+		<-ds.stdoutBufErr
 		w.Header().Set("Content-Type", cloudevents.MediaType)
-		respEnv := buildCEResponseEnvelope(ceID, "application/octet-stream", stdoutBuf.Bytes())
+		respEnv := buildCEResponseEnvelope(ds.ceID, "application/octet-stream", ds.stdoutBuf.Bytes())
 		if _, werr := w.Write(respEnv); werr == nil {
 			wroteAnyBytes = true
-			if flusher != nil {
-				flusher.Flush()
+			if ds.flusher != nil {
+				ds.flusher.Flush()
 			}
 		}
 
-	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata:
-		respBody, respCT, delivered := mdEntry.Response()
+	case ds.mode == clrkv1alpha1.AgentDeliveryMetadata:
+		respBody, respCT, delivered := ds.mdEntry.Response()
 		if !delivered {
 			// Agent exited without posting a response. Fall through
 			// to the exit-code error path below.
@@ -549,9 +575,9 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if respCT == "" {
 			respCT = "application/octet-stream"
 		}
-		if wrapResponse {
+		if ds.wrapResponse {
 			w.Header().Set("Content-Type", cloudevents.MediaType)
-			env := buildCEResponseEnvelope(ceID, respCT, respBody)
+			env := buildCEResponseEnvelope(ds.ceID, respCT, respBody)
 			if _, werr := w.Write(env); werr == nil {
 				wroteAnyBytes = true
 			}
@@ -561,20 +587,20 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				wroteAnyBytes = true
 			}
 		}
-		if flusher != nil {
-			flusher.Flush()
+		if ds.flusher != nil {
+			ds.flusher.Flush()
 		}
 	}
 
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
-		// Headers may already be flushed if we streamed any bytes; in
-		// that case the trailer is the only signal we can give.
+	case rc.ctx.Err() == context.DeadlineExceeded:
+		// Headers may already be flushed if we streamed any bytes;
+		// in that case the trailer is the only signal we can give.
 		if !wroteAnyBytes {
 			http.Error(w, "execution timed out", http.StatusGatewayTimeout)
 		}
 	case waitErr != nil:
-		log.Error(waitErr, "Sandbox wait failed")
+		rc.log.Error(waitErr, "Sandbox wait failed")
 		if !wroteAnyBytes {
 			http.Error(w, "sandbox wait failed", http.StatusInternalServerError)
 		}
@@ -583,11 +609,13 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !wroteAnyBytes {
 			http.Error(w, fmt.Sprintf("agent exited with code %d", exitCode), http.StatusInternalServerError)
 		}
-		// If we already streamed bytes, the response is whatever's on
-		// the wire — exit code lives in the (best-effort) header above.
-	case deliveryMode == clrkv1alpha1.AgentDeliveryMetadata && !wroteAnyBytes:
-		// Agent succeeded without posting a response in Metadata mode.
-		// Treat as a server-side bug — the agent should always POST.
+		// If we already streamed bytes, the response is whatever's
+		// on the wire — exit code lives in the (best-effort) header
+		// above.
+	case ds.mode == clrkv1alpha1.AgentDeliveryMetadata && !wroteAnyBytes:
+		// Agent succeeded without posting a response in Metadata
+		// mode. Treat as a server-side bug — the agent should
+		// always POST.
 		http.Error(w, "agent did not post a response", http.StatusBadGateway)
 	}
 }

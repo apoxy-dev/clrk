@@ -54,15 +54,6 @@ type Instance struct {
 	initStr string
 
 	CreatedAt time.Time
-
-	// IdleTimer is the AfterFunc that evicts this slot after
-	// WarmPoolIdleTTL elapses. Nil on cold-path sandboxes and on
-	// warm sandboxes once Acquire has Stop'd the timer.
-	//
-	// Exported so the warm pool (in package agents) can manage the
-	// timer lifecycle. Commit 3 of the refactor migrates this off
-	// Instance entirely into a warmSlot wrapper in agents/.
-	IdleTimer *time.Timer
 }
 
 // stdioPipes groups the six worker-side stdio plumbing FDs of a

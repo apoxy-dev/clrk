@@ -48,6 +48,29 @@ type warmTarget struct {
 	idleTTL time.Duration
 }
 
+// warmSlot is the per-WarmKey state. Collapses the prior parallel
+// pools / targets / filling maps into one keyed structure so per-key
+// mutations don't need three coordinated map writes under the same
+// lock. entries is the LIFO of warmed sandboxes (with their own
+// per-entry idle timers); target is the most recent desired shape;
+// filling indicates whether a fillLoop goroutine is currently
+// running for this key.
+type warmSlot struct {
+	entries []*warmEntry
+	target  warmTarget
+	filling bool
+}
+
+// warmEntry pairs a warmed sandbox with the AfterFunc that evicts it
+// on idleTTL elapse. The timer used to live on sandbox.Instance.IdleTimer
+// but only the warm pool ever read or mutated it; moving it here
+// removes the cross-package mutation point on Instance and keeps the
+// warm pool's per-slot state local.
+type warmEntry struct {
+	sb        *sandbox.Instance
+	idleTimer *time.Timer
+}
+
 // WarmPool keeps a per-(ns,agent,revision) LIFO of pre-Created
 // sandboxes. A warm sandbox skips image pull, libcontainer Create,
 // rootfs mount, TAP+netns provisioning, and CA staging on the request
@@ -84,9 +107,7 @@ type WarmPool struct {
 	maxPerKey  int
 
 	mu       sync.Mutex
-	pools    map[WarmKey][]*sandbox.Instance
-	targets  map[WarmKey]warmTarget
-	filling  map[WarmKey]bool
+	slots    map[WarmKey]*warmSlot
 	knownKey map[types.NamespacedName]WarmKey // TA NN → last-seen WarmKey
 
 	stopOnce sync.Once
@@ -116,9 +137,7 @@ func NewWarmPool(
 		poolName:   poolName,
 		podName:    podName,
 		maxPerKey:  maxPerKey,
-		pools:      make(map[WarmKey][]*sandbox.Instance),
-		targets:    make(map[WarmKey]warmTarget),
-		filling:    make(map[WarmKey]bool),
+		slots:      make(map[WarmKey]*warmSlot),
 		knownKey:   make(map[types.NamespacedName]WarmKey),
 		stopCh:     make(chan struct{}),
 	}
@@ -142,7 +161,7 @@ func (w *WarmPool) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile is the per-TaskAgent reconcile entry. Drives per-key
-// pool state forward by evicting stale slots and kicking fills
+// slot state forward by evicting stale entries and kicking fills
 // toward target.
 func (w *WarmPool) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ta clrkv1alpha1.TaskAgent
@@ -180,7 +199,7 @@ func (w *WarmPool) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	newKey := WarmKey{Namespace: ta.Namespace, Agent: ta.Name, Revision: ta.Status.LatestReadyRevisionName}
 
 	var (
-		toEvict []*sandbox.Instance
+		toEvict []*warmEntry
 		toFill  bool
 	)
 
@@ -192,19 +211,25 @@ func (w *WarmPool) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	default:
 	}
 	if old, ok := w.knownKey[req.NamespacedName]; ok && old != newKey {
-		toEvict = append(toEvict, w.pools[old]...)
-		delete(w.pools, old)
-		delete(w.targets, old)
+		if oldSlot := w.slots[old]; oldSlot != nil {
+			toEvict = append(toEvict, oldSlot.entries...)
+		}
+		delete(w.slots, old)
 	}
 	w.knownKey[req.NamespacedName] = newKey
-	w.targets[newKey] = warmTarget{size: size, idleTTL: idleTTL}
-	if len(w.pools[newKey]) < size {
+	slot := w.slots[newKey]
+	if slot == nil {
+		slot = &warmSlot{}
+		w.slots[newKey] = slot
+	}
+	slot.target = warmTarget{size: size, idleTTL: idleTTL}
+	if len(slot.entries) < size {
 		toFill = true
 	}
 	w.mu.Unlock()
 
-	for _, sb := range toEvict {
-		w.teardownSlot(sb)
+	for _, e := range toEvict {
+		w.teardownEntry(e)
 	}
 	if len(toEvict) > 0 {
 		w.notifier.broadcast()
@@ -215,7 +240,7 @@ func (w *WarmPool) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	return ctrl.Result{}, nil
 }
 
-// evictByName drains the pool tied to a TaskAgent. Used on TA delete,
+// evictByName drains the slot tied to a TaskAgent. Used on TA delete,
 // pool-ref change, WarmPoolSize→0, and LatestReadyRevisionName→"".
 func (w *WarmPool) evictByName(nn types.NamespacedName) {
 	w.mu.Lock()
@@ -224,66 +249,69 @@ func (w *WarmPool) evictByName(nn types.NamespacedName) {
 		w.mu.Unlock()
 		return
 	}
-	pool := w.pools[key]
-	delete(w.pools, key)
-	delete(w.targets, key)
+	slot := w.slots[key]
+	var entries []*warmEntry
+	if slot != nil {
+		entries = slot.entries
+	}
+	delete(w.slots, key)
 	delete(w.knownKey, nn)
 	w.mu.Unlock()
 
-	for _, sb := range pool {
-		w.teardownSlot(sb)
+	for _, e := range entries {
+		w.teardownEntry(e)
 	}
-	if len(pool) > 0 {
+	if len(entries) > 0 {
 		w.notifier.broadcast()
 	}
 }
 
-// teardownSlot is the single place that releases a warm sandbox:
+// teardownEntry is the single place that releases a warm entry:
 // cancel its idle timer (if any) and tear down the underlying
-// libcontainer state. Callers must have already removed the slot
-// from w.pools so the slot can't be Acquired or expired in parallel.
-func (w *WarmPool) teardownSlot(sb *sandbox.Instance) {
-	if sb.IdleTimer != nil {
-		sb.IdleTimer.Stop()
+// libcontainer state. Callers must have already removed the entry
+// from its slot so it can't be Acquired or expired in parallel.
+func (w *WarmPool) teardownEntry(e *warmEntry) {
+	if e.idleTimer != nil {
+		e.idleTimer.Stop()
 	}
-	w.deleteWarm(sb.ID)
+	w.deleteWarm(e.sb.ID)
 }
 
-// Acquire returns a warm sandbox for key, or nil if the pool is
+// Acquire returns a warm sandbox for key, or nil if the slot is
 // empty. Caller owns the returned sandbox lifecycle (must Delete it
 // after use, same as a cold-path Create). Triggers a background fill
-// so the pool is ready for the next request before the next
+// so the slot is ready for the next request before the next
 // reconcile.
 func (w *WarmPool) Acquire(key WarmKey) *sandbox.Instance {
 	w.mu.Lock()
-	pool := w.pools[key]
-	if len(pool) == 0 {
+	slot := w.slots[key]
+	if slot == nil || len(slot.entries) == 0 {
 		w.mu.Unlock()
 		return nil
 	}
 	// LIFO: most-recently-warmed sandbox is the most-likely-fresh
 	// (kernel state, page cache, etc.).
-	last := len(pool) - 1
-	sb := pool[last]
-	pool[last] = nil
-	w.pools[key] = pool[:last]
+	last := len(slot.entries) - 1
+	entry := slot.entries[last]
+	slot.entries[last] = nil
+	slot.entries = slot.entries[:last]
 	w.mu.Unlock()
 
-	// Cancel idle expiry. If the timer beat us, expireWarm finds the
-	// slot gone (we already removed it) and bails.
-	if sb.IdleTimer != nil {
-		sb.IdleTimer.Stop()
-		sb.IdleTimer = nil
+	// Cancel idle expiry. If the timer beat us, expireWarm finds
+	// the entry already gone and bails.
+	if entry.idleTimer != nil {
+		entry.idleTimer.Stop()
+		entry.idleTimer = nil
 	}
 
 	w.notifier.broadcast()
 	w.kickFill(key)
-	return sb
+	return entry.sb
 }
 
 // kickFill ensures a fillLoop is running for key. A fillLoop tops the
-// pool up toward target one sandbox at a time and exits when the
-// pool reaches target or any error occurs. Concurrent kickFill calls
+// slot up toward target one sandbox at a time and exits when the
+// slot reaches target or any error occurs. Concurrent kickFill calls
 // for the same key dedupe to a single goroutine — the running loop
 // re-reads target on each iteration so subsequent Acquires are
 // covered without spawning more goroutines.
@@ -295,28 +323,27 @@ func (w *WarmPool) kickFill(key WarmKey) {
 		return
 	default:
 	}
-	if w.filling[key] {
+	slot := w.slots[key]
+	if slot == nil || slot.target.size == 0 || slot.filling {
 		w.mu.Unlock()
 		return
 	}
-	if w.targets[key].size == 0 {
-		w.mu.Unlock()
-		return
-	}
-	w.filling[key] = true
+	slot.filling = true
 	w.mu.Unlock()
 	go w.fillLoop(key)
 }
 
-// fillLoop creates warm sandboxes one at a time until pool reaches
-// target, target drops to zero (revision drift), an error occurs, or
-// stopCh fires. Bails on error rather than tight-looping; the next
-// Acquire or Reconcile will re-kick.
+// fillLoop creates warm sandboxes one at a time until the slot
+// reaches target, target drops to zero (revision drift), an error
+// occurs, or stopCh fires. Bails on error rather than tight-looping;
+// the next Acquire or Reconcile will re-kick.
 func (w *WarmPool) fillLoop(key WarmKey) {
 	log := ctrl.Log.WithName("warmpool.fill").WithValues("warmKey", key.String())
 	defer func() {
 		w.mu.Lock()
-		delete(w.filling, key)
+		if slot := w.slots[key]; slot != nil {
+			slot.filling = false
+		}
 		w.mu.Unlock()
 	}()
 
@@ -328,15 +355,20 @@ func (w *WarmPool) fillLoop(key WarmKey) {
 		}
 
 		w.mu.Lock()
-		have := len(w.pools[key])
-		target := w.targets[key]
+		slot := w.slots[key]
+		if slot == nil {
+			w.mu.Unlock()
+			return
+		}
+		have := len(slot.entries)
+		target := slot.target
 		w.mu.Unlock()
 		if target.size == 0 || have >= target.size {
 			return
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), warmFillTimeout)
-		sb, err := w.fillOne(ctx, key, target.idleTTL)
+		entry, err := w.fillOne(ctx, key, target.idleTTL)
 		cancel()
 		if err != nil {
 			log.V(1).Info("Warm fill skipped", "err", err)
@@ -347,29 +379,30 @@ func (w *WarmPool) fillLoop(key WarmKey) {
 		select {
 		case <-w.stopCh:
 			w.mu.Unlock()
-			w.teardownSlot(sb)
+			w.teardownEntry(entry)
 			return
 		default:
 		}
-		// Pool might have been drained by Reconcile (TA deleted /
+		// Slot might have been dropped by Reconcile (TA deleted /
 		// revision rolled) while fillOne ran. Drop the freshly-warmed
 		// sandbox on the floor rather than reviving a now-stale key.
-		if _, ok := w.targets[key]; !ok {
+		slot = w.slots[key]
+		if slot == nil {
 			w.mu.Unlock()
-			w.teardownSlot(sb)
+			w.teardownEntry(entry)
 			return
 		}
-		w.pools[key] = append(w.pools[key], sb)
+		slot.entries = append(slot.entries, entry)
 		w.mu.Unlock()
 		w.notifier.broadcast()
-		log.Info("Warmed sandbox", "sandboxID", sb.ID)
+		log.Info("Warmed sandbox", "sandboxID", entry.sb.ID)
 	}
 }
 
 // fillOne resolves the TA's current spec, creates one warm sandbox
 // for key, and schedules its idle-expiry timer. Does NOT touch
-// w.pools — caller appends.
-func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Duration) (*sandbox.Instance, error) {
+// w.slots — caller appends.
+func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Duration) (*warmEntry, error) {
 	var ta clrkv1alpha1.TaskAgent
 	if err := w.client.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: key.Agent}, &ta); err != nil {
 		return nil, fmt.Errorf("get TaskAgent: %w", err)
@@ -414,19 +447,24 @@ func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Durati
 		return nil, fmt.Errorf("sandbox Create: %w", err)
 	}
 
-	sb.IdleTimer = time.AfterFunc(idleTTL, func() { w.expireWarm(key, sb) })
-	return sb, nil
+	entry := &warmEntry{sb: sb}
+	entry.idleTimer = time.AfterFunc(idleTTL, func() { w.expireWarm(key, entry) })
+	return entry, nil
 }
 
-// expireWarm is the AfterFunc callback for a warm slot's idle timer.
-// If the slot is still in the pool, remove it and tear it down; if
-// Acquire (or a Reconcile evict) already pulled it, no-op.
-func (w *WarmPool) expireWarm(key WarmKey, sb *sandbox.Instance) {
+// expireWarm is the AfterFunc callback for a warm entry's idle
+// timer. If the entry is still in the slot, remove and tear it down;
+// if Acquire (or a Reconcile evict) already pulled it, no-op.
+func (w *WarmPool) expireWarm(key WarmKey, entry *warmEntry) {
 	w.mu.Lock()
-	pool := w.pools[key]
+	slot := w.slots[key]
+	if slot == nil {
+		w.mu.Unlock()
+		return
+	}
 	idx := -1
-	for i, p := range pool {
-		if p == sb {
+	for i, e := range slot.entries {
+		if e == entry {
 			idx = i
 			break
 		}
@@ -435,11 +473,11 @@ func (w *WarmPool) expireWarm(key WarmKey, sb *sandbox.Instance) {
 		w.mu.Unlock()
 		return
 	}
-	w.pools[key] = append(pool[:idx], pool[idx+1:]...)
+	slot.entries = append(slot.entries[:idx], slot.entries[idx+1:]...)
 	w.mu.Unlock()
 
-	ctrl.Log.WithName("warmpool").Info("Warm slot expired", "warmKey", key.String(), "sandboxID", sb.ID)
-	w.deleteWarm(sb.ID)
+	ctrl.Log.WithName("warmpool").Info("Warm slot expired", "warmKey", key.String(), "sandboxID", entry.sb.ID)
+	w.deleteWarm(entry.sb.ID)
 	w.notifier.broadcast()
 	w.kickFill(key)
 }
@@ -457,11 +495,11 @@ func (w *WarmPool) StopFill() {
 // sandboxes are guaranteed to be unconsumed.
 func (w *WarmPool) DestroyAll(ctx context.Context) {
 	w.mu.Lock()
-	var all []*sandbox.Instance
-	for _, pool := range w.pools {
-		all = append(all, pool...)
+	var all []*warmEntry
+	for _, slot := range w.slots {
+		all = append(all, slot.entries...)
 	}
-	w.pools = make(map[WarmKey][]*sandbox.Instance)
+	w.slots = make(map[WarmKey]*warmSlot)
 	w.mu.Unlock()
 
 	if len(all) == 0 {
@@ -470,18 +508,18 @@ func (w *WarmPool) DestroyAll(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	wg.Add(len(all))
-	for _, sb := range all {
-		sb := sb
+	for _, e := range all {
+		e := e
 		go func() {
 			defer wg.Done()
-			w.teardownSlot(sb)
+			w.teardownEntry(e)
 		}()
 	}
 	wg.Wait()
 	w.notifier.broadcast()
 }
 
-// deleteWarm wraps SandboxManager.Delete with a bounded context so a
+// deleteWarm wraps SandboxRuntime.Delete with a bounded context so a
 // hung libcontainer destroy can't stall a fill loop or shutdown.
 func (w *WarmPool) deleteWarm(id sandbox.SandboxID) {
 	ctx, cancel := context.WithTimeout(context.Background(), warmDeleteTimeout)
