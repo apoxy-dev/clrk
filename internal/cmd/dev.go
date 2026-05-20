@@ -57,6 +57,11 @@ type devOpts struct {
 	secrets         []string
 	parsedSecrets   []secretSpec
 	otelEndpoint    string
+	// gatewayIP is the IP a Pod on drivers.NetworkName uses to reach
+	// the host. Resolved once via drivers.HostGatewayIP and injected as
+	// the host.docker.internal HostAlias on the cm PodSpec so OTLP
+	// records reach the devtui receiver bound on the host.
+	gatewayIP string
 }
 
 func newDevCmd() *cobra.Command {
@@ -169,6 +174,11 @@ func runDev(ctx context.Context, o *devOpts) error {
 	if err := drivers.EnsureNetwork(ctx); err != nil {
 		return fmt.Errorf("ensuring docker network: %w", err)
 	}
+	gw, err := drivers.HostGatewayIP(ctx, drivers.NetworkName)
+	if err != nil {
+		return fmt.Errorf("resolving docker host-gateway: %w", err)
+	}
+	o.gatewayIP = gw
 	receiver, err := devotel.Start(ctx, fmt.Sprintf("0.0.0.0:%d", devOtelPort))
 	if err != nil {
 		return fmt.Errorf("starting OTel receiver on :%d: %w", devOtelPort, err)
@@ -394,7 +404,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 
 	if err := withStatus(prog, controllerManagerComponent, func() error {
-		if err := bootstrapControllerManager(ctx, state.cluster, o.controllerImage, k8sPullPolicy(o.pull)); err != nil {
+		if err := bootstrapControllerManager(ctx, state.cluster, o.controllerImage, k8sPullPolicy(o.pull), o.otelEndpoint, o.gatewayIP); err != nil {
 			return fmt.Errorf("bootstrapping controller-manager: %w", err)
 		}
 		slog.Info("Controller-manager Deployment applied; waiting Available")

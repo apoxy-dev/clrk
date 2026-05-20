@@ -17,16 +17,16 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 )
 
-// devOTLPEndpointEnv is set by `clrk dev` on the controller-manager
+// DevOTLPEndpointEnv is set by `clrk dev` on the controller-manager
 // container. When per-EG OTLP endpoint is empty and this env is set,
 // the registry routes records to the dev receiver instead of slogSink.
 // Production deployments don't set this env, so behaviour is unchanged.
-const devOTLPEndpointEnv = "CLRK_DEV_OTEL_ENDPOINT"
+const DevOTLPEndpointEnv = "CLRK_DEV_OTEL_ENDPOINT"
 
 // devOTLPEndpoint is captured once at process start. The env doesn't
 // change at runtime; reading it on every per-stream sinkRegistry.get
 // would be needless work.
-var devOTLPEndpoint = strings.TrimSpace(os.Getenv(devOTLPEndpointEnv))
+var devOTLPEndpoint = strings.TrimSpace(os.Getenv(DevOTLPEndpointEnv))
 
 // sinkShutdownTimeout bounds how long we wait for a replaced sink's
 // background workers to flush during cache rebuild. OTLP exporters use

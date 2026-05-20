@@ -3,10 +3,14 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +30,16 @@ import (
 	"github.com/tilt-dev/ctlptl/pkg/api/k3dv1alpha5"
 	ctlptlcluster "github.com/tilt-dev/ctlptl/pkg/cluster"
 	ctlptlregistry "github.com/tilt-dev/ctlptl/pkg/registry"
+)
+
+// RegistryDataVolume is the docker volume that backs the local
+// registry's RegistryDataMount. ctlptl v0.9.0's Registry API has no
+// volume field; we attach this volume post-Apply (see
+// ensurePersistentRegistry) so pushed images survive `clrk dev`
+// stop/start cycles.
+const (
+	RegistryDataVolume = "clrk-registry-data"
+	RegistryDataMount  = "/var/lib/registry"
 )
 
 const (
@@ -164,6 +178,15 @@ func (d *ClusterDriver) Start(ctx context.Context) error {
 	if _, err := d.clusterCtl.Apply(ctx, clusterSpec); err != nil {
 		d.dumpBuffers("cluster.Apply")
 		return fmt.Errorf("applying cluster %q: %w", ClusterName, err)
+	}
+
+	// ctlptl's cluster.Apply tears down and re-creates the registry
+	// container as part of wiring it to the new k3d cluster, so the
+	// volume swap has to land *after* cluster.Apply — otherwise the
+	// container we just created with the named volume gets replaced
+	// by ctlptl's freshly-spawned anonymous-volume variant.
+	if err := ensurePersistentRegistry(ctx, RegistryName, RegistryDataVolume, d.registryHostPort); err != nil {
+		return fmt.Errorf("persisting registry storage: %w", err)
 	}
 
 	if err := d.writeKubeconfigs(ctx); err != nil {
@@ -352,6 +375,114 @@ func writeMinified(merged *clientcmdapi.Config, ctxName, path string, rewrite fu
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+// ensurePersistentRegistry attaches a named docker volume to the
+// registry container ctlptl just brought up, so `/var/lib/registry`
+// survives the next `clrk dev` stop/start cycle. ctlptl v0.9.0's
+// Registry type has no Volumes field, so the only way to inject one is
+// to recreate the container post-Apply with the same image / labels /
+// network / port mapping plus the mount. Idempotent: re-runs on the
+// same boot detect the existing mount and no-op.
+//
+// After recreate we block until the new registry answers `/v2/` on the
+// host port — without that wait, the next bring-up step
+// (`bootstrapControllerManager`) can race the registry's HTTP listener
+// and force the cm Pod through an ImagePullBackOff retry cycle.
+//
+// On Docker Desktop for Mac the volume lives inside the Linux VM, not
+// on the user's host filesystem; that's fine — we just need persistence
+// across container destroy, not host-side inspection.
+func ensurePersistentRegistry(ctx context.Context, container, volume string, hostPort int) error {
+	if out, err := exec.CommandContext(ctx, "docker", "volume", "create", volume).CombinedOutput(); err != nil {
+		return fmt.Errorf("creating docker volume %q: %w: %s", volume, err, bytes.TrimSpace(out))
+	}
+	image, labels, hasMount, err := inspectRegistry(ctx, container, volume)
+	if err != nil {
+		return err
+	}
+	if !hasMount {
+		if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", container).CombinedOutput(); err != nil {
+			return fmt.Errorf("removing registry container %q: %w: %s", container, err, bytes.TrimSpace(out))
+		}
+		args := []string{
+			"run", "-d",
+			"--name", container,
+			"--restart", "always",
+			"--network", NetworkName,
+			"-p", fmt.Sprintf("%d:5000", hostPort),
+			"-v", volume + ":" + RegistryDataMount,
+		}
+		for k, v := range labels {
+			args = append(args, "--label", k+"="+v)
+		}
+		args = append(args, image)
+		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("recreating registry container with volume: %w: %s", err, bytes.TrimSpace(out))
+		}
+	}
+	return waitRegistryReady(ctx, hostPort, 30*time.Second)
+}
+
+// waitRegistryReady polls the registry's /v2/ endpoint until it
+// returns 200, eliminating the rm → run → first-serve gap that would
+// otherwise cause the immediately-following cm Deployment to land in
+// ImagePullBackOff and wait out kubelet's retry backoff.
+func waitRegistryReady(ctx context.Context, hostPort int, timeout time.Duration) error {
+	url := fmt.Sprintf("http://127.0.0.1:%d/v2/", hostPort)
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("registry at %s never became ready within %s", url, timeout)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// inspectRegistry pulls image, labels, and mount presence from one
+// docker inspect — the recreate path needs all three before destroying
+// the existing container.
+func inspectRegistry(ctx context.Context, container, volume string) (image string, labels map[string]string, hasMount bool, err error) {
+	want := volume + ":" + RegistryDataMount
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format",
+		`{{.Config.Image}}`+"\n"+
+			`{{json .Config.Labels}}`+"\n"+
+			`{{range .Mounts}}{{.Name}}:{{.Destination}}|{{end}}`,
+		container,
+	).Output()
+	if err != nil {
+		return "", nil, false, fmt.Errorf("inspecting registry container %q: %w", container, err)
+	}
+	parts := strings.SplitN(strings.TrimRight(string(out), "\n"), "\n", 3)
+	if len(parts) < 3 {
+		return "", nil, false, fmt.Errorf("unexpected docker inspect output: %q", out)
+	}
+	if err := json.Unmarshal([]byte(parts[1]), &labels); err != nil {
+		return "", nil, false, fmt.Errorf("parsing labels for %q: %w", container, err)
+	}
+	for _, m := range strings.Split(parts[2], "|") {
+		if strings.TrimSpace(m) == want {
+			hasMount = true
+			break
+		}
+	}
+	return strings.TrimSpace(parts[0]), labels, hasMount, nil
 }
 
 // dumpBuffers routes ctlptl's captured stdout/stderr through slog so a

@@ -15,6 +15,7 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/drivers"
+	"github.com/apoxy-dev/clrk/internal/extproc"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
@@ -43,7 +44,12 @@ var cmLabels = map[string]string{
 // The APIService points at port 8443 of this Service; kube-aggregator
 // follows the selector to the live cm pod, retiring the hand-managed
 // Endpoints object the docker-bridge flow used to need.
-func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDriver, image, pullPolicy string) error {
+//
+// gatewayIP becomes a hostAlias for `host.docker.internal` (k3d Pods
+// don't inherit Docker Desktop's /etc/hosts injection); otelEndpoint
+// surfaces as extproc.DevOTLPEndpointEnv so the cm's OTLP exporter
+// reaches the in-process devtui receiver.
+func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDriver, image, pullPolicy, otelEndpoint, gatewayIP string) error {
 	pull := corev1.PullPolicy(pullPolicy)
 	if pull == "" {
 		pull = corev1.PullIfNotPresent
@@ -90,6 +96,13 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 				ObjectMeta: metav1.ObjectMeta{Labels: cmLabels},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: cmAccountName,
+					// Docker Desktop injects host.docker.internal into the
+					// /etc/hosts of containers it spawns directly, but not
+					// into k3d-nested Pods — so we plant it ourselves.
+					HostAliases: []corev1.HostAlias{{
+						IP:        gatewayIP,
+						Hostnames: []string{"host.docker.internal"},
+					}},
 					Containers: []corev1.Container{{
 						Name:            "controller-manager",
 						Image:           image,
@@ -118,6 +131,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 							}},
+							{Name: extproc.DevOTLPEndpointEnv, Value: otelEndpoint},
 						},
 						Ports: []corev1.ContainerPort{
 							{Name: "apiserver", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},

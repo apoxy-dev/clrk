@@ -63,3 +63,37 @@ func EnsureNetwork(ctx context.Context) error {
 	}
 	return nil
 }
+
+// HostGatewayIP returns the IP that docker resolves the magic
+// "host-gateway" alias to for a container attached to the given network.
+// On Linux native docker this is the bridge gateway (which is the host).
+// On Docker Desktop for Mac/Windows it's the VPN-kit address that bridges
+// container traffic back to the host process. We discover it by spawning
+// a one-shot container on the same network with
+// `--add-host host.docker.internal:host-gateway` and parsing the
+// /etc/hosts entry docker writes — the only portable way to get the same
+// IP a k8s HostAlias entry needs.
+//
+// network must be the same docker network k3d's node is attached to —
+// otherwise on Linux the resolved IP is the gateway of a *different*
+// bridge and may not be on the routing path the in-cluster Pod uses.
+// On Docker Desktop the network choice doesn't affect the result.
+func HostGatewayIP(ctx context.Context, network string) (string, error) {
+	// Output() drops stderr so first-run image pull progress doesn't
+	// pollute the IP we parse from stdout. awk on /etc/hosts works in
+	// busybox shells where `getent` isn't available.
+	out, err := exec.CommandContext(ctx, "docker", "run", "--rm",
+		"--network", network,
+		"--add-host", "host.docker.internal:host-gateway",
+		"busybox:1.37",
+		"awk", "/host.docker.internal/ {print $1; exit}", "/etc/hosts",
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("resolving host-gateway IP via docker probe: %w", err)
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("docker did not resolve host-gateway alias")
+	}
+	return ip, nil
+}
