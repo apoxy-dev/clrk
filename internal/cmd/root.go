@@ -16,10 +16,11 @@ var (
 
 // RootCmd is the top-level `clrk` command.
 var RootCmd = &cobra.Command{
-	Use:           "clrk",
-	Short:         "CLRK agent sandbox runtime CLI",
-	SilenceUsage:  true,
-	SilenceErrors: true,
+	Use:               "clrk",
+	Short:             "CLRK agent sandbox runtime CLI",
+	SilenceUsage:      true,
+	SilenceErrors:     true,
+	DisableAutoGenTag: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return configureLogging()
 	},

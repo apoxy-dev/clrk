@@ -1,0 +1,600 @@
+## clrk
+
+CLRK agent sandbox runtime CLI
+
+### Options
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+  -h, --help               help for clrk
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk agents](#clrk-agents)	 - List and inspect DaemonAgents and TaskAgents
+* [clrk apply](#clrk-apply)	 - Server-side-apply CRDs against a clrk apiserver
+* [clrk config](#clrk-config)	 - Manage clrk cluster contexts at ~/.clrk/config
+* [clrk dev](#clrk-dev)	 - Run controller-manager and worker locally in Docker
+* [clrk pools](#clrk-pools)	 - List and inspect WorkerPools
+* [clrk secret](#clrk-secret)	 - Manage Kubernetes Secrets in dev/prod with the same UX
+
+
+
+## clrk agents
+
+List and inspect DaemonAgents and TaskAgents
+
+### Options
+
+```
+  -h, --help   help for agents
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+* [clrk agents get](#clrk-agents-get)	 - Show details for a single DaemonAgent or TaskAgent
+* [clrk agents list](#clrk-agents-list)	 - List DaemonAgents and TaskAgents
+* [clrk agents logs](#clrk-agents-logs)	 - Stream sandbox stdio for a DaemonAgent
+
+
+
+## clrk agents get
+
+Show details for a single DaemonAgent or TaskAgent
+
+```
+clrk agents get NAME [flags]
+```
+
+### Options
+
+```
+  -h, --help                help for get
+      --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string    Target namespace (default: kubeconfig context).
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk agents](#clrk-agents)	 - List and inspect DaemonAgents and TaskAgents
+
+
+
+## clrk agents list
+
+List DaemonAgents and TaskAgents
+
+```
+clrk agents list [flags]
+```
+
+### Options
+
+```
+  -A, --all-namespaces      List across all namespaces.
+  -h, --help                help for list
+      --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string    Target namespace (default: kubeconfig context).
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk agents](#clrk-agents)	 - List and inspect DaemonAgents and TaskAgents
+
+
+
+## clrk agents logs
+
+Stream sandbox stdio for a DaemonAgent
+
+```
+clrk agents logs NAME [flags]
+```
+
+### Options
+
+```
+  -f, --follow              Follow the log stream (kubectl-style; default false).
+  -h, --help                help for logs
+      --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string    Target namespace (default: kubeconfig context).
+      --tail int            Number of trailing lines to print (0 = entire log).
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk agents](#clrk-agents)	 - List and inspect DaemonAgents and TaskAgents
+
+
+
+## clrk apply
+
+Server-side-apply CRDs against a clrk apiserver
+
+### Synopsis
+
+Reads YAML/JSON manifests and server-side-applies each document against the cluster. Use --local to target the kubeconfig of the running `clrk dev` session under --clrk-dir.
+
+```
+clrk apply [flags]
+```
+
+### Options
+
+```
+  -f, --filename stringArray   YAML/JSON file or directory to apply (repeatable; positional args also accepted).
+  -h, --help                   help for apply
+      --kubeconfig string      Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev         Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host by default).
+  -R, --recursive              Recurse into subdirectories.
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+
+
+
+## clrk config
+
+Manage clrk cluster contexts at ~/.clrk/config
+
+### Options
+
+```
+  -h, --help   help for config
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+* [clrk config current-context](#clrk-config-current-context)	 - Print the name of the currently selected context
+* [clrk config get-contexts](#clrk-config-get-contexts)	 - List configured contexts
+* [clrk config set-context](#clrk-config-set-context)	 - Add or update a context
+* [clrk config use-context](#clrk-config-use-context)	 - Set the current context
+
+
+
+## clrk config current-context
+
+Print the name of the currently selected context
+
+```
+clrk config current-context [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for current-context
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk config](#clrk-config)	 - Manage clrk cluster contexts at ~/.clrk/config
+
+
+
+## clrk config get-contexts
+
+List configured contexts
+
+```
+clrk config get-contexts [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for get-contexts
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk config](#clrk-config)	 - Manage clrk cluster contexts at ~/.clrk/config
+
+
+
+## clrk config set-context
+
+Add or update a context
+
+```
+clrk config set-context NAME [flags]
+```
+
+### Options
+
+```
+  -h, --help                help for set-context
+      --kubeconfig string   Kubeconfig file path for this context.
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk config](#clrk-config)	 - Manage clrk cluster contexts at ~/.clrk/config
+
+
+
+## clrk config use-context
+
+Set the current context
+
+```
+clrk config use-context NAME [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for use-context
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk config](#clrk-config)	 - Manage clrk cluster contexts at ~/.clrk/config
+
+
+
+## clrk dev
+
+Run controller-manager and worker locally in Docker
+
+### Synopsis
+
+Starts a controller-manager container with an embedded apiserver and N worker containers on a shared docker network.
+
+```
+clrk dev [flags]
+```
+
+### Options
+
+```
+  -f, --apply stringArray         YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).
+      --controller-image string   Controller-manager image ref. (default "us-west1-docker.pkg.dev/apoxy-dev/public/clrk-controller-manager:latest")
+      --data-dir string           Host path for ~/.clrk state (defaults to --clrk-dir).
+  -h, --help                      help for dev
+      --k3s-image string          k3s image ref. (default "rancher/k3s:v1.34.1-k3s1")
+      --pull docker run --pull    Forwarded to docker run --pull for every clrk-managed container. Accepted: "always", "missing" (docker default), "never". Use "always" to force a re-pull when a SHA-tagged image was retagged out-of-band.
+  -R, --recursive                 Recurse into subdirectories when --apply targets a directory.
+      --reload-tar worker[-N]     Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is worker[-N] or `controller-manager`. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar
+      --secret _                  Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with _ → `-` (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.
+      --skip-preflight            Skip the host-readiness checks (docker daemon, /dev/net/tun, IPv6, image-pullable). Use only when the checks are wrong about your environment.
+      --tui                       Render the dev TUI (auto-disabled when stdout isn't a TTY). (default true)
+      --watch                     Rebuild and hot-reload binaries on source changes (experimental).
+      --worker-image string       Worker image ref. (default "us-west1-docker.pkg.dev/apoxy-dev/public/clrk-worker:latest")
+      --workers int               Number of worker replicas. (default 1)
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+* [clrk dev logs](#clrk-dev-logs)	 - Stream the docker logs of every clrk dev component
+* [clrk dev status](#clrk-dev-status)	 - Report the health of a running clrk dev session
+* [clrk dev wait-ready](#clrk-dev-wait-ready)	 - Block until a running clrk dev session is fully ready
+
+
+
+## clrk dev logs
+
+Stream the docker logs of every clrk dev component
+
+```
+clrk dev logs [flags]
+```
+
+### Options
+
+```
+  -f, --follow                       Follow log output (docker logs -f).
+  -h, --help                         help for logs
+      --tail string                  Number of recent lines per component before following. (default "100")
+      --workers clrk dev --workers   Number of worker replicas to attach to (matches clrk dev --workers). (default 1)
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk dev](#clrk-dev)	 - Run controller-manager and worker locally in Docker
+
+
+
+## clrk dev status
+
+Report the health of a running clrk dev session
+
+### Synopsis
+
+Inspects the docker containers `clrk dev` brings up and prints a single-line summary per component. --json emits structured output keyed by component name, suitable for use in until-loops.
+
+```
+clrk dev status [flags]
+```
+
+### Options
+
+```
+  -h, --help                         help for status
+      --json                         Emit JSON keyed by component name.
+      --workers clrk dev --workers   Number of worker replicas to inspect (matches clrk dev --workers). (default 1)
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk dev](#clrk-dev)	 - Run controller-manager and worker locally in Docker
+
+
+
+## clrk dev wait-ready
+
+Block until a running clrk dev session is fully ready
+
+```
+clrk dev wait-ready [flags]
+```
+
+### Options
+
+```
+  -h, --help                help for wait-ready
+      --interval duration   Time between probe rounds. (default 1s)
+      --kubeconfig string   Path to the host-side kubeconfig (defaults to ~/.clrk/kubeconfig.host).
+      --timeout duration    Give up after this long. (default 2m0s)
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk dev](#clrk-dev)	 - Run controller-manager and worker locally in Docker
+
+
+
+## clrk pools
+
+List and inspect WorkerPools
+
+### Options
+
+```
+  -h, --help   help for pools
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+* [clrk pools get](#clrk-pools-get)	 - Show details for a single WorkerPool
+* [clrk pools list](#clrk-pools-list)	 - List WorkerPools
+
+
+
+## clrk pools get
+
+Show details for a single WorkerPool
+
+```
+clrk pools get NAME [flags]
+```
+
+### Options
+
+```
+  -h, --help                help for get
+      --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string    Target namespace (default: kubeconfig context).
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk pools](#clrk-pools)	 - List and inspect WorkerPools
+
+
+
+## clrk pools list
+
+List WorkerPools
+
+```
+clrk pools list [flags]
+```
+
+### Options
+
+```
+  -A, --all-namespaces      List across all namespaces.
+  -h, --help                help for list
+      --kubeconfig string   Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev      Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string    Target namespace (default: kubeconfig context).
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk pools](#clrk-pools)	 - List and inspect WorkerPools
+
+
+
+## clrk secret
+
+Manage Kubernetes Secrets in dev/prod with the same UX
+
+### Options
+
+```
+  -h, --help   help for secret
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk](#clrk)	 - CLRK agent sandbox runtime CLI
+* [clrk secret set](#clrk-secret-set)	 - Apply an Opaque Secret with one or more keys
+
+
+
+## clrk secret set
+
+Apply an Opaque Secret with one or more keys
+
+### Synopsis
+
+Server-side-applies an Opaque Secret with the supplied data keys. Sources are repeatable and merge into the same Secret with field manager `clrk-dev`. --local targets ~/.clrk/kubeconfig.host (the running clrk dev session); otherwise resolution falls back to --kubeconfig and $KUBECONFIG.
+
+```
+clrk secret set NAME [flags]
+```
+
+### Options
+
+```
+      --from-env stringArray       key=ENVVAR — read the value of the named environment variable into the Secret under data[key]. Repeatable.
+      --from-file stringArray      key=PATH — file contents into data[key]. Repeatable.
+      --from-literal stringArray   key=VALUE — verbatim string into data[key]. Repeatable.
+  -h, --help                       help for set
+      --kubeconfig string          Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).
+      --local clrk dev             Target the kubeconfig of the running clrk dev session (~/.clrk/kubeconfig.host).
+  -n, --namespace string           Target namespace (default: "default").
+```
+
+### Options inherited from parent commands
+
+```
+      --clrk-dir string    State directory for clrk. (default "$HOME/.clrk")
+      --log-level string   Log level (debug, info, warn, error). (default "info")
+```
+
+### SEE ALSO
+
+* [clrk secret](#clrk-secret)	 - Manage Kubernetes Secrets in dev/prod with the same UX
+
+
+
