@@ -68,10 +68,17 @@ func NewStore() *Store {
 // NewStoreWithTTL is the test seam for picking a non-default TTL. In
 // production, prefer NewStore.
 func NewStoreWithTTL(ttl time.Duration) *Store {
+	return NewStoreWithClock(ttl, time.Now)
+}
+
+// NewStoreWithClock is the test seam for injecting a frozen / advancing
+// clock so TTL behaviour can be driven without wall-clock sleeps. Use
+// only in tests; production callers want NewStore.
+func NewStoreWithClock(ttl time.Duration, now func() time.Time) *Store {
 	return &Store{
 		entries: make(map[string]entry),
 		ttl:     ttl,
-		now:     time.Now,
+		now:     now,
 		stop:    make(chan struct{}),
 	}
 }
