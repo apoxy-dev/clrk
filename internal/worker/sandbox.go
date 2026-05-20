@@ -56,7 +56,11 @@ type SandboxManager struct {
 	// startup; never re-read.
 	workerResolvers []netip.AddrPort
 
-	mu           sync.Mutex
+	// mu guards every map below. RWMutex because LookupEgressState is
+	// on the per-egress-conn hot path (one acquire per accepted SYN
+	// from any Sentry) and must not serialize against the lifecycle
+	// writes (Create/Start/Destroy/Set{Backends,Policy,InvocationID}).
+	mu           sync.RWMutex
 	sandboxes    map[SandboxID]*SandboxInstance
 	waiters      map[SandboxID]context.CancelFunc
 	stdLogs      map[SandboxID]sandboxLogs
@@ -108,8 +112,8 @@ func NewSandboxManager(
 // Exposed as a method (not a closure) so the bridge can hold a stable
 // reference to the manager across sandbox lifecycle events.
 func (m *SandboxManager) LookupEgressState(sandboxID string) (EgressState, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	st, ok := m.egressStates[SandboxID(sandboxID)]
 	if !ok || st == nil {
 		return EgressState{}, false
@@ -343,17 +347,15 @@ func drainSentryStdio(src io.Reader, dispatcherSink io.WriteCloser, logSink io.W
 	}
 }
 
-// SetEgressBackends updates the per-listener EG egress backends both
-// on the sandbox record (legacy reference) and on the worker-side
-// egress state map consulted by the egress bridge on every dial.
+// SetEgressBackends updates the per-listener EG egress backends on
+// the worker-side egress state map consulted by the egress bridge on
+// every dial.
 func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
+	if _, ok := m.sandboxes[id]; !ok {
 		return ErrNotFound
 	}
-	sb.EgressBackends = backends
 	m.egressStateLocked(id).Backends = backends
 	return nil
 }
@@ -364,11 +366,9 @@ func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.Backe
 func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
+	if _, ok := m.sandboxes[id]; !ok {
 		return ErrNotFound
 	}
-	sb.EgressPolicy = policy
 	m.egressStateLocked(id).Policy = policy
 	return nil
 }
@@ -385,9 +385,7 @@ func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) erro
 		return ErrNotFound
 	}
 	sb.Identity.InvocationID = invocationID
-	st := m.egressStateLocked(id)
-	st.Identity.InvocationID = invocationID
-	st.InvocationID = invocationID
+	m.egressStateLocked(id).Identity.InvocationID = invocationID
 	return nil
 }
 

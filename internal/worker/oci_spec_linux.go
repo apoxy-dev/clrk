@@ -21,13 +21,14 @@ const ociSpecVersion = "1.0.0"
 //
 // NetworkNamespace is explicitly pinned to the worker's netns. Under
 // --network=plugin, runsc otherwise creates a fresh empty netns for the
-// Sentry (gvisor.dev/gvisor/runsc/sandbox/sandbox.go:1045-1053), which
-// would strand the Sentry's forwarder dials — DNS upstream resolvers,
-// IMDS bridge on 127.0.0.1, and the egress MITM bridge are all reached
-// via Linux net.Dial from inside the Sentry process. Pinning to
-// /proc/self/ns/net resolves (in runsc) to runsc's own netns, which is
-// inherited from the worker; the Sentry then setns()es into that same
-// netns and gains reachability to 127.0.0.1:<port> on the worker. The
+// Sentry — see
+// https://github.com/apoxy-dev/gvisor/blob/5d6cfb0c0960/runsc/sandbox/sandbox.go#L1045-L1053
+// — which would strand the Sentry's forwarder dials (DNS upstream
+// resolvers, IMDS bridge on 127.0.0.1, egress MITM bridge), all
+// reached via Linux net.Dial from inside the Sentry process. Pinning
+// to /proc/self/ns/net resolves (in runsc) to runsc's own netns,
+// which is inherited from the worker; the Sentry then setns()es into
+// that same netns and gains reachability to 127.0.0.1:<port>. The
 // sandboxed application never touches the worker's netns — it only
 // sees the in-Sentry PluginStack — so this doesn't widen the security
 // perimeter.

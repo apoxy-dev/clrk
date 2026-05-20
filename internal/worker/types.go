@@ -187,25 +187,13 @@ type SandboxInstance struct {
 	// attribute traffic back to its parent agent.
 	Identity proxyproto.AgentIdentity
 
-	// EgressBackends are the EG listener entries this sandbox can be
-	// steered to (one per EgressListener in the gateway's spec). The
-	// IdentityDialer picks one per outbound dial based on shape +
-	// destination port. Empty slice means direct dial.
-	EgressBackends []egress.BackendListener
-
-	// EgressPolicy is the per-sandbox authorization plane built from
-	// the bound EgressGateway's DefaultPolicy and the EgressL4Routes
-	// targeting it. Nil means no enforcement (sandboxes with no
-	// EgressRefs). The handle is stable across CRD edits — the
-	// router updates its underlying state in place.
-	EgressPolicy *egress.SandboxPolicy
-
 	// initStr is the per-sandbox sentrystack init payload computed at
 	// Create. Retained on the instance so runscStart can re-pass it
 	// through the runsc-start subprocess's env — gVisor calls
-	// PluginStack.PreInit from inside `runsc start` (sandbox/network.go
-	// initPluginStack), not from `runsc create`, so the create-time
-	// env doesn't reach where PreInit reads it.
+	// PluginStack.PreInit from inside `runsc start`
+	// (https://github.com/apoxy-dev/gvisor/blob/5d6cfb0c0960/runsc/sandbox/network.go#L350),
+	// not from `runsc create`, so the create-time env doesn't reach
+	// where PreInit reads it.
 	initStr string
 
 	CreatedAt time.Time

@@ -417,8 +417,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Per-mode request delivery + response capture.
 	var (
-		mdEntry  *metadata.Entry
-		mdServer io.Closer
+		mdEntry      *metadata.Entry
+		mdUnregister func()
 	)
 	switch deliveryMode {
 	case clrkv1alpha1.AgentDeliveryMetadata:
@@ -427,14 +427,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "metadata delivery not enabled", http.StatusInternalServerError)
 			return
 		}
-		srv, err := registerMetadataEntry(d.metaReg, sb, mdEntry)
-		if err != nil {
-			log.Error(err, "Failed to register metadata entry")
-			http.Error(w, "metadata server failed", http.StatusInternalServerError)
-			return
-		}
-		mdServer = srv
-		defer mdServer.Close()
+		mdUnregister = d.metaReg.Register(string(sb.ID), mdEntry)
+		defer mdUnregister()
 		// Close stdin immediately so an agent that mistakenly reads
 		// from it sees EOF rather than blocking forever.
 		_ = sb.Stdin.Close()

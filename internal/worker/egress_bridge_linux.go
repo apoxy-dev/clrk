@@ -9,9 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dpeckett/contextio"
@@ -34,10 +32,9 @@ const egressHandshakeTimeout = 500 * time.Millisecond
 // RWMutex so the central decision is consistent with the
 // dispatcher's most recent push.
 type EgressState struct {
-	Identity     proxyproto.AgentIdentity
-	InvocationID string
-	Backends     []egress.BackendListener
-	Policy       *egress.SandboxPolicy
+	Identity proxyproto.AgentIdentity
+	Backends []egress.BackendListener
+	Policy   *egress.SandboxPolicy
 }
 
 // EgressStateLookup resolves the per-sandbox egress snapshot at
@@ -170,7 +167,7 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 		slog.String("agent.name", state.Identity.Name),
 		slog.String("agent.uid", state.Identity.UID),
 		slog.String("agent.revision", state.Identity.Revision),
-		slog.String("invocation.id", state.InvocationID),
+		slog.String("invocation.id", state.Identity.InvocationID),
 		slog.String("mode", backendMode(backend)),
 	)
 
@@ -195,11 +192,10 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 				slog.Any("error", err))
 			return
 		}
-		id := state.Identity
-		id.InvocationID = state.InvocationID
 		// SandboxID is intentionally NOT echoed on the Envoy-bound
 		// frame — Envoy uses identity/InvocationID TLVs for
 		// attribution; SandboxID is the worker-internal demux key.
+		id := state.Identity
 		id.SandboxID = ""
 		src := sanitizedSrc(upstream.LocalAddr(), origDst)
 		// Propagate the Sentry-side DNS-cache binding (qname the
@@ -221,7 +217,7 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	defer upstream.Close()
 
 	if _, err := contextio.SpliceContext(ctx, client, upstream, nil); err != nil {
-		if errors.Is(err, context.Canceled) || isBenignEgressClose(err) {
+		if errors.Is(err, context.Canceled) || egress.IsBenignClose(err) {
 			logger.Debug("Egress splice peer-close", slog.Any("error", err))
 			return
 		}
@@ -288,14 +284,3 @@ func sanitizedSrc(la net.Addr, dst netip.AddrPort) netip.AddrPort {
 	return netip.AddrPortFrom(zero, 0)
 }
 
-// isBenignEgressClose tells routine close-on-write (ECONNRESET after
-// the upstream finished writing, broken pipe in the reverse direction)
-// apart from real forwarding failures.
-func isBenignEgressClose(err error) bool {
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "broken pipe")
-}

@@ -27,11 +27,10 @@
 package sentrystack
 
 import (
-	"encoding/hex"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
-	"strings"
 	"sync"
 
 	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
@@ -319,9 +318,9 @@ func (s *Stack) wireEth0(init *InitStr) ([]tcpip.Route, error) {
 	return routes, nil
 }
 
-// ParseMAC parses a colon-separated MAC into a 6-byte LinkAddress. An
-// empty string returns a zero MAC, which is valid but presents to
-// userspace as 00:00:00:00:00:00 — fine for testing, ugly in prod logs.
+// ParseMAC parses a hardware address into a 6-byte LinkAddress, accepting
+// every form net.ParseMAC accepts (colon, dash, dotted-quad). An empty
+// string returns a zero MAC — valid but presents as 00:00:00:00:00:00.
 //
 // Exported for unit tests in apoxy-cloud//clrk/sentrystack.
 func ParseMAC(s string) (tcpip.LinkAddress, error) {
@@ -329,19 +328,14 @@ func ParseMAC(s string) (tcpip.LinkAddress, error) {
 		var zero [6]byte
 		return tcpip.LinkAddress(zero[:]), nil
 	}
-	parts := strings.Split(s, ":")
-	if len(parts) != 6 {
-		return "", fmt.Errorf("MAC %q must have 6 octets", s)
+	hw, err := net.ParseMAC(s)
+	if err != nil {
+		return "", fmt.Errorf("MAC %q: %w", s, err)
 	}
-	var raw [6]byte
-	for i, p := range parts {
-		b, err := hex.DecodeString(p)
-		if err != nil || len(b) != 1 {
-			return "", fmt.Errorf("MAC %q octet %d invalid: %v", s, i, p)
-		}
-		raw[i] = b[0]
+	if len(hw) != 6 {
+		return "", fmt.Errorf("MAC %q must be 6 octets (got %d)", s, len(hw))
 	}
-	return tcpip.LinkAddress(raw[:]), nil
+	return tcpip.LinkAddress(hw), nil
 }
 
 // ParsePrefixed parses an IPv4 or IPv6 address string into a tcpip.Address

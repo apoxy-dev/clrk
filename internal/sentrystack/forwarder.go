@@ -10,8 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"runtime/debug"
-	"strings"
-	"syscall"
 
 	"github.com/dpeckett/contextio"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -19,6 +17,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
+	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 )
 
@@ -123,7 +122,7 @@ func (s *Stack) handleTCP(
 	logger.Debug("Splicing TCP")
 	wn, err := contextio.SpliceContext(ctx, local, remote, nil)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		if isBenignPeerClose(err) {
+		if egress.IsBenignClose(err) {
 			logger.Debug("Peer closed mid-splice", slog.Any("error", err))
 		} else {
 			logger.Warn("Splice error", slog.Any("error", err))
@@ -295,14 +294,3 @@ func unmap4in6(a netip.Addr) netip.Addr {
 	return a
 }
 
-// isBenignPeerClose tells routine close-on-write (ECONNRESET after the
-// upstream finished writing, broken pipe in the reverse direction)
-// apart from real forwarding failures.
-func isBenignPeerClose(err error) bool {
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "broken pipe")
-}

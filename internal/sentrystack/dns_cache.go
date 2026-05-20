@@ -7,6 +7,7 @@ package sentrystack
 import (
 	"container/list"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,7 +138,7 @@ func (c *dnsCache) IngestResponse(msg []byte) {
 		if err != nil {
 			return
 		}
-		qnames = append(qnames, stripTrailingDot(q.Name.String()))
+		qnames = append(qnames, strings.TrimSuffix(q.Name.String(), "."))
 	}
 
 	type aRR struct {
@@ -156,7 +157,7 @@ func (c *dnsCache) IngestResponse(msg []byte) {
 		if err != nil {
 			return
 		}
-		name := stripTrailingDot(hdr.Name.String())
+		name := strings.TrimSuffix(hdr.Name.String(), ".")
 		switch hdr.Type {
 		case dnsmessage.TypeA:
 			r, err := p.AResource()
@@ -178,7 +179,7 @@ func (c *dnsCache) IngestResponse(msg []byte) {
 			if cnames == nil {
 				cnames = make(map[string]string, 4)
 			}
-			cnames[name] = stripTrailingDot(r.CNAME.String())
+			cnames[name] = strings.TrimSuffix(r.CNAME.String(), ".")
 		default:
 			if err := p.SkipAnswer(); err != nil {
 				return
@@ -222,9 +223,3 @@ func (c *dnsCache) IngestResponse(msg []byte) {
 	}
 }
 
-func stripTrailingDot(s string) string {
-	if len(s) > 0 && s[len(s)-1] == '.' {
-		return s[:len(s)-1]
-	}
-	return s
-}

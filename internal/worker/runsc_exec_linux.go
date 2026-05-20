@@ -62,23 +62,10 @@ func commonRunscFlags(rootDir string) []string {
 	}
 }
 
-// runscPlatform is the gVisor execution platform. systrap is the
-// mainline default and patches syscall instructions in-place; ptrace
-// stops the user task on every syscall, which is ~10x slower under
-// Bun/Node workloads that spawn many short-lived helper threads.
-//
-// We previously pinned ptrace as a workaround for `ptrace status
-// unexpected: got 5632, wanted stopped` panics on Apple Silicon
-// OrbStack, but the root cause there turned out to be Rosetta-
-// translated x86_64 binaries — both systrap and ptrace fail
-// identically under Rosetta (the Sentry stub's seccomp filter is
-// built for x86_64 but the kernel sees aarch64 syscalls and returns
-// EINVAL → status 5632). With the worker tarball built via
-// `bazel build --config=arm64`, systrap boots cleanly and is the
-// right default.
-//
-// KVM is faster but requires /dev/kvm; not available in OrbStack
-// containers, so it's not an option here.
+// runscPlatform is the gVisor execution platform. systrap patches
+// syscall instructions in-place; ptrace stops the task on every
+// syscall (~10x slower under Bun/Node). KVM is faster but needs
+// /dev/kvm, which OrbStack containers don't expose.
 const runscPlatform = "systrap"
 
 // runscCreateOpts carries the per-sandbox state runsc create needs in
@@ -144,7 +131,7 @@ func runscCreate(ctx context.Context, opts runscCreateOpts) error {
 		// just to see why a 1-bit Sentry start refused.
 		tail := readLogTail(debugLog, 65536)
 		if tail != "" {
-			return fmt.Errorf("runsc create: %w\nruncs-debug.tail:\n%s", err, tail)
+			return fmt.Errorf("runsc create: %w\nrunsc-debug.tail:\n%s", err, tail)
 		}
 		return fmt.Errorf("runsc create: %w", err)
 	}
@@ -208,8 +195,9 @@ func runRunscEnv(ctx context.Context, rootDir string, extraEnv []string, args ..
 
 // runscStart signals the Sentry to launch the spec.Process. The
 // initStr env var is required: gVisor invokes PluginStack.PreInit
-// from inside `runsc start` (runsc/sandbox/network.go::initPluginStack
-// → pluginStack.PreInit), which reads CLRK_SENTRYSTACK_INITSTR via
+// from inside `runsc start`
+// (https://github.com/apoxy-dev/gvisor/blob/5d6cfb0c0960/runsc/sandbox/network.go#L350),
+// which reads CLRK_SENTRYSTACK_INITSTR via
 // os.Getenv. Without it, the sentrystack boots with empty addressing
 // and the Sentry's StartRoot urpc fails because the gofer's serving
 // goroutines exit before the root mount can complete. On failure the
@@ -231,7 +219,7 @@ func runscStart(ctx context.Context, rootDir, id, initStr string) error {
 	}
 	tail := readLogTail(debugLog, 65536)
 	if tail != "" {
-		return fmt.Errorf("%w\nruncs-debug.tail:\n%s", err, tail)
+		return fmt.Errorf("%w\nrunsc-debug.tail:\n%s", err, tail)
 	}
 	return err
 }
