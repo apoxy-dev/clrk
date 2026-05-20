@@ -565,10 +565,16 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 
 	sb.closeStdio()
 
+	// Collect the waiter cancel under the lock but invoke it after
+	// release: cancelling a context can wake goroutines that need to
+	// reacquire m.mu (e.g. the Wait goroutine itself, which grabs the
+	// lock to flip Phase / delete the waiter), and holding the lock
+	// across cancel() risks self-deadlock as soon as that wake-up
+	// races with another method blocked on mu.
 	m.mu.Lock()
 	delete(m.sandboxes, id)
-	if c, ok := m.waiters[id]; ok {
-		c()
+	cancelWaiter, hasWaiter := m.waiters[id]
+	if hasWaiter {
 		delete(m.waiters, id)
 	}
 	if logs, ok := m.stdLogs[id]; ok && logs.file != nil {
@@ -577,6 +583,9 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 	delete(m.stdLogs, id)
 	delete(m.egressStates, id)
 	m.mu.Unlock()
+	if hasWaiter {
+		cancelWaiter()
+	}
 
 	log.Info("Sandbox deleted")
 	return nil

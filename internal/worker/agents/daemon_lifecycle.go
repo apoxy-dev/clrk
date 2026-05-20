@@ -255,7 +255,7 @@ func (m *DaemonLifecycle) runIteration(
 	// Resolve EG dependencies (CA, backend addresses, dialable
 	// backend) BEFORE creating any sandbox state. The EG controller
 	// bring-up can take 30-60s in dev; without this gate we'd Create
-	// + Delete libcontainer state on every retry and burn the
+	// + Delete runsc + Sentry stack state on every retry and burn the
 	// per-attempt backoff multiple times before the EG is even
 	// reachable.
 	caPEM, backends, policy, err := m.waitForEgressReady(ctx, da, log)
@@ -530,8 +530,8 @@ func (m *DaemonLifecycle) patchStatus(ctx context.Context, da *clrkv1alpha1.Daem
 // dependencies are usable: the CA Secret exists, the EG status
 // carries at least one listener BackendAddress, and at least one of
 // those addresses is TCP-dialable. Returns (caPEM, backends, policy,
-// nil) on success. Designed to be called BEFORE libcontainer Create so
-// the cold-start window doesn't churn netstack state on every retry.
+// nil) on success. Designed to be called BEFORE sandbox Create so the
+// cold-start window doesn't churn Sentry stack state on every retry.
 //
 // CA load and backend resolution are kept as separate calls (vs. the
 // dispatcher's single ResolveEgress) so the poll loop can distinguish

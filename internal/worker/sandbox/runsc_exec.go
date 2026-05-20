@@ -23,8 +23,8 @@ import (
 // sandboxes that each need independent pipes.
 
 // runscNetwork is the --network value that makes the Sentry consult
-// the registered PluginStack (sentrystack.Singleton()) instead of
-// building a NetworkSandbox netstack of its own.
+// the registered PluginStack (sentrystack.Singleton()) for all
+// inbound and outbound traffic. The in-Sentry stack is the only stack.
 const runscNetwork = "plugin"
 
 // commonRunscFlags are the flags every runsc subcommand we invoke
