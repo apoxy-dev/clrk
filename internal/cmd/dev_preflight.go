@@ -27,6 +27,7 @@ func preflight(ctx context.Context, o *devOpts) error {
 	var errs []string
 	for _, check := range []func(context.Context, *devOpts) error{
 		checkDocker,
+		checkK3d,
 		checkLinuxKernel,
 		checkImagePullable,
 	} {
@@ -53,6 +54,17 @@ func checkDocker(ctx context.Context, _ *devOpts) error {
 			hint += " (and add yourself to the `docker` group: `sudo usermod -aG docker $USER && newgrp docker`)"
 		}
 		return fmt.Errorf("docker daemon unreachable: %s — %s", strings.TrimSpace(string(out)), hint)
+	}
+	return nil
+}
+
+// checkK3d fails fast when the k3d binary isn't on PATH. ClusterDriver
+// shells out to k3d via the ctlptl library, so a missing k3d shows up
+// deep in bringUp as a generic "exec: k3d: executable file not found"
+// instead of a clear actionable hint.
+func checkK3d(ctx context.Context, _ *devOpts) error {
+	if _, err := exec.LookPath("k3d"); err != nil {
+		return fmt.Errorf("k3d binary not found on PATH: %w — install k3d (brew install k3d, or follow https://k3d.io/#installation)", err)
 	}
 	return nil
 }
@@ -89,10 +101,10 @@ func checkLinuxKernel(ctx context.Context, _ *devOpts) error {
 // the published image tag for this clrk SHA hasn't landed because
 // the apoxy-cloud publish workflow failed or hasn't run yet.
 //
-// --reload-tar mode and --controller-image / --worker-image overrides
-// to local-only refs (`clrk/controller-manager:latest`) skip the
-// remote check — those refs come from `docker load`, not a registry,
-// and would always fail manifest inspect.
+// `--registry-image=<component>=<ref>` sets the image to a
+// clrk-registry:5000/... ref that's unreachable from the host
+// (the registry is on the docker bridge), so the manifest-inspect
+// path skips those.
 func checkImagePullable(ctx context.Context, o *devOpts) error {
 	var errs []string
 	for _, ref := range []string{o.controllerImage, o.workerImage} {
@@ -108,19 +120,19 @@ func checkImagePullable(ctx context.Context, o *devOpts) error {
 		return nil
 	}
 	hint := fmt.Sprintf("either pin to a published tag with --controller-image / --worker-image, "+
-		"or run `clrk dev` against a bazel-built tarball via "+
-		"`--reload-tar=controller-manager=…` + `--reload-tar=worker=…`. "+
+		"or push a locally-built image to the dev registry and pass "+
+		"`--registry-image=<component>=clrk-registry:5000/...`. "+
 		"Image tags follow the clrk SHA; check the apoxy-cloud clrk.yml workflow run for SHA %s.",
 		drivers.ImageTag())
 	return errors.New(strings.Join(errs, "; ") + " — " + hint)
 }
 
-// isLocalOnly reports whether ref is a docker-load-only image tag
-// (no registry path) that won't have a remote manifest. The bazel
-// OCI tarballs stamp `clrk/{controller-manager,worker}:latest` per
-// //clrk:*_oci_tarball repo_tags, so anything matching those exactly
-// is treated as local-only.
+// isLocalOnly reports whether ref is a dev-local image tag (in-network
+// hostname, no public registry path) that won't have a remote manifest.
+// Refs of the form `clrk-registry:5000/...` resolve to the registry
+// container ClusterDriver brings up on the shared docker bridge, so
+// neither `docker manifest inspect` from the host nor a `docker pull`
+// before the dev session is up will reach them.
 func isLocalOnly(ref string) bool {
-	return ref == drivers.BazelLocalControllerManagerTag ||
-		ref == drivers.BazelLocalWorkerTag
+	return strings.HasPrefix(ref, "clrk-registry:5000/")
 }

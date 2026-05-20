@@ -29,7 +29,7 @@ func newDevLogsCmd() *cobra.Command {
 		Use:   "logs",
 		Short: "Stream the docker logs of every clrk dev component",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			components := []string{drivers.K3sContainerName, drivers.ControllerManagerContainerName}
+			components := []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName}
 			for i := 0; i < workers; i++ {
 				components = append(components, fmt.Sprintf("clrk-worker-%d", i))
 			}

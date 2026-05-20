@@ -2,7 +2,9 @@
 #
 # Build + push to a registry your worker pool can pull from, then
 # point manifests/taskagent.yaml at the resulting reference. For
-# `clrk dev` you can also `docker save` and use --reload-tar.
+# `clrk dev` you can `docker push` to the local registry
+# `clrk dev` starts (port printed at startup) and reference it as
+# `clrk-registry:5000/<repo>:<tag>` in the TaskAgent's image field.
 FROM node:22-alpine
 
 RUN apk add --no-cache bash jq ca-certificates curl \

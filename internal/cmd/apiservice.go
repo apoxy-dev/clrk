@@ -2,14 +2,17 @@ package cmd
 
 import (
 	"context"
-	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 
 	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
 // bootstrapClrkAPIService registers the clrk apiserver as an aggregated
-// extension apiserver in the k3s control plane running at k3sContainer.
-// It writes three objects:
+// extension apiserver in the k3s control plane. It writes three objects:
 //
 //   - kube-system/clrk-apiserver Service (selector-less, so Endpoints
 //     isn't auto-populated from Pods).
@@ -21,48 +24,47 @@ import (
 //     whose CA isn't exposed, so dev skips verification.
 //
 // Idempotent; safe to call on every `clrk dev` invocation.
-func bootstrapClrkAPIService(ctx context.Context, k3s *drivers.K3sDriver, backendIP string, backendPort int) error {
-	yaml := fmt.Sprintf(`---
-apiVersion: v1
-kind: Service
-metadata:
-  name: clrk-apiserver
-  namespace: kube-system
-spec:
-  ports:
-  - name: https
-    port: %[2]d
-    protocol: TCP
-    targetPort: %[2]d
----
-apiVersion: v1
-kind: Endpoints
-metadata:
-  name: clrk-apiserver
-  namespace: kube-system
-subsets:
-- addresses:
-  - ip: %[1]s
-  ports:
-  - name: https
-    port: %[2]d
-    protocol: TCP
----
-apiVersion: apiregistration.k8s.io/v1
-kind: APIService
-metadata:
-  name: v1alpha1.clrk.apoxy.dev
-spec:
-  group: clrk.apoxy.dev
-  version: v1alpha1
-  groupPriorityMinimum: 1000
-  versionPriority: 15
-  insecureSkipTLSVerify: true
-  service:
-    name: clrk-apiserver
-    namespace: kube-system
-    port: %[2]d
-`, backendIP, backendPort)
-
-	return k3s.KubectlApply(ctx, "-", []byte(yaml))
+func bootstrapClrkAPIService(ctx context.Context, cluster *drivers.ClusterDriver, backendIP string, backendPort int) error {
+	port := int32(backendPort)
+	svc := &corev1.Service{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		ObjectMeta: metav1.ObjectMeta{Name: "clrk-apiserver", Namespace: "kube-system"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{
+				Name:       "https",
+				Port:       port,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt32(port),
+			}},
+		},
+	}
+	eps := &corev1.Endpoints{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Endpoints"},
+		ObjectMeta: metav1.ObjectMeta{Name: "clrk-apiserver", Namespace: "kube-system"},
+		Subsets: []corev1.EndpointSubset{{
+			Addresses: []corev1.EndpointAddress{{IP: backendIP}},
+			Ports: []corev1.EndpointPort{{
+				Name:     "https",
+				Port:     port,
+				Protocol: corev1.ProtocolTCP,
+			}},
+		}},
+	}
+	apiSvc := &apiregistrationv1.APIService{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apiregistration.k8s.io/v1", Kind: "APIService"},
+		ObjectMeta: metav1.ObjectMeta{Name: "v1alpha1.clrk.apoxy.dev"},
+		Spec: apiregistrationv1.APIServiceSpec{
+			Group:                "clrk.apoxy.dev",
+			Version:              "v1alpha1",
+			GroupPriorityMinimum: 1000,
+			VersionPriority:      15,
+			InsecureSkipTLSVerify: true,
+			Service: &apiregistrationv1.ServiceReference{
+				Name:      "clrk-apiserver",
+				Namespace: "kube-system",
+				Port:      &port,
+			},
+		},
+	}
+	return cluster.ApplyObjects(ctx, svc, eps, apiSvc)
 }

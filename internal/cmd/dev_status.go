@@ -31,7 +31,7 @@ func newDevStatusCmd() *cobra.Command {
 			"a single-line summary per component. --json emits structured " +
 			"output keyed by component name, suitable for use in until-loops.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			components := []string{drivers.K3sContainerName, drivers.ControllerManagerContainerName}
+			components := []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName}
 			for i := 0; i < workers; i++ {
 				components = append(components, fmt.Sprintf("clrk-worker-%d", i))
 			}
@@ -124,7 +124,7 @@ func writeStatusTable(w *os.File, states map[string]ComponentState) error {
 }
 
 func orderedComponentNames(states map[string]ComponentState) []string {
-	preferred := []string{drivers.K3sContainerName, drivers.ControllerManagerContainerName}
+	preferred := []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName}
 	seen := map[string]bool{}
 	out := []string{}
 	for _, n := range preferred {

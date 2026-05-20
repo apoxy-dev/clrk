@@ -15,14 +15,17 @@ const (
 	ClrkControllerManagerImagePath = "us-west1-docker.pkg.dev/apoxy-dev/public/clrk-controller-manager"
 	ClrkWorkerImagePath            = "us-west1-docker.pkg.dev/apoxy-dev/public/clrk-worker"
 
-	// BazelLocalControllerManagerTag is the tag the bazel OCI tarball
-	// at //clrk:controller-manager_oci_tarball stamps via its
-	// `repo_tags` attribute. `clrk dev --reload-tar=controller-manager=…`
-	// docker-loads a tarball with this tag, so the dev path overrides
-	// the GAR default with this value.
-	BazelLocalControllerManagerTag = "clrk/controller-manager:latest"
-	// BazelLocalWorkerTag is the matching value for the worker tarball.
-	BazelLocalWorkerTag = "clrk/worker:latest"
+	// LocalRegistryControllerManagerImage is the in-network ref clrk
+	// dev's controller-manager container uses when launched with
+	// --registry-image=controller-manager=<…>. ClusterDriver brings up
+	// a docker registry container at this exact name on the shared
+	// `clrk` network, so the docker daemon resolves the host part via
+	// docker DNS and serves layers from the registry that ctlptl wired
+	// into k3d's containerd registries.yaml. The host pushes against
+	// localhost:<RegistryHostPort()> for the same content.
+	LocalRegistryControllerManagerImage = "clrk-registry:5000/clrk/controller-manager:dev"
+	// LocalRegistryWorkerImage is the matching ref for the worker.
+	LocalRegistryWorkerImage = "clrk-registry:5000/clrk/worker:dev"
 )
 
 // ImageTag returns the GAR tag matching this clrk binary, derived

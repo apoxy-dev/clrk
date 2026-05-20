@@ -43,24 +43,23 @@ const devOtelPort = 14318
 const devClrkNamespace = "clrk"
 
 type devOpts struct {
-	watch              bool
-	controllerImage    string
-	controllerImageSet bool
-	workerImage        string
-	workerImageSet     bool
-	k3sImage           string
-	pull               string
-	skipPreflight      bool
-	workers            int
-	dataDir            string
-	tui                bool
-	tuiSet             bool
-	applyPaths         []string
-	applyRecursive     bool
-	reloadTar          []string
-	secrets            []string
-	parsedSecrets      []secretSpec
-	otelEndpoint       string
+	watch           bool
+	controllerImage string
+	workerImage     string
+	k3sImage        string
+	pull            string
+	skipPreflight   bool
+	workers         int
+	dataDir         string
+	tui             bool
+	tuiSet          bool
+	applyPaths      []string
+	applyRecursive  bool
+	registryImages  []string
+	registryPort    int
+	secrets         []string
+	parsedSecrets   []secretSpec
+	otelEndpoint    string
 }
 
 func newDevCmd() *cobra.Command {
@@ -72,8 +71,6 @@ func newDevCmd() *cobra.Command {
 			"and N worker containers on a shared docker network.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.tuiSet = cmd.Flags().Changed("tui")
-			o.controllerImageSet = cmd.Flags().Changed("controller-image")
-			o.workerImageSet = cmd.Flags().Changed("worker-image")
 			return runDev(cmd.Context(), o)
 		},
 	}
@@ -89,11 +86,13 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.tui, "tui", true, "Render the dev TUI (auto-disabled when stdout isn't a TTY).")
 	cmd.Flags().StringArrayVarP(&o.applyPaths, "apply", "f", nil, "YAML file or directory of CRDs to server-side apply once the apiserver is ready (repeatable).")
 	cmd.Flags().BoolVarP(&o.applyRecursive, "recursive", "R", false, "Recurse into subdirectories when --apply targets a directory.")
-	cmd.Flags().StringArrayVar(&o.reloadTar, "reload-tar", nil, "Watch a bazel-built OCI tarball and reload the matching component on every mtime change (repeatable). Format: COMPONENT=PATH where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --reload-tar=worker=bazel-bin/clrk/worker_oci_tarball/tarball.tar")
+	cmd.Flags().StringArrayVar(&o.registryImages, "registry-image", nil, "Override an image to a local-registry ref and force '--pull always' on the matching container (repeatable). Format: COMPONENT=REF where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --registry-image=worker=clrk-registry:5000/clrk/worker:dev — pair with 'clrk dev reload <component>' after pushing to the local registry.")
+	cmd.Flags().IntVar(&o.registryPort, "registry-port", 0, "Host port to publish the local OCI registry on. 0 picks a free port; the actual port is logged at startup and is the target for 'docker push localhost:<port>/clrk/...'.")
 	cmd.Flags().StringArrayVar(&o.secrets, "secret", nil, "Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with '_' → '-' (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.")
 	cmd.AddCommand(newDevStatusCmd())
 	cmd.AddCommand(newDevLogsCmd())
 	cmd.AddCommand(newDevWaitReadyCmd())
+	cmd.AddCommand(newDevReloadCmd())
 	return cmd
 }
 
@@ -142,21 +141,12 @@ func runDev(ctx context.Context, o *devOpts) error {
 		o.tui = false
 	}
 
-	// `--reload-tar=<component>=…` without an explicit image override
-	// flips the corresponding image ref to the bazel-stamped local tag
-	// (`clrk/{controller-manager,worker}:latest`) so the loaded tarball
-	// is what the container actually runs. This must happen before
-	// bringUp consumes o.controllerImage / o.workerImage.
-	if err := applyReloadTarImageOverrides(o); err != nil {
-		return err
-	}
-
-	// Seed each --reload-tar tarball into the docker daemon before
-	// bringUp tries to `docker run` against the local-only ref. The
-	// mtime watcher only handles subsequent reloads — without this
-	// the first container start fails with "pull access denied" on
-	// the bazel-stamped tag.
-	if err := seedReloadTarImages(ctx, o); err != nil {
+	// `--registry-image=<component>=<ref>` swaps the matching image
+	// ref to the local-registry tag and forces `--pull always`, so
+	// `docker push` to the local registry on the host re-rolls the
+	// container on the next `clrk dev reload`. Must happen before
+	// bringUp consumes o.controllerImage / o.workerImage / o.pull.
+	if err := applyRegistryImageOverrides(o); err != nil {
 		return err
 	}
 
@@ -204,7 +194,7 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 	}
 	defer state.teardown()
 
-	streamLogs(ctx, drivers.K3sContainerName)
+	streamLogs(ctx, drivers.ClusterServerContainerName)
 	streamLogs(ctx, drivers.ControllerManagerContainerName)
 	for _, w := range state.workers {
 		streamLogs(ctx, w.Name())
@@ -216,10 +206,6 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 
 	if o.watch {
 		state.startWatcher(ctx, o, nil)
-	}
-
-	if err := startReloadWatchers(ctx, o); err != nil {
-		return err
 	}
 
 	<-ctx.Done()
@@ -251,71 +237,11 @@ func forwardOtel(ctx context.Context, receiver *devotel.Receiver, store *devagen
 	}
 }
 
-// startReloadWatchers parses --reload-tar flags and spawns one watcher
-// goroutine per spec. Returns the parse error early so a typo halts
-// startup instead of being lost in the log stream.
-func startReloadWatchers(ctx context.Context, o *devOpts) error {
-	specs, err := parseReloadTar(o.reloadTar)
-	if err != nil {
-		return err
-	}
-	for _, s := range specs {
-		slog.Info("Watching tarball for reload", "component", s.Component, "index", s.Index, "path", s.Path)
-		go runReloadWatcher(ctx, o, s)
-	}
-	return nil
-}
-
-// seedReloadTarImages loads each --reload-tar tarball into the local
-// docker daemon. Required before bringUp because the mtime watcher
-// only fires on subsequent changes — the initial `docker run` against
-// the bazel-stamped local tag would otherwise pull-and-fail.
-func seedReloadTarImages(ctx context.Context, o *devOpts) error {
-	specs, err := parseReloadTar(o.reloadTar)
-	if err != nil {
-		return err
-	}
-	for _, s := range specs {
-		if err := dockerLoad(ctx, s.Path); err != nil {
-			return fmt.Errorf("seeding %s tarball: %w", s.Component, err)
-		}
-	}
-	return nil
-}
-
-// applyReloadTarImageOverrides flips the controller-manager / worker
-// image refs to the bazel-stamped local tag when the user supplied
-// `--reload-tar=<component>=…` without an explicit
-// `--controller-image` / `--worker-image`. Without this, the GAR
-// default would shadow the freshly-loaded local tarball and the
-// container would either pull the published image (defeating the
-// dev workflow) or fail with `manifest unknown` if the matching tag
-// hasn't been pushed for the running clrk SHA.
-func applyReloadTarImageOverrides(o *devOpts) error {
-	specs, err := parseReloadTar(o.reloadTar)
-	if err != nil {
-		return err
-	}
-	for _, s := range specs {
-		switch s.Component {
-		case "controller-manager":
-			if !o.controllerImageSet {
-				o.controllerImage = drivers.BazelLocalControllerManagerTag
-			}
-		case "worker":
-			if !o.workerImageSet {
-				o.workerImage = drivers.BazelLocalWorkerTag
-			}
-		}
-	}
-	return nil
-}
-
 // runDevTUI orchestrates components in a background goroutine while the TUI
 // renders status and per-component logs on the main goroutine.
 func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) error {
 	componentNames := []string{
-		drivers.K3sContainerName,
+		drivers.ClusterServerContainerName,
 		drivers.ControllerManagerContainerName,
 	}
 	for i := 0; i < o.workers; i++ {
@@ -344,7 +270,7 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 			orchErrCh <- err
 			return
 		}
-		for _, name := range []string{drivers.K3sContainerName, drivers.ControllerManagerContainerName} {
+		for _, name := range []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName} {
 			go streamLogsTo(orchestrateCtx, prog, name)
 		}
 		for _, w := range state.workers {
@@ -358,16 +284,12 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 		// them to the user — the agents pane simply stays empty until
 		// the watcher reconnects.
 		go func() {
-			if err := store.Run(orchestrateCtx, state.k3s.HostKubeconfigPath()); err != nil && !errors.Is(err, context.Canceled) {
+			if err := store.Run(orchestrateCtx, state.cluster.HostKubeconfigPath()); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Warn("Agent watcher exited", "err", err)
 			}
 		}()
 		if o.watch {
 			state.startWatcher(orchestrateCtx, o, prog)
-		}
-		if err := startReloadWatchers(orchestrateCtx, o); err != nil {
-			orchErrCh <- err
-			return
 		}
 		// Block until shutdown signaled; orchErrCh stays nil for clean exit.
 		<-orchestrateCtx.Done()
@@ -393,7 +315,7 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 // devState bundles everything bringUp produced so the caller can tear down
 // regardless of which step failed.
 type devState struct {
-	k3s     *drivers.K3sDriver
+	cluster *drivers.ClusterDriver
 	cm      *drivers.ControllerManagerDriver
 	workers []*drivers.WorkerDriver
 }
@@ -410,8 +332,8 @@ func (s *devState) teardown() {
 	if s.cm != nil {
 		_ = s.cm.Stop(shutCtx)
 	}
-	if s.k3s != nil {
-		_ = s.k3s.Stop(shutCtx)
+	if s.cluster != nil {
+		_ = s.cluster.Stop(shutCtx)
 	}
 }
 
@@ -423,32 +345,32 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 
-	state.k3s = drivers.NewK3sDriver(o.dataDir)
-	// Publish the apiserver port on the host so bazel/kubectl/int-tests
-	// running outside docker can reach k3s via 127.0.0.1:<HostPort>. The
-	// controller-manager still talks to k3s over the docker-DNS name
-	// clrk-k3s via its own in-container kubeconfig. Non-standard port
-	// avoids collision with other local clusters (kind, k3d, minikube).
-	state.k3s.HostPort = 16443
-	if err := withStatus(prog, drivers.K3sContainerName, func() error {
-		if _, err := state.k3s.Start(ctx, drivers.WithImage(o.k3sImage), drivers.WithPull(o.pull)); err != nil {
-			return fmt.Errorf("starting k3s: %w", err)
+	// ClusterDriver brings up a k3d cluster + a colocated local OCI
+	// registry on the shared `clrk` docker network via the ctlptl Go
+	// library. Apiserver port and registry port are host-published by
+	// k3d / ctlptl on free local ports — discoverable from the
+	// emitted host kubeconfig and ClusterDriver.RegistryHostPort()
+	// respectively. The controller-manager still reaches the apiserver
+	// over the docker-network kubeconfig at `state.cluster.KubeconfigPath()`.
+	state.cluster = drivers.NewClusterDriver(o.dataDir, o.k3sImage, o.registryPort)
+	if err := withStatus(prog, drivers.ClusterServerContainerName, func() error {
+		if err := state.cluster.Start(ctx); err != nil {
+			return fmt.Errorf("starting cluster: %w", err)
 		}
-		slog.Info("k3s running", "container", drivers.K3sContainerName)
-		if err := state.k3s.WaitAPIReady(ctx, 120*time.Second); err != nil {
-			return fmt.Errorf("k3s API never became ready: %w", err)
-		}
+		slog.Info("k3d cluster + registry running",
+			"node", drivers.ClusterServerContainerName,
+			"registry_port", state.cluster.RegistryHostPort())
 		return nil
 	}); err != nil {
 		return state, err
 	}
-	slog.Info("k3s API is ready", "kubeconfig", state.k3s.KubeconfigPath())
+	slog.Info("Cluster API is ready", "kubeconfig", state.cluster.KubeconfigPath())
 
 	// Promote the dev cluster to the current context so subsequent
 	// `clrk apply` / `clrk agents` invocations from any shell target
 	// the live dev cluster without --local. Best-effort — the user
 	// can still pass --local or --kubeconfig if this fails.
-	if err := writeDevContext(state.k3s.HostKubeconfigPath()); err != nil {
+	if err := writeDevContext(state.cluster.HostKubeconfigPath()); err != nil {
 		slog.Warn("Failed to register dev context in ~/.clrk/config", "err", err)
 	}
 
@@ -456,7 +378,7 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	// container starts — the supervised envoy-gateway certgen writes
 	// its TLS Secret to clrk/envoy-gateway as its very first action
 	// and crash-loops if the namespace doesn't exist.
-	if err := state.k3s.EnsureNamespace(ctx, devClrkNamespace); err != nil {
+	if err := state.cluster.EnsureNamespace(ctx, devClrkNamespace); err != nil {
 		return state, fmt.Errorf("ensuring %q namespace: %w", devClrkNamespace, err)
 	}
 
@@ -482,10 +404,10 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 			if err != nil {
 				return fmt.Errorf("getting controller-manager IP: %w", err)
 			}
-			if err := bootstrapClrkAPIService(gctx, state.k3s, cmIP, 8443); err != nil {
+			if err := bootstrapClrkAPIService(gctx, state.cluster, cmIP, 8443); err != nil {
 				return fmt.Errorf("registering clrk APIService: %w", err)
 			}
-			if err := state.k3s.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 8082, 18000); err != nil {
+			if err := state.cluster.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 8082, 18000); err != nil {
 				return fmt.Errorf("bridging controller-manager: %w", err)
 			}
 			slog.Info("Controller-manager registered + bridged", "backend", cmIP)
@@ -518,10 +440,10 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		return state, err
 	}
 
-	if err := waitClrkAPIDiscoverable(ctx, state.k3s.HostKubeconfigPath(), 60*time.Second); err != nil {
+	if err := waitClrkAPIDiscoverable(ctx, state.cluster.HostKubeconfigPath(), 60*time.Second); err != nil {
 		return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
 	}
-	if err := bootstrapDefaultWorkerPool(ctx, state.k3s.HostKubeconfigPath()); err != nil {
+	if err := bootstrapDefaultWorkerPool(ctx, state.cluster.HostKubeconfigPath()); err != nil {
 		return state, fmt.Errorf("bootstrapping default WorkerPool: %w", err)
 	}
 	// Bridge the default WorkerPool's dispatch port into k3s so
@@ -537,18 +459,25 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		}
 		workerIPs = append(workerIPs, ip)
 	}
-	if err := state.k3s.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, ports.DispatchPort); err != nil {
+	if err := state.cluster.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, ports.DispatchPort); err != nil {
 		return state, fmt.Errorf("bridging default WorkerPool dispatch port: %w", err)
 	}
 	if len(o.parsedSecrets) > 0 {
-		if err := applySecretSpecs(ctx, state.k3s.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {
+		if err := applySecretSpecs(ctx, state.cluster.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {
 			return state, fmt.Errorf("applying --secret: %w", err)
 		}
 	}
 	if len(o.applyPaths) > 0 {
-		if err := applyManifests(ctx, state.k3s.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
+		if err := applyManifests(ctx, state.cluster.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
 		}
+	}
+
+	// Persist the resolved session state so `clrk dev reload <component>`
+	// can recover the effective image refs + pull policy + worker count
+	// without re-parsing flags or guessing.
+	if err := writeDevSession(o, state); err != nil {
+		slog.Warn("Failed to write dev.json (reload subcommand will be unavailable)", "err", err)
 	}
 
 	return state, nil
@@ -626,7 +555,7 @@ func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
 			// <k3s-container>:<NodePort> instead of the in-cluster
 			// Service DNS name. The k3s container is reachable from
 			// workers by docker DNS.
-			"--dev-egress-backend-host=" + drivers.K3sContainerName,
+			"--dev-egress-backend-host=" + drivers.ClusterServerContainerName,
 		),
 	}
 	if o.watch {
