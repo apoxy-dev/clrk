@@ -29,27 +29,12 @@ type Instance struct {
 	Stdout io.ReadCloser
 	Stderr io.ReadCloser
 
-	// stdinChild / stdoutChild / stderrChild are the Sentry-facing
-	// ends of the stdio pipes. Passed to the runsc-create subprocess
-	// as its cmd.Stdin/Stdout/Stderr; the subprocess donates them to
-	// the Sentry boot child as the sandboxed process's stdio.
-	stdinChild  *os.File
-	stdoutChild *os.File
-	stderrChild *os.File
-
-	// stdoutInternalR / stderrInternalR are the worker-side read ends
-	// of the Sentry's stdout/stderr pipes. drainSentryStdio reads
-	// from these and fans bytes out to the slog sink and (in stdio
-	// mode) the dispatcher-facing outer pipe.
-	stdoutInternalR *os.File
-	stderrInternalR *os.File
-
-	// stdoutToDispatcher / stderrToDispatcher are the write ends of
-	// the dispatcher-facing outer pipes (paired with sb.Stdout /
-	// sb.Stderr). Only allocated when stdio=true; nil otherwise so
-	// the drain goroutine knows to skip the dispatcher fan-out.
-	stdoutToDispatcher *os.File
-	stderrToDispatcher *os.File
+	// stdioPipes groups the six worker-side stdio plumbing FDs that
+	// used to dangle on the struct. Embedded so existing field
+	// references (sb.stdinChild, sb.stdoutToDispatcher, etc.) keep
+	// working via promotion — the grouping is for the struct
+	// definition, not the call sites.
+	stdioPipes
 
 	Sandbox   clrkv1alpha1.AgentSandbox
 	Resources clrkv1alpha1.ExecutionResources
@@ -78,4 +63,33 @@ type Instance struct {
 	// timer lifecycle. Commit 3 of the refactor migrates this off
 	// Instance entirely into a warmSlot wrapper in agents/.
 	IdleTimer *time.Timer
+}
+
+// stdioPipes groups the six worker-side stdio plumbing FDs of a
+// sandbox.Instance. Embedded into Instance so call sites that reach
+// for sb.stdinChild / sb.stdoutToDispatcher / etc. keep working via
+// field promotion — keeping the struct definition tidy without
+// forcing every reference to add a `.pipes.` indirection.
+//
+// stdinChild / stdoutChild / stderrChild are the Sentry-facing ends:
+// passed to the runsc-create subprocess as its cmd.Stdin/Stdout/Stderr
+// so the subprocess donates them to the Sentry boot child.
+//
+// stdoutInternalR / stderrInternalR are the worker-side read ends of
+// the Sentry's stdout/stderr pipes. drainSentryStdio reads from these
+// and fans bytes out to the slog sink and (in stdio mode) the
+// dispatcher-facing outer pipe.
+//
+// stdoutToDispatcher / stderrToDispatcher are the write ends of the
+// dispatcher-facing outer pipes (paired with sb.Stdout / sb.Stderr).
+// Only allocated when stdio=true; nil otherwise so the drain
+// goroutine knows to skip the dispatcher fan-out.
+type stdioPipes struct {
+	stdinChild         *os.File
+	stdoutChild        *os.File
+	stderrChild        *os.File
+	stdoutInternalR    *os.File
+	stderrInternalR    *os.File
+	stdoutToDispatcher *os.File
+	stderrToDispatcher *os.File
 }

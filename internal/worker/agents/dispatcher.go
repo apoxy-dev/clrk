@@ -155,23 +155,39 @@ type sema struct {
 	ch  chan struct{}
 }
 
-// NewDispatcher constructs a Dispatcher. Production callers pass a
-// real *SandboxManager (which satisfies SandboxRuntime) and a real
-// *egress.Router; tests pass fakes / nil where appropriate.
+// DispatcherConfig bundles the construction-time inputs of
+// NewDispatcher. The previous 7-arg positional signature mixed
+// infrastructure handles (client, router, MetadataReg), pod identity
+// (PodName, Namespace), and per-pod shared state (Active) in one
+// list; the struct keeps each field's role visible at the call site
+// and lets tests partially override config.
 //
-// metaReg is the worker-wide IMDS registry that Metadata-mode
+// MetadataReg is the worker-wide IMDS registry that Metadata-mode
 // dispatches use to expose the per-execution *metadata.Entry to the
 // central IMDS HTTP server. May be nil in tests that exercise only
 // the Stdin delivery path.
-func NewDispatcher(c client.Client, mgr SandboxRuntime, r *egress.Router, podName, namespace string, active *activeCounter, metaReg *metadata.Registry) *Dispatcher {
+type DispatcherConfig struct {
+	Client      client.Client
+	Runtime     SandboxRuntime
+	Router      *egress.Router
+	PodName     string
+	Namespace   string
+	Active      *activeCounter
+	MetadataReg *metadata.Registry
+}
+
+// NewDispatcher constructs a Dispatcher. Production callers pass a
+// real *sandbox.Manager (which satisfies SandboxRuntime) and a real
+// *egress.Router; tests pass fakes / nil where appropriate.
+func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	return &Dispatcher{
-		client:     c,
-		sandboxMgr: mgr,
-		router:     r,
-		podName:    podName,
-		namespace:  namespace,
-		active:     active,
-		metaReg:    metaReg,
+		client:     cfg.Client,
+		sandboxMgr: cfg.Runtime,
+		router:     cfg.Router,
+		podName:    cfg.PodName,
+		namespace:  cfg.Namespace,
+		active:     cfg.Active,
+		metaReg:    cfg.MetadataReg,
 	}
 }
 
@@ -354,7 +370,16 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.sandboxMgr.Purge(ctx, sandboxID)
-		sb, err = d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true, 0)
+		sb, err = d.sandboxMgr.Create(ctx, sandbox.CreateRequest{
+			ID:        sandboxID,
+			AgentRef:  name,
+			Identity:  identity,
+			CAPEM:     caPEM,
+			Sandbox:   rev.Spec.AgentSandbox,
+			Resources: ta.Spec.Resources,
+			State:     ta.Spec.State,
+			Stdio:     true,
+		})
 		if err != nil {
 			if errors.Is(err, sandbox.ErrStateOverLimit) {
 				log.Info("Refusing dispatch — agent state over size limit", "err", err)

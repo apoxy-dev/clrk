@@ -251,7 +251,15 @@ func (m *DaemonLifecycle) run(ctx context.Context, da *clrkv1alpha1.DaemonAgent,
 		// strands the state directory and every subsequent retry
 		// rejects with "container with given ID already exists".
 		m.sandboxMgr.Purge(ctx, sandboxID)
-		if _, err := m.sandboxMgr.Create(ctx, sandboxID, da.Name, identity, caPEM, rev.Spec.AgentSandbox, da.Spec.Resources, nil, false, attempt); err != nil {
+		if _, err := m.sandboxMgr.Create(ctx, sandbox.CreateRequest{
+			ID:        sandboxID,
+			AgentRef:  da.Name,
+			Identity:  identity,
+			CAPEM:     caPEM,
+			Sandbox:   rev.Spec.AgentSandbox,
+			Resources: da.Spec.Resources,
+			Attempt:   attempt,
+		}); err != nil {
 			log.Error(err, "Failed to create sandbox")
 			if !m.sleepBackoff(ctx, &backoffExp) {
 				return

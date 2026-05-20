@@ -73,7 +73,16 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// dials the worker's host resolvers for any :53 traffic.
 	resolvers := sandbox.ReadWorkerResolvers()
 	imageStore := sandbox.NewImageStore(clrkImagesDir)
-	sandboxMgr := sandbox.NewManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, imdsHostAddr, egressHostAddr, resolvers)
+	sandboxMgr := sandbox.NewManager(sandbox.ManagerConfig{
+		StateDir:       clrkStateDir,
+		RootDir:        clrkRootDir,
+		LogsDir:        clrkLogsDir,
+		PodName:        r.PodName,
+		ImageStore:     imageStore,
+		IMDSHostAddr:   imdsHostAddr,
+		EgressHostAddr: egressHostAddr,
+		Resolvers:      resolvers,
+	})
 
 	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)
 	if err != nil {
@@ -93,7 +102,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// this pod by the per-TaskAgent HTTPRoute and executes one
 	// short-lived sandbox per request.
 	active := agents.NewActiveCounter()
-	disp := agents.NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active, metaReg)
+	disp := agents.NewDispatcher(agents.DispatcherConfig{
+		Client:      r.Client,
+		Runtime:     sandboxMgr,
+		Router:      router,
+		PodName:     r.PodName,
+		Namespace:   r.Namespace,
+		Active:      active,
+		MetadataReg: metaReg,
+	})
 
 	// Warm pool shares the activeCounter's notifier so warm
 	// fills/evictions push deltas to the WorkerStatusService stream

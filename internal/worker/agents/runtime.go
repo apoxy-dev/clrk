@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-logr/logr"
 
-	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
@@ -86,18 +85,7 @@ func deleteSandboxBounded(mgr SandboxRuntime, id sandbox.SandboxID, log logr.Log
 // package for the production implementation.
 type SandboxRuntime interface {
 	Purge(ctx context.Context, id sandbox.SandboxID)
-	Create(
-		ctx context.Context,
-		id sandbox.SandboxID,
-		agentRef string,
-		identity proxyproto.AgentIdentity,
-		caPEM []byte,
-		spec clrkv1alpha1.AgentSandbox,
-		resources clrkv1alpha1.ExecutionResources,
-		state *clrkv1alpha1.AgentState,
-		stdio bool,
-		attempt int32,
-	) (*sandbox.Instance, error)
+	Create(ctx context.Context, req sandbox.CreateRequest) (*sandbox.Instance, error)
 	SetEgressBackends(id sandbox.SandboxID, backends []egress.BackendListener) error
 	SetEgressPolicy(id sandbox.SandboxID, policy *egress.SandboxPolicy) error
 	SetInvocationID(id sandbox.SandboxID, invocationID string) error

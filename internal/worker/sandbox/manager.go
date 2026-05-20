@@ -72,30 +72,49 @@ type sandboxLogs struct {
 	file   *os.File
 }
 
+// ManagerConfig bundles the construction-time inputs of NewManager.
+// Field grouping mirrors concerns: filesystem roots, the per-pod
+// identity, the image store, and the worker-bound dial targets used
+// to render every sandbox's initStr.
+type ManagerConfig struct {
+	// StateDir is runsc's --root directory; one subdirectory per
+	// sandbox keyed by container ID.
+	StateDir string
+	// RootDir holds per-sandbox rootfs overlays + trust + net config.
+	RootDir string
+	// LogsDir is the per-agent stdio log file root.
+	LogsDir string
+	// PodName tags every sandbox annotation so out-of-band tooling
+	// can correlate libcontainer state with the owning worker pod.
+	PodName string
+	// ImageStore pulls and extracts OCI images. Shared across all
+	// sandboxes on this worker.
+	ImageStore *ImageStore
+	// IMDSHostAddr is the worker-bound IMDS dial target (typically
+	// "127.0.0.1:<WorkerIMDSPort>") shipped to each Sentry via
+	// initStr. The in-Sentry TCP forwarder dials it when it matches
+	// an outbound SYN to 169.254.169.254:80 / [fd00:ec2::254]:80.
+	IMDSHostAddr string
+	// EgressHostAddr is the worker-bound egress dial target shipped
+	// via initStr. Every non-IMDS/DNS outbound TCP from the Sentry
+	// lands here for central policy + MITM dispatch.
+	EgressHostAddr string
+	// Resolvers is the host-side DNS resolver list shipped to each
+	// Sentry via InitStr.DNSResolvers.
+	Resolvers []netip.AddrPort
+}
+
 // NewManager constructs the worker's sandbox lifecycle manager.
-//
-// imdsHostAddr is the worker-bound IMDS dial target (typically
-// "127.0.0.1:<WorkerIMDSPort>") shipped to each Sentry via initStr.
-// egressHostAddr is the worker-bound egress bridge target shipped via
-// initStr.EgressHostAddr — every non-IMDS/DNS outbound TCP from the
-// Sentry lands here for central policy + MITM dispatch. resolvers is
-// the host-side resolver list shipped via initStr for the Sentry's
-// UDP/DNS forwarder.
-func NewManager(
-	stateDir, rootDir, logsDir, podName string,
-	imageStore *ImageStore,
-	imdsHostAddr, egressHostAddr string,
-	resolvers []netip.AddrPort,
-) *Manager {
+func NewManager(cfg ManagerConfig) *Manager {
 	return &Manager{
-		stateDir:        stateDir,
-		rootDir:         rootDir,
-		logsDir:         logsDir,
-		podName:         podName,
-		imageStore:      imageStore,
-		imdsHostAddr:    imdsHostAddr,
-		egressHostAddr:  egressHostAddr,
-		workerResolvers: resolvers,
+		stateDir:        cfg.StateDir,
+		rootDir:         cfg.RootDir,
+		logsDir:         cfg.LogsDir,
+		podName:         cfg.PodName,
+		imageStore:      cfg.ImageStore,
+		imdsHostAddr:    cfg.IMDSHostAddr,
+		egressHostAddr:  cfg.EgressHostAddr,
+		workerResolvers: cfg.Resolvers,
 		sandboxes:       make(map[SandboxID]*Instance),
 		waiters:         make(map[SandboxID]context.CancelFunc),
 		stdLogs:         make(map[SandboxID]sandboxLogs),
@@ -145,25 +164,43 @@ func (m *Manager) egressStateLocked(id SandboxID) *EgressState {
 	return st
 }
 
+// CreateRequest bundles the per-call inputs of Manager.Create. The
+// previous positional 10-arg signature was easy to mis-order and
+// inflated every call site; CreateRequest keeps each field's role
+// visible at the call site.
+//
+// AgentRef is the parent agent's K8s name (TaskAgent.Name or
+// DaemonAgent.Name). It is distinct from Identity.Name on TaskAgents,
+// where the latter holds the per-invocation name — AgentRef drives
+// the per-(ns,agent) state dir path and the warm-pool ownership
+// lookup, and must stay parent-scoped.
+type CreateRequest struct {
+	ID        SandboxID
+	AgentRef  string
+	Identity  proxyproto.AgentIdentity
+	CAPEM     []byte
+	Sandbox   clrkv1alpha1.AgentSandbox
+	Resources clrkv1alpha1.ExecutionResources
+	// State opts into a per-(ns,agent) persistent state bind-mount.
+	// Nil for stateless callers (DaemonAgent, stateless TaskAgent).
+	State *clrkv1alpha1.AgentState
+	// Stdio requests dispatcher-facing stdio pipes on the resulting
+	// Instance. Daemons set false; stdout/stderr still flow into the
+	// per-agent log file via the line-splitter sink in either mode.
+	Stdio bool
+	// Attempt is the restart-attempt counter (daemons); 0 for
+	// TaskAgent invocations.
+	Attempt int32
+}
+
 // Create pulls the image, builds an OCI bundle, and runs `runsc
 // create` to spawn the Sentry. The sandbox is left in the Ready phase
 // for warm pool use — Start is a separate call.
-func (m *Manager) Create(
-	ctx context.Context,
-	id SandboxID,
-	agentRef string,
-	identity proxyproto.AgentIdentity,
-	caPEM []byte,
-	sandbox clrkv1alpha1.AgentSandbox,
-	resources clrkv1alpha1.ExecutionResources,
-	state *clrkv1alpha1.AgentState,
-	stdio bool,
-	attempt int32,
-) (*Instance, error) {
-	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
+func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Instance, error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", req.ID)
 
 	m.mu.Lock()
-	if _, exists := m.sandboxes[id]; exists {
+	if _, exists := m.sandboxes[req.ID]; exists {
 		m.mu.Unlock()
 		return nil, ErrAlreadyExists
 	}
@@ -171,7 +208,7 @@ func (m *Manager) Create(
 
 	log.Info("Creating sandbox")
 
-	imgInfo, err := m.imageStore.EnsureImage(ctx, sandbox.Image)
+	imgInfo, err := m.imageStore.EnsureImage(ctx, req.Sandbox.Image)
 	if err != nil {
 		return nil, fmt.Errorf("ensuring image: %w", err)
 	}
@@ -197,56 +234,56 @@ func (m *Manager) Create(
 	pushCleanup := func(f func()) { cleanup = append(cleanup, f) }
 
 	var extraMounts []specs.Mount
-	if len(caPEM) > 0 {
-		caPath, err := m.writeAgentCA(id, caPEM)
+	if len(req.CAPEM) > 0 {
+		caPath, err := m.writeAgentCA(req.ID, req.CAPEM)
 		if err != nil {
 			return nil, fmt.Errorf("staging agent CA: %w", err)
 		}
-		pushCleanup(func() { m.removeAgentCA(id) })
+		pushCleanup(func() { m.removeAgentCA(req.ID) })
 		extraMounts = append(extraMounts, buildTrustMountsSpec(sandboxRootFS, caPath)...)
 	}
-	resolvPath, err := m.writeSandboxResolvConf(id, gw)
+	resolvPath, err := m.writeSandboxResolvConf(req.ID, gw)
 	if err != nil {
 		return nil, fmt.Errorf("staging sandbox resolv.conf: %w", err)
 	}
-	pushCleanup(func() { m.removeSandboxNetConfig(id) })
+	pushCleanup(func() { m.removeSandboxNetConfig(req.ID) })
 	extraMounts = append(extraMounts, buildResolvMountSpec(resolvPath))
-	if state != nil {
-		hostPath, err := ensureStateDir(identity.Namespace, agentRef, state.SizeLimitMB)
+	if req.State != nil {
+		hostPath, err := ensureStateDir(req.Identity.Namespace, req.AgentRef, req.State.SizeLimitMB)
 		if err != nil {
 			return nil, err
 		}
-		extraMounts = append(extraMounts, buildStateMountSpec(hostPath, state))
+		extraMounts = append(extraMounts, buildStateMountSpec(hostPath, req.State))
 	}
 
-	args := resolveProcessArgs(sandbox, imgInfo.Entrypoint)
-	env := buildProcessEnv(sandbox.Env)
-	annotations := buildSandboxAnnotations(identity, m.podName, attempt)
-	spec := buildSpec(string(id), sandboxRootFS, args, env, resources, extraMounts, annotations)
+	args := resolveProcessArgs(req.Sandbox, imgInfo.Entrypoint)
+	env := buildProcessEnv(req.Sandbox.Env)
+	annotations := buildSandboxAnnotations(req.Identity, m.podName, req.Attempt)
+	spec := buildSpec(string(req.ID), sandboxRootFS, args, env, req.Resources, extraMounts, annotations)
 
-	bundleDir, err := m.ensureRunscBundleDir(id)
+	bundleDir, err := m.ensureRunscBundleDir(req.ID)
 	if err != nil {
 		return nil, err
 	}
-	pushCleanup(func() { m.removeRunscBundleDir(id) })
+	pushCleanup(func() { m.removeRunscBundleDir(req.ID) })
 	if err := writeConfigJSON(bundleDir, spec); err != nil {
 		return nil, fmt.Errorf("writing OCI bundle: %w", err)
 	}
 
 	sb := &Instance{
-		ID:        id,
-		AgentRef:  agentRef,
+		ID:        req.ID,
+		AgentRef:  req.AgentRef,
 		Phase:     SandboxReady,
 		RootFS:    sandboxRootFS,
 		SandboxIP: sandboxIP,
 		GatewayIP: gw,
-		Sandbox:   sandbox,
-		Resources: resources,
-		Identity:  identity,
+		Sandbox:   req.Sandbox,
+		Resources: req.Resources,
+		Identity:  req.Identity,
 		CreatedAt: time.Now(),
 	}
 
-	if err := wireSandboxStdio(sb, stdio); err != nil {
+	if err := wireSandboxStdio(sb, req.Stdio); err != nil {
 		return nil, err
 	}
 	pushCleanup(func() {
@@ -262,7 +299,7 @@ func (m *Manager) Create(
 	sb.initStr = initStr
 
 	createErr := runscCreate(ctx, runscCreateOpts{
-		id:        string(id),
+		id:        string(req.ID),
 		rootDir:   m.stateDir,
 		bundleDir: bundleDir,
 		initStr:   initStr,
@@ -276,13 +313,13 @@ func (m *Manager) Create(
 
 	cleanup = nil // success — keep all allocated resources.
 	m.mu.Lock()
-	m.sandboxes[id] = sb
+	m.sandboxes[req.ID] = sb
 	// Seed the egress state record with the sandbox's identity so
 	// the bridge has something useful to log before SetEgressBackends
 	// / SetEgressPolicy / SetInvocationID fire (which they may not at
 	// all, for DaemonAgents with no EgressRefs).
-	st := m.egressStateLocked(id)
-	st.Identity = identity
+	st := m.egressStateLocked(req.ID)
+	st.Identity = req.Identity
 	m.mu.Unlock()
 
 	log.Info("Sandbox created")
