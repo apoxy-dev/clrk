@@ -3,7 +3,10 @@
 package sentrystack
 
 import (
+	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 
 	"gvisor.dev/gvisor/pkg/sentry/socket/plugin"
@@ -123,4 +126,57 @@ func nicIDByName(info map[tcpip.NICID]stack.NICInfo, name string) tcpip.NICID {
 		}
 	}
 	return 0
+}
+
+// RoutedTCPDialer aliases the unexported routedDialer so tests in
+// apoxy-cloud//clrk/sentrystack/ can name the value type without the
+// package exposing routedDialer to production callers.
+type RoutedTCPDialer = routedDialer
+
+// NewRoutedTCPDialerForTest constructs a routedDialer the same way
+// Init does — see newRoutedTCPDialer in forwarder.go. dnsCache may be
+// nil to disable DstName lookup.
+func NewRoutedTCPDialerForTest(init *InitStr, dnsCache *DNSCache) *RoutedTCPDialer {
+	return newRoutedTCPDialer(init, dnsCache)
+}
+
+// DialTCPForTest invokes (*routedDialer).DialTCP directly. The exported
+// method on the alias would work too, but a named seam keeps the test
+// boundary explicit.
+func (d *RoutedTCPDialer) DialTCPForTest(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error) {
+	return d.DialTCP(ctx, src, dst)
+}
+
+// IMDSTargetsForTest returns the parsed IMDS target set so a test can
+// assert newRoutedTCPDialer correctly handled malformed IMDSV4/V6
+// without poking into the unexported field.
+func (d *RoutedTCPDialer) IMDSTargetsForTest() []netip.AddrPort {
+	out := make([]netip.AddrPort, 0, len(d.imdsTargets))
+	for ap := range d.imdsTargets {
+		out = append(out, ap)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// RoutedUDPDialer aliases routedUDPDialer for the test target.
+type RoutedUDPDialer = routedUDPDialer
+
+// NewRoutedUDPDialerForTest constructs a routedUDPDialer the same way
+// Init does (see newRoutedUDPDialer in udp_linux.go).
+func NewRoutedUDPDialerForTest(init *InitStr) *RoutedUDPDialer {
+	return newRoutedUDPDialer(init)
+}
+
+// DialUDPForTest invokes (*routedUDPDialer).DialUDP directly.
+func (d *RoutedUDPDialer) DialUDPForTest(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error) {
+	return d.DialUDP(ctx, src, dst)
+}
+
+// ResolversForTest returns the parsed resolver list so a test can
+// assert newRoutedUDPDialer skips unparseable entries.
+func (d *RoutedUDPDialer) ResolversForTest() []netip.AddrPort {
+	out := make([]netip.AddrPort, len(d.resolvers))
+	copy(out, d.resolvers)
+	return out
 }
