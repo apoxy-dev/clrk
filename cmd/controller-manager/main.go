@@ -74,7 +74,6 @@ func main() {
 		// :8081 for its own healthz/probe endpoint.
 		healthAddr           = flag.String("health-addr", ":8082", "Controller-manager healthz bind address.")
 		ingressController    = flag.Bool("ingress-controller", false, "Reconcile TaskAgent → Gateway/HTTPRoute. Requires gateway-api CRDs in the target cluster.")
-		workerDeployment     = flag.Bool("worker-deployment-controller", false, "Reconcile WorkerPool → Deployment/Service. Off in clrk dev where workers run as docker containers on the host (a k8s-managed Deployment would create duplicate workers).")
 		egController         = flag.Bool("egressgateway-controller", false, "Reconcile EgressGateway → Envoy Gateway infra (GatewayClass, EnvoyProxy, Gateway) and mint the per-EG MITM CA.")
 		envoyImage           = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
 		grpcAddr             = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
@@ -144,6 +143,14 @@ func main() {
 			log.Error(err, "Unable to load kubeconfig", "path", kubeconfig)
 			os.Exit(1)
 		}
+		clusterCfg = cfg
+		opts = append(opts, apiserver.WithClientConfig(cfg))
+	} else if cfg, err := rest.InClusterConfig(); err == nil {
+		// Running as a Pod with a mounted ServiceAccount token — use the
+		// in-cluster apiserver address as the controller-runtime client's
+		// backend so cm reconcilers see apps/v1, core, etc. directly from
+		// the cluster. clrk.apoxy.dev/v1alpha1 still flows through the
+		// embedded apiserver via the aggregated APIService.
 		clusterCfg = cfg
 		opts = append(opts, apiserver.WithClientConfig(cfg))
 	}
@@ -250,14 +257,15 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if *workerDeployment {
-		if err := (&controller.WorkerPoolDeploymentReconciler{
-			Client: cm.GetClient(),
-			Scheme: cm.GetScheme(),
-		}).SetupWithManager(cm); err != nil {
-			log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
-			os.Exit(1)
-		}
+	// WorkerPool → Deployment/Service. Runs in every mode; the legacy
+	// dev-only skip (workers as docker containers) is retired now that
+	// `clrk dev` runs workers as Pods.
+	if err := (&controller.WorkerPoolDeploymentReconciler{
+		Client: cm.GetClient(),
+		Scheme: cm.GetScheme(),
+	}).SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
+		os.Exit(1)
 	}
 	if *egController {
 		if err := (&controller.EgressGatewayReconciler{
@@ -356,7 +364,6 @@ func main() {
 		"port", *bindPort,
 		"db", *dbPath,
 		"ingress_controller", *ingressController,
-		"worker_deployment_controller", *workerDeployment,
 		"kubeconfig", kubeconfig,
 	)
 

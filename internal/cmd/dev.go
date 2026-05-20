@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
@@ -25,8 +24,6 @@ import (
 	"github.com/apoxy-dev/clrk/internal/cmd/devotel"
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
 	"github.com/apoxy-dev/clrk/internal/drivers"
-	"github.com/apoxy-dev/clrk/internal/drivers/dockerutils"
-	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // devOtelPort is the host TCP port the in-process OTLP/HTTP receiver
@@ -194,10 +191,14 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 	}
 	defer state.teardown()
 
-	streamLogs(ctx, drivers.ClusterServerContainerName)
-	streamLogs(ctx, drivers.ControllerManagerContainerName)
-	for _, w := range state.workers {
-		streamLogs(ctx, w.Name())
+	// k3d server is the only docker container we still tail directly;
+	// cm + worker pods are streamed via the apiserver.
+	streamDockerLogs(ctx, drivers.ClusterServerContainerName)
+	streamPodLogsPlain(ctx, state.cluster.HostKubeconfigPath(),
+		devClrkNamespace, podSelectorControllerManager, 0, controllerManagerComponent)
+	for i := 0; i < o.workers; i++ {
+		streamPodLogsPlain(ctx, state.cluster.HostKubeconfigPath(),
+			"default", podSelectorWorkers, i, workerComponent(i))
 	}
 
 	go forwardOtel(ctx, receiver, nil, func(name, line string) {
@@ -205,7 +206,7 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 	})
 
 	if o.watch {
-		state.startWatcher(ctx, o, nil)
+		slog.Warn("--watch is temporarily disabled while we wire pod-based reloads; rebuild and push to the local registry, then `clrk dev reload <component>`.")
 	}
 
 	<-ctx.Done()
@@ -242,10 +243,10 @@ func forwardOtel(ctx context.Context, receiver *devotel.Receiver, store *devagen
 func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) error {
 	componentNames := []string{
 		drivers.ClusterServerContainerName,
-		drivers.ControllerManagerContainerName,
+		controllerManagerComponent,
 	}
 	for i := 0; i < o.workers; i++ {
-		componentNames = append(componentNames, drivers.NewWorkerDriver(i).Name())
+		componentNames = append(componentNames, workerComponent(i))
 	}
 	componentNames = append(componentNames, devtui.OtelLogsSource, devtui.OtelTracesSource)
 
@@ -270,11 +271,15 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 			orchErrCh <- err
 			return
 		}
-		for _, name := range []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName} {
-			go streamLogsTo(orchestrateCtx, prog, name)
-		}
-		for _, w := range state.workers {
-			go streamLogsTo(orchestrateCtx, prog, w.Name())
+		// Docker logs for the k3d server; pod logs for cm + workers.
+		go streamDockerLogsTo(orchestrateCtx, prog, drivers.ClusterServerContainerName)
+		kubeconfig := state.cluster.HostKubeconfigPath()
+		go streamPodLogsTUI(orchestrateCtx, prog, kubeconfig,
+			devClrkNamespace, podSelectorControllerManager, 0, controllerManagerComponent)
+		for i := 0; i < o.workers; i++ {
+			i := i
+			go streamPodLogsTUI(orchestrateCtx, prog, kubeconfig,
+				"default", podSelectorWorkers, i, workerComponent(i))
 		}
 		go forwardOtel(orchestrateCtx, receiver, store, func(name, line string) {
 			prog.SendLog(name, line, devtui.StreamStdout)
@@ -289,7 +294,7 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 			}
 		}()
 		if o.watch {
-			state.startWatcher(orchestrateCtx, o, prog)
+			slog.Warn("--watch is temporarily disabled while we wire pod-based reloads; rebuild and push to the local registry, then `clrk dev reload <component>`.")
 		}
 		// Block until shutdown signaled; orchErrCh stays nil for clean exit.
 		<-orchestrateCtx.Done()
@@ -316,8 +321,6 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 // regardless of which step failed.
 type devState struct {
 	cluster *drivers.ClusterDriver
-	cm      *drivers.ControllerManagerDriver
-	workers []*drivers.WorkerDriver
 }
 
 func (s *devState) teardown() {
@@ -326,32 +329,43 @@ func (s *devState) teardown() {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, w := range s.workers {
-		_ = w.Stop(shutCtx)
-	}
-	if s.cm != nil {
-		_ = s.cm.Stop(shutCtx)
-	}
 	if s.cluster != nil {
 		_ = s.cluster.Stop(shutCtx)
 	}
 }
 
-// bringUp drives the linear startup sequence (k3s → gateway-api → cm →
-// APIService → /readyz → workers). When prog is non-nil, each step also
-// emits a ComponentStatusMsg so the TUI can flip the matching glyph.
+// Component name constants used by the TUI, log streamers, and the
+// `clrk dev reload` subcommand. The k3d server keeps its docker
+// container name because it's still a docker container; cm + worker
+// are symbolic component names mapping to in-cluster pods.
+const (
+	controllerManagerComponent = "controller-manager"
+
+	// podSelectorControllerManager and podSelectorWorkers are the label
+	// selectors the cm bootstrap (this file's bootstrapControllerManager)
+	// and the WorkerPoolDeploymentReconciler stamp on their pods. Used
+	// by the log streamers + status command to locate live pods.
+	podSelectorControllerManager = "app.kubernetes.io/name=clrk-controller-manager"
+	podSelectorWorkers           = "clrk.apoxy.dev/workerpool=default"
+)
+
+// workerComponent returns the canonical component name for worker
+// replica i (0-based). Used as a TUI sidebar entry and as the
+// argument to `clrk dev reload worker -i N`.
+func workerComponent(i int) string {
+	return fmt.Sprintf("worker-%d", i)
+}
+
+// bringUp drives the linear startup sequence: cluster → namespace →
+// controller-manager Deployment → APIService discoverable → default
+// WorkerPool (reconciler creates worker Deployment) → secrets/manifests.
+// When prog is non-nil, each step also emits a ComponentStatusMsg so
+// the TUI can flip the matching glyph.
 func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, error) {
 	state := &devState{}
 
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 
-	// ClusterDriver brings up a k3d cluster + a colocated local OCI
-	// registry on the shared `clrk` docker network via the ctlptl Go
-	// library. Apiserver port and registry port are host-published by
-	// k3d / ctlptl on free local ports — discoverable from the
-	// emitted host kubeconfig and ClusterDriver.RegistryHostPort()
-	// respectively. The controller-manager still reaches the apiserver
-	// over the docker-network kubeconfig at `state.cluster.KubeconfigPath()`.
 	state.cluster = drivers.NewClusterDriver(o.dataDir, o.k3sImage, o.registryPort)
 	if err := withStatus(prog, drivers.ClusterServerContainerName, func() error {
 		if err := state.cluster.Start(ctx); err != nil {
@@ -368,100 +382,51 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 
 	// Promote the dev cluster to the current context so subsequent
 	// `clrk apply` / `clrk agents` invocations from any shell target
-	// the live dev cluster without --local. Best-effort — the user
-	// can still pass --local or --kubeconfig if this fails.
+	// the live dev cluster without --local. Best-effort.
 	if err := writeDevContext(state.cluster.HostKubeconfigPath()); err != nil {
 		slog.Warn("Failed to register dev context in ~/.clrk/config", "err", err)
 	}
 
-	// Materialize the controller-manager's runtime namespace before the
-	// container starts — the supervised envoy-gateway certgen writes
-	// its TLS Secret to clrk/envoy-gateway as its very first action
-	// and crash-loops if the namespace doesn't exist.
 	if err := state.cluster.EnsureNamespace(ctx, devClrkNamespace); err != nil {
 		return state, fmt.Errorf("ensuring %q namespace: %w", devClrkNamespace, err)
 	}
 
-	state.cm = drivers.NewControllerManagerDriver()
-	cmOpts, err := controllerManagerOpts(o)
-	if err != nil {
-		return state, err
-	}
-
-	// cm and workers both depend only on k3s (which is up). Bring them
-	// up in parallel — workers spend the cm /readyz wait pulling their
-	// own image instead of sitting idle.
-	state.workers = make([]*drivers.WorkerDriver, o.workers)
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return withStatus(prog, drivers.ControllerManagerContainerName, func() error {
-			if _, err := state.cm.Start(gctx, cmOpts...); err != nil {
-				return err
-			}
-			slog.Info("Controller-manager running", "container", drivers.ControllerManagerContainerName)
-
-			cmIP, err := dockerutils.IPOnNetwork(gctx, drivers.ControllerManagerContainerName, drivers.NetworkName)
-			if err != nil {
-				return fmt.Errorf("getting controller-manager IP: %w", err)
-			}
-			if err := bootstrapClrkAPIService(gctx, state.cluster, cmIP, 8443); err != nil {
-				return fmt.Errorf("registering clrk APIService: %w", err)
-			}
-			if err := state.cluster.ApplyControllerManagerBridge(gctx, devClrkNamespace, cmIP, 9443, 9444, 8082, 18000); err != nil {
-				return fmt.Errorf("bridging controller-manager: %w", err)
-			}
-			slog.Info("Controller-manager registered + bridged", "backend", cmIP)
-
-			if err := waitReadyzInContainer(gctx, drivers.ControllerManagerContainerName, "https://localhost:8443/readyz", 90*time.Second); err != nil {
-				return fmt.Errorf("controller-manager never became ready: %w", err)
-			}
-			return nil
-		})
-	})
-	for i := 0; i < o.workers; i++ {
-		i := i
-		w := drivers.NewWorkerDriver(i)
-		state.workers[i] = w
-		wOpts, err := workerOpts(o, w)
-		if err != nil {
-			return state, err
+	if err := withStatus(prog, controllerManagerComponent, func() error {
+		if err := bootstrapControllerManager(ctx, state.cluster, o.controllerImage, k8sPullPolicy(o.pull)); err != nil {
+			return fmt.Errorf("bootstrapping controller-manager: %w", err)
 		}
-		g.Go(func() error {
-			return withStatus(prog, w.Name(), func() error {
-				if _, err := w.Start(gctx, wOpts...); err != nil {
-					return fmt.Errorf("starting worker %d: %w", i, err)
-				}
-				slog.Info("Worker running", "container", w.Name())
-				return nil
-			})
-		})
-	}
-	if err := g.Wait(); err != nil {
+		slog.Info("Controller-manager Deployment applied; waiting Available")
+		if err := state.cluster.WaitDeploymentAvailable(ctx, devClrkNamespace, cmAccountName, 3*time.Minute); err != nil {
+			return fmt.Errorf("controller-manager never became available: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return state, err
 	}
 
 	if err := waitClrkAPIDiscoverable(ctx, state.cluster.HostKubeconfigPath(), 60*time.Second); err != nil {
 		return state, fmt.Errorf("waiting for clrk APIService aggregation: %w", err)
 	}
-	if err := bootstrapDefaultWorkerPool(ctx, state.cluster.HostKubeconfigPath()); err != nil {
+
+	if err := bootstrapDefaultWorkerPool(ctx, state.cluster, o.workerImage, int32(o.workers), k8sPullPolicy(o.pull)); err != nil {
 		return state, fmt.Errorf("bootstrapping default WorkerPool: %w", err)
 	}
-	// Bridge the default WorkerPool's dispatch port into k3s so
-	// in-cluster pods (e.g. integration tests, future cron-fired
-	// invokers) can dial workers by Service DNS the same way they
-	// would in cluster mode. WorkerPoolDeploymentReconciler creates
-	// this Service in cluster mode but isn't wired in clrk dev.
-	workerIPs := make([]string, 0, len(state.workers))
-	for _, w := range state.workers {
-		ip, err := dockerutils.IPOnNetwork(ctx, w.Name(), drivers.NetworkName)
-		if err != nil {
-			return state, fmt.Errorf("getting worker IP for %s: %w", w.Name(), err)
+	// Wait for the worker Deployment (created by WorkerPoolDeploymentReconciler)
+	// to become Available. Each replica is surfaced separately in the TUI
+	// for visibility, but we wait once on the Deployment as a whole.
+	for i := 0; i < o.workers; i++ {
+		setStatus(prog, workerComponent(i), devtui.StatusStarting)
+	}
+	if err := state.cluster.WaitDeploymentAvailable(ctx, "default", "default-workers", 3*time.Minute); err != nil {
+		for i := 0; i < o.workers; i++ {
+			setStatus(prog, workerComponent(i), devtui.StatusError)
 		}
-		workerIPs = append(workerIPs, ip)
+		return state, fmt.Errorf("default workers never became available: %w", err)
 	}
-	if err := state.cluster.ApplyDefaultWorkerPoolBridge(ctx, workerIPs, ports.DispatchPort); err != nil {
-		return state, fmt.Errorf("bridging default WorkerPool dispatch port: %w", err)
+	for i := 0; i < o.workers; i++ {
+		setStatus(prog, workerComponent(i), devtui.StatusReady)
 	}
+
 	if len(o.parsedSecrets) > 0 {
 		if err := applySecretSpecs(ctx, state.cluster.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {
 			return state, fmt.Errorf("applying --secret: %w", err)
@@ -473,9 +438,6 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		}
 	}
 
-	// Persist the resolved session state so `clrk dev reload <component>`
-	// can recover the effective image refs + pull policy + worker count
-	// without re-parsing flags or guessing.
 	if err := writeDevSession(o, state); err != nil {
 		slog.Warn("Failed to write dev.json (reload subcommand will be unavailable)", "err", err)
 	}
@@ -483,120 +445,17 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	return state, nil
 }
 
-// controllerManagerOpts returns the docker run options used by both bringUp
-// and `clrk dev reload controller-manager` so the two paths cannot drift.
-// Cluster-side bootstrapping (APIService, EG bridge, extensionManager wiring)
-// is intentionally NOT here — it's idempotent on bringUp and a reload skips
-// it entirely since k3s already has those records.
-func controllerManagerOpts(o *devOpts) ([]drivers.Option, error) {
-	env := map[string]string{
-		"KUBECONFIG": "/var/lib/clrk/kubeconfig",
-		// Tolerate duplicate Envoy protobuf registrations: envoy-go and
-		// envoyproxy/go-control-plane both register TLS proto files
-		// because envoyproxy/gateway's extension proto transitively
-		// imports go-control-plane's TLS types. Matches the pattern
-		// apoxy-cloud uses (see cmd/backplane/BUILD.bazel's x_def).
-		"GOLANG_PROTOBUF_REGISTRATION_CONFLICT": "ignore",
-		// Tell the controller-manager its runtime namespace so the
-		// supervised envoy-gateway child gets ENVOY_GATEWAY_NAMESPACE
-		// pointing at the dev bridge ns (matches the --grpc-advertise-uri
-		// + --ingress-extproc-host flags below). Production sets this
-		// via downward API from the Deployment manifest.
-		"POD_NAMESPACE": devClrkNamespace,
+// k8sPullPolicy maps the docker --pull value (always|missing|never) to
+// the matching corev1.PullPolicy (Always|IfNotPresent|Never).
+func k8sPullPolicy(pull string) string {
+	switch pull {
+	case "always":
+		return "Always"
+	case "never":
+		return "Never"
+	default:
+		return "IfNotPresent"
 	}
-	if o.otelEndpoint != "" {
-		// Default OTLP target for any EgressGateway whose Spec.OTLP.Endpoint
-		// is empty — see internal/extproc/sinks.go effectiveOTLP. Production
-		// controller-manager Deployments don't set this env, so behaviour
-		// there is unchanged.
-		env["CLRK_DEV_OTEL_ENDPOINT"] = o.otelEndpoint
-	}
-	opts := []drivers.Option{
-		drivers.WithImage(o.controllerImage),
-		drivers.WithPull(o.pull),
-		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
-		drivers.WithEnv(env),
-		// Resolve `host.docker.internal` to the docker bridge IP so the
-		// controller-manager can dial the in-process devotel receiver
-		// the host runs. macOS Docker Desktop already publishes this
-		// name; the explicit add-host makes the same name work on
-		// Linux without a config-file edit.
-		drivers.WithExtraHost("host.docker.internal", "host-gateway"),
-		drivers.WithArgs(
-			"--db=/var/lib/clrk/data.db",
-			"--bind-addr=0.0.0.0",
-			"--bind-port=8443",
-			// Auth is disabled in dev and the binary inside the container
-			// must bind 0.0.0.0 so docker -p 8443:8443 can reach it; ack
-			// the unauthenticated public bind so the apiserver guard lets
-			// us start. The guard refuses this combo without the ack to
-			// stop production deployments from accidentally exposing an
-			// unauthenticated control plane.
-			"--insecure-allow-public",
-			// Ingress reconciler is on (k3s has gateway-api installed);
-			// worker-deployment is off because clrk dev runs the worker
-			// directly via docker — a Deployment would create a duplicate
-			// worker pod inside k3s with broken nested-container semantics.
-			"--ingress-controller=true",
-			// EG-managed Envoy pods reach the controller-manager's ingress
-			// ext_proc port via the manually-managed Endpoints in
-			// clrk/clrk-controller-manager (same pattern as
-			// --grpc-advertise-uri above).
-			"--ingress-extproc-host=clrk-controller-manager.clrk.svc.cluster.local",
-			// EgressGateway reconciler is on.
-			"--egressgateway-controller=true",
-			// Advertise the bridge Service DNS so EG data plane Envoy pods
-			// dial the controller-manager via in-cluster coredns →
-			// manually-managed Endpoints → docker-network IP.
-			"--grpc-advertise-uri=clrk-controller-manager.clrk.svc.cluster.local:9443",
-			// Workers in clrk dev run on the docker network and can't
-			// route to k3s ClusterIPs, so the EgressGateway controller
-			// publishes Status.Listeners[*].BackendAddress as
-			// <k3s-container>:<NodePort> instead of the in-cluster
-			// Service DNS name. The k3s container is reachable from
-			// workers by docker DNS.
-			"--dev-egress-backend-host=" + drivers.ClusterServerContainerName,
-		),
-	}
-	if o.watch {
-		hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "controller-manager"))
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, drivers.WithWatchBinary(hostBin))
-	}
-	return opts, nil
-}
-
-// workerOpts returns the docker run options used by both bringUp and
-// `clrk dev reload worker` so the two paths cannot drift.
-func workerOpts(o *devOpts, w *drivers.WorkerDriver) ([]drivers.Option, error) {
-	opts := []drivers.Option{
-		drivers.WithImage(o.workerImage),
-		drivers.WithPull(o.pull),
-		drivers.WithVolume(o.dataDir, "/var/lib/clrk"),
-		drivers.WithEnv(map[string]string{
-			// Route all resource access through k3s; clrk.apoxy.dev is
-			// served by the controller-manager container via an
-			// aggregated APIService and transparently proxied by k3s.
-			//
-			// CLRK_POOL_NAME is unset; the worker binary defaults to
-			// "default" when missing. In prod the WorkerPoolDeployment
-			// controller injects it via downward API off the
-			// `clrk.apoxy.dev/workerpool` PodTemplate label.
-			"KUBECONFIG":    "/var/lib/clrk/kubeconfig",
-			"POD_NAME":      w.Name(),
-			"POD_NAMESPACE": "default",
-		}),
-	}
-	if o.watch {
-		hostBin, err := filepath.Abs(filepath.Join(o.dataDir, "bin", "worker"))
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, drivers.WithWatchBinary(hostBin))
-	}
-	return opts, nil
 }
 
 // withStatus wraps a starting → ready/error transition around a step's
@@ -612,78 +471,11 @@ func withStatus(prog *devtui.Program, name string, step func() error) error {
 	return nil
 }
 
-// startWatcher fires up the --watch goroutine. When prog is non-nil, the
-// watcher's lifecycle events are surfaced in the TUI sidebar.
-func (s *devState) startWatcher(ctx context.Context, o *devOpts, prog *devtui.Program) {
-	reloadAllWorkers := func(ctx context.Context) error {
-		var firstErr error
-		for _, w := range s.workers {
-			if err := w.Reload(ctx); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
-	}
-	reload := map[string]func(context.Context) error{
-		"cmd/controller-manager": s.cm.Reload,
-		"internal/controller":    s.cm.Reload,
-		"api":                    s.cm.Reload,
-		"cmd/worker":             reloadAllWorkers,
-		"internal/worker":        reloadAllWorkers,
-		"internal/netstack":      reloadAllWorkers,
-		"internal/egress":        reloadAllWorkers,
-	}
-	repoRoot, err := findRepoRoot()
-	if err != nil {
-		slog.Error("Watch mode disabled", "err", err)
-		return
-	}
-	go func() {
-		w := newWatcher(repoRoot, o.dataDir, reload)
-		w.events = watcherSink(prog)
-		if err := w.run(ctx); err != nil {
-			slog.Error("Watcher exited", "err", err)
-		}
-	}()
-}
-
 func setStatus(prog *devtui.Program, name string, s devtui.Status) {
 	if prog == nil {
 		return
 	}
 	prog.SetStatus(name, s)
-}
-
-func watcherSink(prog *devtui.Program) func(devtui.WatcherEvent, string, time.Duration, error) {
-	if prog == nil {
-		return nil
-	}
-	return prog.SendWatcher
-}
-
-// waitReadyzInContainer polls the given URL via `docker exec <container>
-// curl ...` until it returns 200 or the timeout fires. We go through
-// docker exec because Docker for Mac's port-forward layer breaks TLS
-// handshakes — handshakes from inside the docker network succeed.
-func waitReadyzInContainer(ctx context.Context, container, url string, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	for {
-		execCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := exec.CommandContext(execCtx, "docker", "exec", container,
-			"curl", "-ksSf", "--max-time", "1", url).Run()
-		cancel()
-		if err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return errors.New("timed out")
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
 }
 
 // waitClrkAPIDiscoverable polls k3s discovery until clrk.apoxy.dev/v1alpha1
@@ -744,19 +536,20 @@ func findRepoRoot() (string, error) {
 	}
 }
 
-// streamLogs spawns `docker logs -f <container>` and pipes its output into
-// the current process stdio. Used by the non-TUI fallback only.
-func streamLogs(ctx context.Context, container string) {
+// streamDockerLogs spawns `docker logs -f <container>` and pipes its
+// output into the current process stdio. Used by the non-TUI fallback
+// for the k3d server (still a docker container).
+func streamDockerLogs(ctx context.Context, container string) {
 	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", container)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	_ = cmd.Start()
 }
 
-// streamLogsTo runs `docker logs -f` and forwards each line into the TUI as a
-// LogLineMsg under the container's name. Stdout and stderr are demuxed so
-// the TUI can color stderr distinctly.
-func streamLogsTo(ctx context.Context, prog *devtui.Program, container string) {
+// streamDockerLogsTo runs `docker logs -f` and forwards each line into
+// the TUI as a LogLineMsg under the container's name. Stdout and stderr
+// are demuxed so the TUI can color stderr distinctly.
+func streamDockerLogsTo(ctx context.Context, prog *devtui.Program, container string) {
 	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", container)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

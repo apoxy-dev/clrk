@@ -20,10 +20,7 @@ import (
 // WorkerPoolDeploymentReconciler owns the k8s-side half of WorkerPool: it
 // creates/updates the Deployment + Service that host worker pods and
 // reports their health back as ReadyReplicas + Available/Progressing
-// conditions. Only wired in cluster mode; clrk dev runs workers directly
-// via docker on the host (libcontainer inside a k3s-pod inside docker
-// doesn't work cleanly with nested namespaces), so this reconciler is
-// skipped there.
+// conditions.
 type WorkerPoolDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme

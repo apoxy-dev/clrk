@@ -17,9 +17,8 @@ import (
 // WorkerPoolStatusReconciler owns the portable half of WorkerPool: it
 // aggregates execution capacity and per-agent active-execution counts, and
 // writes the "Configured" condition. It never reads or writes Deployment /
-// Service — that lives in WorkerPoolDeploymentReconciler and only runs in
-// cluster mode. The `ReadyReplicas` and `Progressing` fields are left to the
-// deployment reconciler; in dev they stay zero / absent.
+// Service — that lives in WorkerPoolDeploymentReconciler. The
+// `ReadyReplicas` and `Progressing` fields are left to that reconciler.
 type WorkerPoolStatusReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme

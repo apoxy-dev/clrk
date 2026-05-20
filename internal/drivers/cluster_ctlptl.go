@@ -10,11 +10,10 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -22,6 +21,7 @@ import (
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	ctlptlapi "github.com/tilt-dev/ctlptl/pkg/api"
 	"github.com/tilt-dev/ctlptl/pkg/api/k3dv1alpha5"
 	ctlptlcluster "github.com/tilt-dev/ctlptl/pkg/cluster"
@@ -59,10 +59,9 @@ const (
 // rancher/k3s directly.
 //
 // The cluster + registry come up on the existing `clrk` network so the
-// bridge pattern is unchanged: controller-manager and worker containers
-// still run as plain `docker run` siblings to the k3d nodes, with
-// selectorless Services + hand-managed Endpoints pointing back at their
-// docker IPs.
+// host can push to localhost:<RegistryHostPort()> and k3d's containerd
+// resolves the same content via `clrk-registry:5000/...`. The
+// controller-manager and worker(s) run as Pods inside this cluster.
 type ClusterDriver struct {
 	// DataDir is the host path where the rewritten kubeconfigs are
 	// written. Must be the same path mounted into the cm/worker drivers
@@ -388,10 +387,12 @@ func (d *ClusterDriver) EnsureNamespace(ctx context.Context, ns string) error {
 const fieldManager = "clrk-dev"
 
 // kubeClientFor lazily builds the controller-runtime client used by
-// applyObjects. The scheme covers corev1 (Namespace/Service/Endpoints)
-// and apiregistration/v1 (APIService) — every type the dev path
-// reconciles from the host. REST config comes from HostKubeconfigPath
-// because k3d publishes the apiserver port on the host.
+// ApplyObjects. The scheme covers the union of every typed object the
+// dev path reconciles from the host: client-go's combined scheme
+// (Namespace/ServiceAccount/Service/Deployment/ClusterRoleBinding/…),
+// the aggregated APIService API, and clrk.apoxy.dev (WorkerPool). REST
+// config comes from HostKubeconfigPath because k3d publishes the
+// apiserver port on the host.
 func (d *ClusterDriver) kubeClientFor(ctx context.Context) (client.Client, error) {
 	d.kubeOnce.Do(func() {
 		cfg, err := clientcmd.BuildConfigFromFlags("", d.HostKubeconfigPath())
@@ -408,6 +409,10 @@ func (d *ClusterDriver) kubeClientFor(ctx context.Context) (client.Client, error
 			d.kubeErr = fmt.Errorf("registering apiregistration scheme: %w", err)
 			return
 		}
+		if err := clrkv1alpha1.Install(sch); err != nil {
+			d.kubeErr = fmt.Errorf("registering clrk scheme: %w", err)
+			return
+		}
 		c, err := client.New(cfg, client.Options{Scheme: sch})
 		if err != nil {
 			d.kubeErr = fmt.Errorf("building client: %w", err)
@@ -421,124 +426,16 @@ func (d *ClusterDriver) kubeClientFor(ctx context.Context) (client.Client, error
 	return d.kubeClient, nil
 }
 
-// ApplyDefaultWorkerPoolBridge wires a `default-workers` Service in
-// the default namespace to the worker docker container(s) so
-// in-cluster pods can dial the dispatcher by the same DNS name the
-// WorkerPoolDeploymentReconciler would use in cluster mode
-// (`{wp.Name}-workers`). Without this bridge clrk dev has no way to
-// reach the worker dispatch port from inside k3s — the worker runs
-// as a docker container outside the pod network.
-//
-// Called once per bringUp after every worker container is up and its
-// docker-network IP is known.
-func (d *ClusterDriver) ApplyDefaultWorkerPoolBridge(ctx context.Context, workerIPs []string, dispatchPort int32) error {
-	if len(workerIPs) == 0 {
-		return nil
-	}
-	svc, eps := bridgeObjects("default", "default-workers", workerIPs, []bridgePort{
-		{Name: "dispatch", Port: dispatchPort},
-	})
-	return d.ApplyObjects(ctx, svc, eps)
-}
-
-// ApplyControllerManagerBridge wires two selectorless Services to the
-// clrk-controller-manager docker container so in-cluster pods can dial
-// it by DNS name. Both bridges live in clrkNS — the controller-
-// manager's runtime namespace — to match the in-cluster shape where
-// EG provisions all data-plane resources alongside the controller via
-// `ENVOY_GATEWAY_NAMESPACE`.
-//
-//  1. <clrkNS>/clrk-controller-manager:{grpcPort,extProcPort,healthPort} —
-//     clrk's gRPC services. grpcPort fronts the extension hooks +
-//     cert provider; extProcPort fronts the TaskAgent ingress
-//     ExternalProcessor consumed by the per-TA EG. Multiple named
-//     ports on a single Service so EG extension config and the
-//     per-namespace `clrk-ingress-extproc` Backend (FQDN.Port=9444)
-//     resolve through one bridge.
-//  2. <clrkNS>/envoy-gateway:xdsPort — the EG xDS server. EG's data-
-//     plane bootstrap dials `envoy-gateway.${ENVOY_GATEWAY_NAMESPACE}.svc:18000`,
-//     so this Service name is fixed; only the namespace floats with
-//     the runtime ns.
-func (d *ClusterDriver) ApplyControllerManagerBridge(ctx context.Context, clrkNS, cmIP string, grpcPort, extProcPort, healthPort, xdsPort int32) error {
-	ns := &corev1.Namespace{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{Name: clrkNS},
-	}
-	cmSvc, cmEps := bridgeObjects(clrkNS, "clrk-controller-manager", []string{cmIP}, []bridgePort{
-		{Name: "grpc", Port: grpcPort},
-		{Name: "extproc", Port: extProcPort},
-		{Name: "health", Port: healthPort},
-	})
-	egSvc, egEps := bridgeObjects(clrkNS, "envoy-gateway", []string{cmIP}, []bridgePort{
-		{Name: "grpc", Port: xdsPort},
-	})
-	return d.ApplyObjects(ctx, ns, cmSvc, cmEps, egSvc, egEps)
-}
-
-// bridgePort names a single port-and-targetPort entry on a bridge
-// Service. Port and targetPort are always equal — the bridge points
-// at a docker container that listens on the same port the cluster
-// dials.
-type bridgePort struct {
-	Name string
-	Port int32
-}
-
-// bridgeObjects builds the typed Service + Endpoints pair that fronts
-// one or more docker IPs under an in-cluster DNS name. Selectorless
-// Service relies on the hand-managed Endpoints object — kube-proxy
-// programs routes from those addresses straight to the docker network.
-func bridgeObjects(ns, name string, ips []string, ports []bridgePort) (*corev1.Service, *corev1.Endpoints) {
-	svcPorts := make([]corev1.ServicePort, len(ports))
-	epPorts := make([]corev1.EndpointPort, len(ports))
-	for i, p := range ports {
-		svcPorts[i] = corev1.ServicePort{
-			Name:       p.Name,
-			Port:       p.Port,
-			Protocol:   corev1.ProtocolTCP,
-			TargetPort: intstr.FromInt32(p.Port),
-		}
-		epPorts[i] = corev1.EndpointPort{
-			Name:     p.Name,
-			Port:     p.Port,
-			Protocol: corev1.ProtocolTCP,
-		}
-	}
-	addrs := make([]corev1.EndpointAddress, len(ips))
-	for i, ip := range ips {
-		addrs[i] = corev1.EndpointAddress{IP: ip}
-	}
-	svc := &corev1.Service{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       corev1.ServiceSpec{Ports: svcPorts},
-	}
-	eps := &corev1.Endpoints{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Endpoints"},
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Subsets:    []corev1.EndpointSubset{{Addresses: addrs, Ports: epPorts}},
-	}
-	return svc, eps
-}
-
 // ApplyObjects server-side-applies one or more typed objects through
 // the host's controller-runtime client. Force ownership so re-applies
 // from `clrk dev reload` reclaim fields from any previous manager
-// (e.g. an earlier session that used kubectl). Endpoints objects
-// don't accept SSA because they predate the apply machinery — fall
-// back to Create-or-Update for them.
+// (e.g. an earlier session that used kubectl).
 func (d *ClusterDriver) ApplyObjects(ctx context.Context, objs ...client.Object) error {
 	c, err := d.kubeClientFor(ctx)
 	if err != nil {
 		return err
 	}
 	for _, o := range objs {
-		if _, isEndpoints := o.(*corev1.Endpoints); isEndpoints {
-			if err := createOrUpdateEndpoints(ctx, c, o.(*corev1.Endpoints)); err != nil {
-				return fmt.Errorf("applying %s/%s: %w", o.GetNamespace(), o.GetName(), err)
-			}
-			continue
-		}
 		if err := c.Patch(ctx, o, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
 			return fmt.Errorf("applying %s/%s: %w", o.GetNamespace(), o.GetName(), err)
 		}
@@ -546,20 +443,60 @@ func (d *ClusterDriver) ApplyObjects(ctx context.Context, objs ...client.Object)
 	return nil
 }
 
-// createOrUpdateEndpoints handles the Endpoints type's lack of SSA
-// support: Create if missing, otherwise overwrite Subsets on the
-// existing object. Our bridge re-applies always supply the full
-// Subsets list, so a blind overwrite is correct (no field merge
-// needed).
-func createOrUpdateEndpoints(ctx context.Context, c client.Client, desired *corev1.Endpoints) error {
-	var cur corev1.Endpoints
-	err := c.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
-	if apierrors.IsNotFound(err) {
-		return c.Create(ctx, desired)
-	}
+// KubeClient returns the lazy controller-runtime client. Useful for
+// callers that need to Get/Watch/Patch outside the SSA-only path
+// ApplyObjects offers (e.g. waiting on Deployment conditions, streaming
+// pod logs, triggering rollouts).
+func (d *ClusterDriver) KubeClient(ctx context.Context) (client.Client, error) {
+	return d.kubeClientFor(ctx)
+}
+
+// WaitDeploymentAvailable blocks until ns/name reports
+// DeploymentAvailable=True or timeout elapses. Polls every 500ms;
+// keeps the implementation independent of Watch lifecycles so any
+// transient apiserver hiccup just retries on the next tick.
+func (d *ClusterDriver) WaitDeploymentAvailable(ctx context.Context, ns, name string, timeout time.Duration) error {
+	c, err := d.kubeClientFor(ctx)
 	if err != nil {
 		return err
 	}
-	cur.Subsets = desired.Subsets
-	return c.Update(ctx, &cur)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		var dep appsv1.Deployment
+		if getErr := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &dep); getErr == nil {
+			for _, cond := range dep.Status.Conditions {
+				if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("deployment %s/%s not available within %s", ns, name, timeout)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// Rollout bumps a `clrk.apoxy.dev/restartedAt` annotation on the
+// Deployment's pod template, triggering the same rolling-restart
+// behavior as `kubectl rollout restart`. Idempotent across multiple
+// calls — each one stamps a fresh RFC3339 timestamp.
+func (d *ClusterDriver) Rollout(ctx context.Context, ns, name string) error {
+	c, err := d.kubeClientFor(ctx)
+	if err != nil {
+		return err
+	}
+	var dep appsv1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &dep); err != nil {
+		return fmt.Errorf("get %s/%s: %w", ns, name, err)
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = map[string]string{}
+	}
+	dep.Spec.Template.Annotations["clrk.apoxy.dev/restartedAt"] = time.Now().UTC().Format(time.RFC3339)
+	return c.Update(ctx, &dep)
 }

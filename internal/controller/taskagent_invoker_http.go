@@ -68,10 +68,7 @@ func (h *HTTPInvoker) Invoke(ctx context.Context, ta *clrkv1alpha1.TaskAgent, bo
 // dispatch Service and returns the first ready address with the
 // `dispatch` port. WorkerPoolDeploymentReconciler creates the
 // `{wp}-workers` Service (with a `dispatch` port) selecting worker
-// pods; the dev-mode bridge
-// (`drivers/cluster_ctlptl.go::ApplyDefaultWorkerPoolBridge`) materializes
-// a selectorless Service+EndpointSlice with the same name, pointing
-// at worker docker IPs — same shape, same lookup.
+// pods; cluster mode and `clrk dev` both go through the same lookup.
 func (h *HTTPInvoker) dispatchAddress(ctx context.Context, ta *clrkv1alpha1.TaskAgent) (string, error) {
 	svcName := ta.Spec.WorkerPoolRef + "-workers"
 	var slices discoveryv1.EndpointSliceList

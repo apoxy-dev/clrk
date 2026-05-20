@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 )
 
 // secretSpec describes one Secret to materialize from sources outside
@@ -124,7 +125,7 @@ func applySecretSpecs(ctx context.Context, kubeconfig string, specs []secretSpec
 		}
 		if _, err := dynClient.Resource(gvr).Namespace(k.ns).Patch(
 			ctx, k.name, types.ApplyPatchType, body,
-			metav1.PatchOptions{FieldManager: "clrk-dev", Force: ptr(true)},
+			metav1.PatchOptions{FieldManager: "clrk-dev", Force: ptr.To(true)},
 		); err != nil {
 			return fmt.Errorf("applying Secret %s/%s: %w", k.ns, k.name, err)
 		}

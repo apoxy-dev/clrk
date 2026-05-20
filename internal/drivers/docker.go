@@ -1,3 +1,11 @@
+// Package drivers orchestrates the docker-side state of `clrk dev`: the
+// shared bridge network the k3d cluster + local registry sit on, and
+// the ctlptl-driven cluster controller that brings them up.
+//
+// Originally also owned the docker drivers for controller-manager and
+// worker containers; those were retired when both moved into the
+// cluster as Pods. The package keeps the docker network helpers because
+// the k3d node + registry still attach to the same bridge.
 package drivers
 
 import (
@@ -5,17 +13,13 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"sort"
-	"strconv"
 	"strings"
 )
 
-// NetworkName is the shared docker network all clrk containers attach to.
+// NetworkName is the shared docker network k3d and the local registry
+// attach to. Pods inside the cluster reach the registry as
+// `clrk-registry:5000` over this network.
 const NetworkName = "clrk"
-
-// ownerLabel marks containers created by `clrk dev` so we can garbage-collect
-// leftovers from previous runs without touching unrelated containers.
-const ownerLabel = "dev.apoxy.clrk/owner=clrk"
 
 // V4Subnet and V6Subnet are the explicit subnets declared on the
 // shared bridge. Both must be present: k3d scans IPAM.Config to decide
@@ -58,86 +62,4 @@ func EnsureNetwork(ctx context.Context) error {
 		return fmt.Errorf("creating docker network %q: %w: %s", NetworkName, err, bytes.TrimSpace(createOut))
 	}
 	return nil
-}
-
-// runArgs builds the argv for `docker run`. The caller supplies the container
-// name and image; everything else comes from Options. Keys/values are sorted
-// so the resulting argv is deterministic (useful for tests).
-func runArgs(name, image string, o *Options) []string {
-	args := []string{
-		"run", "--detach",
-		"--name", name,
-		"--network", NetworkName,
-		"--label", ownerLabel,
-		"--restart", "on-failure",
-	}
-	if o.Pull != "" {
-		args = append(args, "--pull", o.Pull)
-	}
-
-	for _, k := range sortedStringKeys(o.Labels) {
-		args = append(args, "--label", k+"="+o.Labels[k])
-	}
-	for _, k := range sortedStringKeys(o.Env) {
-		args = append(args, "--env", k+"="+o.Env[k])
-	}
-	for _, k := range sortedStringKeys(o.Volumes) {
-		args = append(args, "--volume", k+":"+o.Volumes[k])
-	}
-	if o.WatchBinary != "" {
-		args = append(args, "--volume", o.WatchBinary+":/usr/local/bin/"+entryBinary(image)+":ro")
-	}
-	for _, host := range sortedIntKeys(o.Ports) {
-		args = append(args, "--publish", strconv.Itoa(host)+":"+strconv.Itoa(o.Ports[host]))
-	}
-	for _, k := range sortedStringKeys(o.ExtraHosts) {
-		args = append(args, "--add-host", k+":"+o.ExtraHosts[k])
-	}
-
-	args = append(args, image)
-	args = append(args, o.Args...)
-	return args
-}
-
-// entryBinary extracts the entrypoint binary name from an image reference.
-// We rely on the convention `<registry>/clrk-<name>:<tag>` so e.g.
-// "ghcr.io/apoxy-dev/clrk-worker:dev" → "worker".
-func entryBinary(image string) string {
-	// strip tag
-	if idx := strings.LastIndex(image, ":"); idx > 0 && !strings.Contains(image[idx:], "/") {
-		image = image[:idx]
-	}
-	if idx := strings.LastIndex(image, "/"); idx >= 0 {
-		image = image[idx+1:]
-	}
-	return strings.TrimPrefix(image, "clrk-")
-}
-
-func sortedStringKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func sortedIntKeys(m map[int]int) []int {
-	keys := make([]int, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	return keys
-}
-
-// runDocker executes `docker <args...>` and returns combined output for
-// diagnostics. Errors include the tail of stderr so callers can surface them.
-func runDocker(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(out))
-	}
-	return string(out), nil
 }

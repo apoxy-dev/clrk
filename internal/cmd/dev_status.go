@@ -6,18 +6,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
+	"sort"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/apoxy-dev/clrk/internal/drivers"
 )
 
-// newDevStatusCmd is `clrk dev status`. Reports the per-container state
-// of a running clrk dev session in a form scripts can wait on, replacing
-// ad-hoc `docker ps | grep clrk-…` polling.
+// newDevStatusCmd is `clrk dev status`. Reports the per-component state
+// of a running clrk dev session: docker for the k3d server, Pod state
+// for cm + workers. --json emits structured output keyed by component
+// name for until-loops.
 func newDevStatusCmd() *cobra.Command {
 	var (
 		jsonOut bool
@@ -27,20 +33,27 @@ func newDevStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report the health of a running clrk dev session",
-		Long: "Inspects the docker containers `clrk dev` brings up and prints " +
-			"a single-line summary per component. --json emits structured " +
-			"output keyed by component name, suitable for use in until-loops.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			components := []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName}
-			for i := 0; i < workers; i++ {
-				components = append(components, fmt.Sprintf("clrk-worker-%d", i))
-			}
-			states, err := componentStates(cmd.Context(), components)
+			dataDir := clrkDir
+			kubeconfig := filepath.Join(dataDir, "kubeconfig.host")
+			states, err := devComponentStates(cmd.Context(), kubeconfig, workers)
 			if err != nil {
 				return err
 			}
 			if jsonOut {
-				return json.NewEncoder(os.Stdout).Encode(states)
+				out := map[string]ComponentState{}
+				// session may have a registry port that's useful for
+				// scripts; expose under a synthetic key.
+				if sess, sErr := readDevSession(dataDir); sErr == nil {
+					out["registryPort"] = ComponentState{
+						Name:   "registryPort",
+						Status: fmt.Sprintf("%d", sess.RegistryHostPort),
+					}
+				}
+				for _, s := range states {
+					out[s.Name] = s
+				}
+				return json.NewEncoder(os.Stdout).Encode(out)
 			}
 			return writeStatusTable(os.Stdout, states)
 		},
@@ -51,25 +64,52 @@ func newDevStatusCmd() *cobra.Command {
 	return cmd
 }
 
-// ComponentState is the on-disk view of one clrk dev container.
+// ComponentState is one row in `clrk dev status`. Source-of-truth varies
+// per component: docker inspect for the k3d server, Pod phase + Ready
+// condition for cm + workers.
 type ComponentState struct {
 	Name      string `json:"name"`
-	Status    string `json:"status"`               // running, exited, missing
-	Ready     bool   `json:"ready"`                // true once the container is up and (where applicable) /readyz is 200
-	Image     string `json:"image,omitempty"`      // image reference (may include sha)
-	StartedAt string `json:"started_at,omitempty"` // RFC3339 timestamp
-	Uptime    string `json:"uptime,omitempty"`     // human-readable since started_at
+	Status    string `json:"status"`
+	Ready     bool   `json:"ready"`
+	Image     string `json:"image,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	Uptime    string `json:"uptime,omitempty"`
 }
 
-func componentStates(ctx context.Context, names []string) (map[string]ComponentState, error) {
-	out := make(map[string]ComponentState, len(names))
-	for _, n := range names {
-		out[n] = inspectContainer(ctx, n)
+func devComponentStates(ctx context.Context, kubeconfig string, workers int) ([]ComponentState, error) {
+	out := []ComponentState{inspectDockerContainer(ctx, drivers.ClusterServerContainerName)}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		// If kubeconfig isn't readable, report the cluster row and
+		// every other component as missing.
+		out = append(out, missingState(controllerManagerComponent))
+		for i := 0; i < workers; i++ {
+			out = append(out, missingState(workerComponent(i)))
+		}
+		return out, nil
+	}
+	kc, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		out = append(out, missingState(controllerManagerComponent))
+		for i := 0; i < workers; i++ {
+			out = append(out, missingState(workerComponent(i)))
+		}
+		return out, nil
+	}
+
+	out = append(out, inspectPod(ctx, kc, devClrkNamespace, podSelectorControllerManager, 0, controllerManagerComponent))
+	for i := 0; i < workers; i++ {
+		out = append(out, inspectPod(ctx, kc, "default", podSelectorWorkers, i, workerComponent(i)))
 	}
 	return out, nil
 }
 
-func inspectContainer(ctx context.Context, name string) ComponentState {
+func missingState(name string) ComponentState {
+	return ComponentState{Name: name, Status: "missing"}
+}
+
+func inspectDockerContainer(ctx context.Context, name string) ComponentState {
 	st := ComponentState{Name: name, Status: "missing"}
 	type dockerInspect struct {
 		State struct {
@@ -83,7 +123,6 @@ func inspectContainer(ctx context.Context, name string) ComponentState {
 	}
 	out, err := exec.CommandContext(ctx, "docker", "inspect", name).Output()
 	if err != nil {
-		// Container missing or daemon unreachable; treat as missing.
 		return st
 	}
 	var arr []dockerInspect
@@ -101,11 +140,45 @@ func inspectContainer(ctx context.Context, name string) ComponentState {
 	return st
 }
 
-func writeStatusTable(w *os.File, states map[string]ComponentState) error {
+func inspectPod(ctx context.Context, kc kubernetes.Interface, ns, selector string, ordinal int, name string) ComponentState {
+	st := ComponentState{Name: name, Status: "missing"}
+	pods, err := kc.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return st
+	}
+	names := make([]string, 0, len(pods.Items))
+	idx := make(map[string]corev1.Pod, len(pods.Items))
+	for _, p := range pods.Items {
+		names = append(names, p.Name)
+		idx[p.Name] = p
+	}
+	sort.Strings(names)
+	if ordinal >= len(names) {
+		return st
+	}
+	p := idx[names[ordinal]]
+	st.Status = string(p.Status.Phase)
+	st.StartedAt = ""
+	if p.Status.StartTime != nil {
+		st.StartedAt = p.Status.StartTime.Format(time.RFC3339)
+		st.Uptime = time.Since(p.Status.StartTime.Time).Round(time.Second).String()
+	}
+	if len(p.Spec.Containers) > 0 {
+		st.Image = p.Spec.Containers[0].Image
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+			st.Ready = true
+			break
+		}
+	}
+	return st
+}
+
+func writeStatusTable(w *os.File, states []ComponentState) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "COMPONENT\tSTATUS\tREADY\tUPTIME\tIMAGE")
-	for _, name := range orderedComponentNames(states) {
-		s := states[name]
+	for _, s := range states {
 		ready := "no"
 		if s.Ready {
 			ready = "yes"
@@ -118,57 +191,7 @@ func writeStatusTable(w *os.File, states map[string]ComponentState) error {
 		if image == "" {
 			image = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, s.Status, ready, uptime, image)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.Status, ready, uptime, image)
 	}
 	return tw.Flush()
-}
-
-func orderedComponentNames(states map[string]ComponentState) []string {
-	preferred := []string{drivers.ClusterServerContainerName, drivers.ControllerManagerContainerName}
-	seen := map[string]bool{}
-	out := []string{}
-	for _, n := range preferred {
-		if _, ok := states[n]; ok {
-			out = append(out, n)
-			seen[n] = true
-		}
-	}
-	// Worker containers (clrk-worker-N) follow, in name-sorted order so
-	// "clrk-worker-0" comes before "clrk-worker-10".
-	rest := []string{}
-	for n := range states {
-		if !seen[n] {
-			rest = append(rest, n)
-		}
-	}
-	sortWorkerNames(rest)
-	return append(out, rest...)
-}
-
-func sortWorkerNames(names []string) {
-	// `clrk-worker-N` sorts numerically by N when N differs in length.
-	// Tabwriter only needs deterministic order; we don't ship lots of
-	// workers in dev so the simple bubble sort is fine.
-	for i := 0; i < len(names); i++ {
-		for j := i + 1; j < len(names); j++ {
-			if workerIndex(names[i]) > workerIndex(names[j]) {
-				names[i], names[j] = names[j], names[i]
-			}
-		}
-	}
-}
-
-func workerIndex(name string) int {
-	const prefix = "clrk-worker-"
-	if !strings.HasPrefix(name, prefix) {
-		return -1
-	}
-	n := 0
-	for _, r := range name[len(prefix):] {
-		if r < '0' || r > '9' {
-			return -1
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
 }
