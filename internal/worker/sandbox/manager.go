@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"context"
@@ -25,13 +25,12 @@ import (
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
-// Compile-time guard: *SandboxManager satisfies SandboxRuntime.
-var _ SandboxRuntime = (*SandboxManager)(nil)
-
-// SandboxManager manages sandbox lifecycle via gVisor runsc
+// Manager manages sandbox lifecycle via gVisor runsc
 // subprocesses. The runsc dispatch lives in cmd/worker/cli_linux.go
 // (gVisor maincli import).
-type SandboxManager struct {
+//
+// Implements the SandboxRuntime interface defined in package agents.
+type Manager struct {
 	stateDir   string // runsc --root.
 	rootDir    string // Per-sandbox rootfs overlay + trust + net config.
 	logsDir    string // Per-agent stdio log files.
@@ -61,7 +60,7 @@ type SandboxManager struct {
 	// from any Sentry) and must not serialize against the lifecycle
 	// writes (Create/Start/Destroy/Set{Backends,Policy,InvocationID}).
 	mu           sync.RWMutex
-	sandboxes    map[SandboxID]*SandboxInstance
+	sandboxes    map[SandboxID]*Instance
 	waiters      map[SandboxID]context.CancelFunc
 	stdLogs      map[SandboxID]sandboxLogs
 	egressStates map[SandboxID]*EgressState
@@ -73,7 +72,7 @@ type sandboxLogs struct {
 	file   *os.File
 }
 
-// NewSandboxManager constructs the worker's sandbox lifecycle manager.
+// NewManager constructs the worker's sandbox lifecycle manager.
 //
 // imdsHostAddr is the worker-bound IMDS dial target (typically
 // "127.0.0.1:<WorkerIMDSPort>") shipped to each Sentry via initStr.
@@ -82,13 +81,13 @@ type sandboxLogs struct {
 // Sentry lands here for central policy + MITM dispatch. resolvers is
 // the host-side resolver list shipped via initStr for the Sentry's
 // UDP/DNS forwarder.
-func NewSandboxManager(
+func NewManager(
 	stateDir, rootDir, logsDir, podName string,
 	imageStore *ImageStore,
 	imdsHostAddr, egressHostAddr string,
 	resolvers []netip.AddrPort,
-) *SandboxManager {
-	return &SandboxManager{
+) *Manager {
+	return &Manager{
 		stateDir:        stateDir,
 		rootDir:         rootDir,
 		logsDir:         logsDir,
@@ -97,12 +96,26 @@ func NewSandboxManager(
 		imdsHostAddr:    imdsHostAddr,
 		egressHostAddr:  egressHostAddr,
 		workerResolvers: resolvers,
-		sandboxes:       make(map[SandboxID]*SandboxInstance),
+		sandboxes:       make(map[SandboxID]*Instance),
 		waiters:         make(map[SandboxID]context.CancelFunc),
 		stdLogs:         make(map[SandboxID]sandboxLogs),
 		egressStates:    make(map[SandboxID]*EgressState),
 	}
 }
+
+// EnsureImage pulls (or returns cached metadata for) ref via the
+// manager's underlying ImageStore. Exposed so external callers
+// (notably the agents-package Watcher, which used to reach into the
+// private imageStore field) can drive image pulls without crossing
+// the package boundary into private state.
+func (m *Manager) EnsureImage(ctx context.Context, ref string) (*ImageInfo, error) {
+	return m.imageStore.EnsureImage(ctx, ref)
+}
+
+// ImageStore returns the manager's image store. Exposed so callers
+// that need the cached-refs query (the worker status service) can
+// reach it without reaching into private fields.
+func (m *Manager) ImageStore() *ImageStore { return m.imageStore }
 
 // LookupEgressState returns the per-sandbox egress snapshot consulted
 // by the worker's egress bridge on every accepted conn. Returns
@@ -111,7 +124,7 @@ func NewSandboxManager(
 //
 // Exposed as a method (not a closure) so the bridge can hold a stable
 // reference to the manager across sandbox lifecycle events.
-func (m *SandboxManager) LookupEgressState(sandboxID string) (EgressState, bool) {
+func (m *Manager) LookupEgressState(sandboxID string) (EgressState, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	st, ok := m.egressStates[SandboxID(sandboxID)]
@@ -123,7 +136,7 @@ func (m *SandboxManager) LookupEgressState(sandboxID string) (EgressState, bool)
 
 // egressStateLocked returns the per-sandbox state record, creating
 // it lazily on first write. Must be called with m.mu held.
-func (m *SandboxManager) egressStateLocked(id SandboxID) *EgressState {
+func (m *Manager) egressStateLocked(id SandboxID) *EgressState {
 	st, ok := m.egressStates[id]
 	if !ok {
 		st = &EgressState{}
@@ -135,7 +148,7 @@ func (m *SandboxManager) egressStateLocked(id SandboxID) *EgressState {
 // Create pulls the image, builds an OCI bundle, and runs `runsc
 // create` to spawn the Sentry. The sandbox is left in the Ready phase
 // for warm pool use — Start is a separate call.
-func (m *SandboxManager) Create(
+func (m *Manager) Create(
 	ctx context.Context,
 	id SandboxID,
 	agentRef string,
@@ -146,7 +159,7 @@ func (m *SandboxManager) Create(
 	state *clrkv1alpha1.AgentState,
 	stdio bool,
 	attempt int32,
-) (*SandboxInstance, error) {
+) (*Instance, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
@@ -220,7 +233,7 @@ func (m *SandboxManager) Create(
 		return nil, fmt.Errorf("writing OCI bundle: %w", err)
 	}
 
-	sb := &SandboxInstance{
+	sb := &Instance{
 		ID:        id,
 		AgentRef:  agentRef,
 		Phase:     SandboxReady,
@@ -278,7 +291,7 @@ func (m *SandboxManager) Create(
 
 // Start fires the Sentry's spec.Process. The user binary is running
 // inside the sandbox after this returns.
-func (m *SandboxManager) Start(ctx context.Context, id SandboxID) error {
+func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
@@ -350,7 +363,7 @@ func drainSentryStdio(src io.Reader, dispatcherSink io.WriteCloser, logSink io.W
 // SetEgressBackends updates the per-listener EG egress backends on
 // the worker-side egress state map consulted by the egress bridge on
 // every dial.
-func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
+func (m *Manager) SetEgressBackends(id SandboxID, backends []egress.BackendListener) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.sandboxes[id]; !ok {
@@ -363,7 +376,7 @@ func (m *SandboxManager) SetEgressBackends(id SandboxID, backends []egress.Backe
 // SetEgressPolicy updates the per-sandbox policy handle. Nil disables
 // enforcement; the bridge interprets a nil Policy as "allow all" so
 // DaemonAgents without EgressRefs keep their direct-dial behaviour.
-func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
+func (m *Manager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPolicy) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.sandboxes[id]; !ok {
@@ -377,7 +390,7 @@ func (m *SandboxManager) SetEgressPolicy(id SandboxID, policy *egress.SandboxPol
 // sandbox's identity record (read by status / logs) and the egress
 // state map (read by the egress bridge on every backend dial so the
 // PROXY v2 TLV announces the current invocation).
-func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) error {
+func (m *Manager) SetInvocationID(id SandboxID, invocationID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sb, ok := m.sandboxes[id]
@@ -392,7 +405,7 @@ func (m *SandboxManager) SetInvocationID(id SandboxID, invocationID string) erro
 // Wait blocks until the sandbox's init process exits and returns its
 // exit code. ErrNotFound if the sandbox is unknown. The caller is
 // responsible for calling Delete after Wait returns.
-func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (int, error) {
+func (m *Manager) Wait(ctx context.Context, id SandboxID) (int, error) {
 	m.mu.Lock()
 	_, ok := m.sandboxes[id]
 	m.mu.Unlock()
@@ -441,7 +454,7 @@ func (m *SandboxManager) Wait(ctx context.Context, id SandboxID) (int, error) {
 }
 
 // Stop sends SIGTERM to the sandbox's init via runsc.
-func (m *SandboxManager) Stop(ctx context.Context, id SandboxID) error {
+func (m *Manager) Stop(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
@@ -477,7 +490,7 @@ func (m *SandboxManager) Stop(ctx context.Context, id SandboxID) error {
 }
 
 // Kill sends SIGKILL to the sandbox's init via runsc.
-func (m *SandboxManager) Kill(ctx context.Context, id SandboxID) error {
+func (m *Manager) Kill(ctx context.Context, id SandboxID) error {
 	m.mu.Lock()
 	_, ok := m.sandboxes[id]
 	m.mu.Unlock()
@@ -496,7 +509,7 @@ func (m *SandboxManager) Kill(ctx context.Context, id SandboxID) error {
 
 // Delete destroys the sandbox and tears down the network namespace.
 // `runsc delete --force` SIGKILLs anything still running.
-func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
+func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	m.mu.Lock()
@@ -539,7 +552,7 @@ func (m *SandboxManager) Delete(ctx context.Context, id SandboxID) error {
 }
 
 // Status returns the current state of a sandbox.
-func (m *SandboxManager) Status(ctx context.Context, id SandboxID) (*SandboxInstance, error) {
+func (m *Manager) Status(ctx context.Context, id SandboxID) (*Instance, error) {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	m.mu.Unlock()
@@ -565,11 +578,11 @@ func (m *SandboxManager) Status(ctx context.Context, id SandboxID) (*SandboxInst
 }
 
 // List returns all tracked sandboxes.
-func (m *SandboxManager) List() []*SandboxInstance {
+func (m *Manager) List() []*Instance {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	result := make([]*SandboxInstance, 0, len(m.sandboxes))
+	result := make([]*Instance, 0, len(m.sandboxes))
 	for _, sb := range m.sandboxes {
 		result = append(result, sb)
 	}
@@ -579,7 +592,7 @@ func (m *SandboxManager) List() []*SandboxInstance {
 // Cleanup removes orphaned sandboxes from a previous worker
 // incarnation. Scans the runsc --root dir directly rather than forking
 // `runsc list` — same information, no subprocess.
-func (m *SandboxManager) Cleanup(ctx context.Context) error {
+func (m *Manager) Cleanup(ctx context.Context) error {
 	log := ctrl.LoggerFrom(ctx)
 	log.Info("Cleaning up orphaned sandboxes")
 
@@ -603,7 +616,7 @@ func (m *SandboxManager) Cleanup(ctx context.Context) error {
 // Purge tears down any runsc state left behind for id. Safe to call
 // before Create against a stale ID; runsc delete is idempotent for
 // not-found containers.
-func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
+func (m *Manager) Purge(ctx context.Context, id SandboxID) {
 	log := ctrl.LoggerFrom(ctx).WithValues("sandboxID", id)
 
 	if err := runscDelete(ctx, m.stateDir, string(id)); err != nil && !isRunscNotExist(err) {
@@ -620,7 +633,7 @@ func (m *SandboxManager) Purge(ctx context.Context, id SandboxID) {
 // drain goroutine reads) and an outer pipe (drain goroutine writes →
 // dispatcher reads). Daemons skip the outer pipe; everything still
 // flows into the slog sink.
-func wireSandboxStdio(sb *SandboxInstance, stdio bool) error {
+func wireSandboxStdio(sb *Instance, stdio bool) error {
 	var toClose []*os.File
 	cleanup := func() {
 		for _, f := range toClose {
@@ -681,7 +694,7 @@ func wireSandboxStdio(sb *SandboxInstance, stdio bool) error {
 	return nil
 }
 
-func closeStdioChildren(sb *SandboxInstance) {
+func closeStdioChildren(sb *Instance) {
 	if sb == nil {
 		return
 	}
@@ -699,7 +712,7 @@ func closeStdioChildren(sb *SandboxInstance) {
 	}
 }
 
-func closeStdioParents(sb *SandboxInstance) {
+func closeStdioParents(sb *Instance) {
 	if sb == nil {
 		return
 	}
@@ -717,7 +730,7 @@ func closeStdioParents(sb *SandboxInstance) {
 	}
 }
 
-func closeStdioInternals(sb *SandboxInstance) {
+func closeStdioInternals(sb *Instance) {
 	if sb == nil {
 		return
 	}

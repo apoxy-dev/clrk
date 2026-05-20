@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package agents
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
 // statusHeartbeat is the floor cadence at which the worker sends a
@@ -31,8 +32,8 @@ const statusHeartbeat = 5 * time.Second
 type StatusService struct {
 	workerstatusv1alpha1.UnimplementedWorkerStatusServiceServer
 
-	sandboxMgr *SandboxManager
-	imageStore *ImageStore
+	sandboxMgr *sandbox.Manager
+	imageStore *sandbox.ImageStore
 	active     *activeCounter
 
 	seq atomic.Uint64
@@ -41,7 +42,7 @@ type StatusService struct {
 // NewStatusService constructs a StatusService. The dispatcher's
 // activeCounter (shared with NewDispatcher) is the hot-path
 // state-change source for in-flight counts.
-func NewStatusService(sandboxMgr *SandboxManager, imageStore *ImageStore, active *activeCounter) *StatusService {
+func NewStatusService(sandboxMgr *sandbox.Manager, imageStore *sandbox.ImageStore, active *activeCounter) *StatusService {
 	return &StatusService{
 		sandboxMgr: sandboxMgr,
 		imageStore: imageStore,
@@ -97,7 +98,7 @@ func (s *StatusService) sendSnapshot(stream workerstatusv1alpha1.WorkerStatusSer
 func (s *StatusService) warmRevisions() []*workerstatusv1alpha1.WarmRevision {
 	counts := make(map[WarmKey]uint32)
 	for _, sb := range s.sandboxMgr.List() {
-		if sb.Phase != SandboxReady {
+		if sb.Phase != sandbox.SandboxReady {
 			continue
 		}
 		k := WarmKey{Namespace: sb.Identity.Namespace, Agent: sb.AgentRef, Revision: sb.Identity.Revision}

@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package agents
 
 import (
 	"context"
@@ -17,20 +17,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
-// sandboxWatcher reconciles AgentSandboxRevision objects targeted at this
-// worker's pool. It ensures images are pulled and updates per-worker status.
-type sandboxWatcher struct {
+// heartbeatInterval is the cadence at which Watcher refreshes
+// LastHeartbeat on every AgentSandboxRevision targeting this worker's
+// pool, and also the staleness floor electedFor uses to ignore dead
+// peer heartbeats.
+const heartbeatInterval = 30 * time.Second
+
+// Watcher reconciles AgentSandboxRevision objects targeted at this
+// worker's pool. It ensures images are pulled and updates per-worker
+// status.
+type Watcher struct {
 	client.Client
-	sandboxMgr *SandboxManager
-	daemonMgr  *daemonLifecycleManager
+	sandboxMgr *sandbox.Manager
+	daemonMgr  *DaemonLifecycle
 	poolName   string
 	podName    string
 	namespace  string
 }
 
-func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// NewWatcher constructs a Watcher wired to a sandbox.Manager and the
+// daemon supervisor. Fields are unexported so callers must go through
+// this constructor.
+func NewWatcher(c client.Client, sandboxMgr *sandbox.Manager, daemonMgr *DaemonLifecycle, poolName, podName, namespace string) *Watcher {
+	return &Watcher{
+		Client:     c,
+		sandboxMgr: sandboxMgr,
+		daemonMgr:  daemonMgr,
+		poolName:   poolName,
+		podName:    podName,
+		namespace:  namespace,
+	}
+}
+
+func (w *Watcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
 	var rev clrkv1alpha1.AgentSandboxRevision
@@ -51,7 +73,7 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	log.Info("Reconciling AgentSandboxRevision")
 
 	// Ensure image is pulled.
-	_, err := w.sandboxMgr.imageStore.EnsureImage(ctx, rev.Spec.Image)
+	_, err := w.sandboxMgr.EnsureImage(ctx, rev.Spec.Image)
 	imagePulled := err == nil
 	if err != nil {
 		log.Error(err, "Failed to pull image")
@@ -63,7 +85,7 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	agentRef := rev.Labels[clrkv1alpha1.LabelAgent]
 	var warmCount int32
 	for _, sb := range w.sandboxMgr.List() {
-		if sb.AgentRef == agentRef && sb.Phase == SandboxReady {
+		if sb.AgentRef == agentRef && sb.Phase == sandbox.SandboxReady {
 			warmCount++
 		}
 	}
@@ -89,7 +111,7 @@ func (w *sandboxWatcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // handleDaemon drives the daemon supervisor for a DaemonAgent revision. The
 // elected worker (lowest-named pod with a fresh heartbeat) runs the loop;
 // every other worker tears down any loop it might still be holding.
-func (w *sandboxWatcher) handleDaemon(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision) error {
+func (w *Watcher) handleDaemon(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision) error {
 	agentName := rev.Labels[clrkv1alpha1.LabelAgent]
 	if agentName == "" {
 		return nil
@@ -121,7 +143,7 @@ func (w *sandboxWatcher) handleDaemon(ctx context.Context, rev *clrkv1alpha1.Age
 
 // electedFor picks the lowest-named worker pod with a recent heartbeat from
 // rev.Status.Workers. Single-replica MVP — not a real lease.
-func (w *sandboxWatcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool {
+func (w *Watcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool {
 	staleAfter := 2 * heartbeatInterval
 	cutoff := time.Now().Add(-staleAfter)
 
@@ -144,7 +166,7 @@ func (w *sandboxWatcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool
 // AgentSandboxRevision.Status.Workers. ActiveExecutions is no longer
 // written here — controller reads it off the worker's
 // WorkerStatusService stream.
-func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision, imagePulled bool, warmCount int32) error {
+func (w *Watcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision, imagePulled bool, warmCount int32) error {
 	now := metav1.NewTime(time.Now())
 
 	found := false
@@ -177,11 +199,11 @@ func (w *sandboxWatcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alph
 	return w.Status().Update(ctx, rev)
 }
 
-// setupWithManager registers the sandboxWatcher with the controller manager.
+// setupWithManager registers the Watcher with the controller manager.
 // AgentSandboxRevisions are filtered to those carrying this worker's
 // pool label, projected by the agent controller from
 // {TaskAgent,DaemonAgent}.Spec.WorkerPoolRef.
-func (w *sandboxWatcher) setupWithManager(mgr ctrl.Manager) error {
+func (w *Watcher) SetupWithManager(mgr ctrl.Manager) error {
 	poolFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		return obj.GetLabels()[clrkv1alpha1.LabelWorkerPool] == w.poolName
 	})
@@ -192,9 +214,11 @@ func (w *sandboxWatcher) setupWithManager(mgr ctrl.Manager) error {
 		Complete(reconcile.Func(w.reconcile))
 }
 
-// heartbeatLoop periodically updates LastHeartbeat for all
-// AgentSandboxRevisions managed by this worker.
-func (w *sandboxWatcher) heartbeatLoop(ctx context.Context, interval time.Duration) {
+// HeartbeatLoop periodically updates LastHeartbeat for all
+// AgentSandboxRevisions managed by this worker. Cadence is
+// heartbeatInterval (package-level).
+func (w *Watcher) HeartbeatLoop(ctx context.Context) {
+	interval := heartbeatInterval
 	log := ctrl.LoggerFrom(ctx).WithName("heartbeat")
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

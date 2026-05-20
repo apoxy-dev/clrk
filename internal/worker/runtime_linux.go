@@ -14,6 +14,8 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/ports"
 	"github.com/apoxy-dev/clrk/internal/sandbox/metadata"
+	"github.com/apoxy-dev/clrk/internal/worker/agents"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
@@ -26,8 +28,6 @@ const (
 	clrkRootDir   = "/run/clrk/rootfs"
 	clrkImagesDir = "/run/clrk/images"
 	clrkLogsDir   = workerlog.Dir
-
-	heartbeatInterval = 30 * time.Second
 )
 
 // Start initializes the runtime and blocks until the context is cancelled.
@@ -39,10 +39,10 @@ func (r *Runtime) Start(ctx context.Context) error {
 		"namespace", r.Namespace,
 	)
 
-	// Create runtime directories. clrkStateHostRoot lives on the
+	// Create runtime directories. The host-state root lives on the
 	// worker host (not tmpfs) — fail fast if the deployment didn't
-	// mount it writable.
-	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir, clrkLogsDir, clrkStateHostRoot} {
+	// mount it writable. Path resolved via sandbox.HostStateRoot().
+	for _, dir := range []string{clrkStateDir, clrkRootDir, clrkImagesDir, clrkLogsDir, sandbox.HostStateRoot()} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("creating dir %s: %w", dir, err)
 		}
@@ -71,11 +71,11 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Initialize components. Resolvers feed every Sentry's UDP/DNS
 	// forwarder via InitStr.DNSResolvers — the in-Sentry forwarder
 	// dials the worker's host resolvers for any :53 traffic.
-	resolvers := readWorkerResolvers()
-	imageStore := NewImageStore(clrkImagesDir)
-	sandboxMgr := NewSandboxManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, imdsHostAddr, egressHostAddr, resolvers)
+	resolvers := sandbox.ReadWorkerResolvers()
+	imageStore := sandbox.NewImageStore(clrkImagesDir)
+	sandboxMgr := sandbox.NewManager(clrkStateDir, clrkRootDir, clrkLogsDir, r.PodName, imageStore, imdsHostAddr, egressHostAddr, resolvers)
 
-	egressBridge, err := NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)
+	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)
 	if err != nil {
 		return fmt.Errorf("starting egress bridge on %s: %w", egressHostAddr, err)
 	}
@@ -87,18 +87,18 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 
 	// Daemon supervisor — owns one goroutine per elected DaemonAgent.
-	daemonMgr := newDaemonLifecycleManager(ctx, sandboxMgr, r.Client, router, r.PodName)
+	daemonMgr := agents.NewDaemonLifecycle(ctx, sandboxMgr, r.Client, router, r.PodName)
 
 	// TaskAgent dispatcher — accepts inbound HTTP requests routed to
 	// this pod by the per-TaskAgent HTTPRoute and executes one
 	// short-lived sandbox per request.
-	active := NewActiveCounter()
-	disp := NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active, metaReg)
+	active := agents.NewActiveCounter()
+	disp := agents.NewDispatcher(r.Client, sandboxMgr, router, r.PodName, r.Namespace, active, metaReg)
 
 	// Warm pool shares the activeCounter's notifier so warm
 	// fills/evictions push deltas to the WorkerStatusService stream
 	// alongside in-flight changes.
-	warmPool := NewWarmPool(sandboxMgr, r.Client, router, active.Notifier(), r.PoolName, r.PodName, 0)
+	warmPool := agents.NewWarmPool(sandboxMgr, r.Client, router, active.Notifier(), r.PoolName, r.PodName, 0)
 	disp.SetWarmPool(warmPool)
 	if err := warmPool.SetupWithManager(r.Manager); err != nil {
 		return fmt.Errorf("setting up warm pool reconciler: %w", err)
@@ -107,15 +107,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// Set up SandboxState watcher. ActiveExecutions accounting lives
 	// in the WorkerStatusService gRPC stream consumed by the
 	// controller — the watcher only owns image-pull + heartbeat.
-	watcher := &sandboxWatcher{
-		Client:     r.Client,
-		sandboxMgr: sandboxMgr,
-		daemonMgr:  daemonMgr,
-		poolName:   r.PoolName,
-		podName:    r.PodName,
-		namespace:  r.Namespace,
-	}
-	if err := watcher.setupWithManager(r.Manager); err != nil {
+	watcher := agents.NewWatcher(r.Client, sandboxMgr, daemonMgr, r.PoolName, r.PodName, r.Namespace)
+	if err := watcher.SetupWithManager(r.Manager); err != nil {
 		return fmt.Errorf("setting up sandbox watcher: %w", err)
 	}
 
@@ -125,8 +118,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return fmt.Errorf("setting up egress config watcher: %w", err)
 	}
 
-	// Start heartbeat goroutine.
-	go watcher.heartbeatLoop(ctx, heartbeatInterval)
+	// Start heartbeat goroutine. Cadence is the agents-package
+	// heartbeatInterval const, baked into HeartbeatLoop.
+	go watcher.HeartbeatLoop(ctx)
 
 	// dispDone is closed when disp.Run returns so the shutdown
 	// sequence can wait for in-flight requests to drain (disp.Run's
@@ -147,9 +141,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// one Watch stream per pod (sourced from the WorkerPool's
 	// EndpointSlice) and feeds the in-memory routing state map.
 	statusAddr := fmt.Sprintf(":%d", ports.WorkerStatusPort)
-	statusSvc := NewStatusService(sandboxMgr, imageStore, active)
+	statusSvc := agents.NewStatusService(sandboxMgr, imageStore, active)
 	go func() {
-		if err := RunStatusServer(ctx, statusAddr, statusSvc); err != nil {
+		if err := agents.RunStatusServer(ctx, statusAddr, statusSvc); err != nil {
 			log.Error(err, "Worker status server exited", "addr", statusAddr)
 		}
 	}()
@@ -189,7 +183,7 @@ const (
 // for them to exit cleanly, then Deletes all remaining (which
 // destroys the libcontainer container and SIGKILLs any leftover PIDs
 // via the cgroup).
-func shutdown(sandboxMgr *SandboxManager) {
+func shutdown(sandboxMgr *sandbox.Manager) {
 	log := ctrl.Log.WithName("worker-runtime")
 	shutdownCtx := context.Background()
 
@@ -200,7 +194,7 @@ func shutdown(sandboxMgr *SandboxManager) {
 
 	signaled := false
 	for _, sb := range all {
-		if sb.Phase != SandboxRunning {
+		if sb.Phase != sandbox.SandboxRunning {
 			continue
 		}
 		log.Info("SIGTERM sandbox on shutdown", "sandboxID", sb.ID)
@@ -225,12 +219,12 @@ func shutdown(sandboxMgr *SandboxManager) {
 // waitForRunningExit polls until no sandbox is in SandboxRunning or
 // the deadline elapses, whichever comes first. Lets a clean SIGTERM
 // shorten shutdown without giving up the SIGKILL fallback.
-func waitForRunningExit(sandboxMgr *SandboxManager, deadline time.Duration) {
+func waitForRunningExit(sandboxMgr *sandbox.Manager, deadline time.Duration) {
 	end := time.Now().Add(deadline)
 	for {
 		anyRunning := false
 		for _, sb := range sandboxMgr.List() {
-			if sb.Phase == SandboxRunning {
+			if sb.Phase == sandbox.SandboxRunning {
 				anyRunning = true
 				break
 			}

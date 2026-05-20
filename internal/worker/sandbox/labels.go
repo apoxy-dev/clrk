@@ -1,4 +1,4 @@
-package worker
+package sandbox
 
 import (
 	"fmt"
@@ -23,14 +23,14 @@ const (
 	LabelCreatedAt    = "clrk.apoxy.dev/created-at"
 )
 
-// BuildSandboxLabels returns the lineage labels for a sandbox, encoded
+// BuildLabels returns the lineage labels for a sandbox, encoded
 // as "k=v" strings. Empty fields are omitted so the set is
 // self-describing — a missing invocation-id means "DaemonAgent or
 // pre-bind warm sandbox", not "value happens to be empty".
 //
 // Exported so apoxy-cloud//clrk/worker unit tests can lock down the
 // label format without reaching into unexported package internals.
-func BuildSandboxLabels(identity proxyproto.AgentIdentity, podName string, attempt int32) []string {
+func BuildLabels(identity proxyproto.AgentIdentity, podName string, attempt int32) []string {
 	m := buildSandboxLabelMap(identity, podName, attempt)
 	out := make([]string, 0, len(m))
 	for k, v := range m {
@@ -40,7 +40,7 @@ func BuildSandboxLabels(identity proxyproto.AgentIdentity, podName string, attem
 }
 
 // buildSandboxLabelMap is the single source of truth for sandbox
-// lineage labels. BuildSandboxLabels (libcontainer-style "k=v" slice)
+// lineage labels. BuildLabels (libcontainer-style "k=v" slice)
 // and buildSandboxAnnotations (OCI map) both project from here.
 func buildSandboxLabelMap(identity proxyproto.AgentIdentity, podName string, attempt int32) map[string]string {
 	m := map[string]string{

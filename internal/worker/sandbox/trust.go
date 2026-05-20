@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"fmt"
@@ -34,7 +34,7 @@ var trustEnvVars = []string{
 // writeAgentCA stores the agent's CA PEM in a per-sandbox file on the host
 // so that the OCI spec's bind mounts can reference it. Returns the host
 // path.
-func (m *SandboxManager) writeAgentCA(id SandboxID, caPEM []byte) (string, error) {
+func (m *Manager) writeAgentCA(id SandboxID, caPEM []byte) (string, error) {
 	dir := filepath.Join(m.rootDir, string(id)+"-trust")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating trust dir: %w", err)
@@ -47,7 +47,7 @@ func (m *SandboxManager) writeAgentCA(id SandboxID, caPEM []byte) (string, error
 }
 
 // removeAgentCA cleans up the per-sandbox trust dir on sandbox delete.
-func (m *SandboxManager) removeAgentCA(id SandboxID) {
+func (m *Manager) removeAgentCA(id SandboxID) {
 	_ = os.RemoveAll(filepath.Join(m.rootDir, string(id)+"-trust"))
 }
 

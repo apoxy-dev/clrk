@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"fmt"
@@ -188,11 +188,11 @@ func resolveProcessArgs(sb clrkv1alpha1.AgentSandbox, entrypoint []string) []str
 	return append(args, sb.Args...)
 }
 
-func (m *SandboxManager) runscBundleDir(id SandboxID) string {
+func (m *Manager) runscBundleDir(id SandboxID) string {
 	return filepath.Join(m.stateDir, string(id)+"-bundle")
 }
 
-func (m *SandboxManager) ensureRunscBundleDir(id SandboxID) (string, error) {
+func (m *Manager) ensureRunscBundleDir(id SandboxID) (string, error) {
 	dir := m.runscBundleDir(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating runsc bundle dir: %w", err)
@@ -200,6 +200,6 @@ func (m *SandboxManager) ensureRunscBundleDir(id SandboxID) (string, error) {
 	return dir, nil
 }
 
-func (m *SandboxManager) removeRunscBundleDir(id SandboxID) {
+func (m *Manager) removeRunscBundleDir(id SandboxID) {
 	_ = os.RemoveAll(m.runscBundleDir(id))
 }

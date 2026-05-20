@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package agents
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=daemonagents,verbs=get;list;watch
@@ -39,12 +40,12 @@ const (
 	maxBackoff = 60 * time.Second
 )
 
-// daemonLifecycleManager owns one goroutine per DaemonAgent that this worker
+// DaemonLifecycle owns one goroutine per DaemonAgent that this worker
 // has been elected to run. The goroutine drives the sandbox lifecycle
 // (Create → Start → Wait → restart per policy) and patches the parent
 // DaemonAgent's status.
-type daemonLifecycleManager struct {
-	sandboxMgr *SandboxManager
+type DaemonLifecycle struct {
+	sandboxMgr *sandbox.Manager
 	client     client.Client
 	podName    string
 	// router is the worker-wide egress router. Used to register the
@@ -66,8 +67,8 @@ type daemonLoop struct {
 	done    chan struct{}
 }
 
-func newDaemonLifecycleManager(baseCtx context.Context, sandboxMgr *SandboxManager, c client.Client, router *egress.Router, podName string) *daemonLifecycleManager {
-	return &daemonLifecycleManager{
+func NewDaemonLifecycle(baseCtx context.Context, sandboxMgr *sandbox.Manager, c client.Client, router *egress.Router, podName string) *DaemonLifecycle {
+	return &DaemonLifecycle{
 		sandboxMgr: sandboxMgr,
 		client:     c,
 		router:     router,
@@ -80,7 +81,7 @@ func newDaemonLifecycleManager(baseCtx context.Context, sandboxMgr *SandboxManag
 // Ensure starts a daemon loop for da bound to rev. If a loop already exists
 // for the same revision it's a no-op; if it exists for a different revision
 // it's drained first.
-func (m *daemonLifecycleManager) Ensure(da *clrkv1alpha1.DaemonAgent, rev *clrkv1alpha1.AgentSandboxRevision) {
+func (m *DaemonLifecycle) Ensure(da *clrkv1alpha1.DaemonAgent, rev *clrkv1alpha1.AgentSandboxRevision) {
 	key := types.NamespacedName{Namespace: da.Namespace, Name: da.Name}
 
 	m.mu.Lock()
@@ -125,7 +126,7 @@ func (m *daemonLifecycleManager) Ensure(da *clrkv1alpha1.DaemonAgent, rev *clrkv
 }
 
 // Stop cancels and drains the loop for key, if any.
-func (m *daemonLifecycleManager) Stop(key types.NamespacedName) {
+func (m *DaemonLifecycle) Stop(key types.NamespacedName) {
 	m.mu.Lock()
 	loop, ok := m.loops[key]
 	if !ok {
@@ -144,7 +145,7 @@ func (m *daemonLifecycleManager) Stop(key types.NamespacedName) {
 // namespaced-name; once a revision is deleted its labels are gone, so
 // the watcher can no longer recover the agent name from the revision.
 // Scan the loops map by stored revName instead.
-func (m *daemonLifecycleManager) StopByRevision(namespace, revName string) {
+func (m *DaemonLifecycle) StopByRevision(namespace, revName string) {
 	m.mu.Lock()
 	var key types.NamespacedName
 	found := false
@@ -171,7 +172,7 @@ func (m *daemonLifecycleManager) StopByRevision(namespace, revName string) {
 // slow to unwind (e.g. waiting on a SIGTERM-resistant sandbox to
 // exit). Stop already removes the map entry atomically, so a
 // subsequent GCMissing tick won't re-fire for the same key.
-func (m *daemonLifecycleManager) GCMissing(liveRevs map[types.NamespacedName]struct{}) {
+func (m *DaemonLifecycle) GCMissing(liveRevs map[types.NamespacedName]struct{}) {
 	m.mu.Lock()
 	var stale []types.NamespacedName
 	for k, loop := range m.loops {
@@ -187,7 +188,7 @@ func (m *daemonLifecycleManager) GCMissing(liveRevs map[types.NamespacedName]str
 }
 
 // Shutdown cancels every loop and waits for them all to exit.
-func (m *daemonLifecycleManager) Shutdown() {
+func (m *DaemonLifecycle) Shutdown() {
 	m.mu.Lock()
 	loops := make([]*daemonLoop, 0, len(m.loops))
 	for k, loop := range m.loops {
@@ -205,7 +206,7 @@ func (m *daemonLifecycleManager) Shutdown() {
 }
 
 // run is the per-DaemonAgent supervisor. It blocks until ctx is cancelled.
-func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.DaemonAgent, rev *clrkv1alpha1.AgentSandboxRevision) {
+func (m *DaemonLifecycle) run(ctx context.Context, da *clrkv1alpha1.DaemonAgent, rev *clrkv1alpha1.AgentSandboxRevision) {
 	log := ctrl.LoggerFrom(ctx).WithName("daemon-lifecycle").WithValues(
 		"daemonAgent", da.Name, "namespace", da.Namespace, "revision", rev.Name,
 	)
@@ -220,7 +221,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 			return
 		}
 
-		sandboxID := SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, attempt))
+		sandboxID := sandbox.SandboxID(fmt.Sprintf("da-%s-%s-%d-%d", da.Namespace, da.Name, rev.Generation, attempt))
 		log := log.WithValues("sandboxID", sandboxID, "attempt", attempt)
 
 		identity := newAgentIdentity(proxyproto.AgentKindDaemon, da.Namespace, da.Name, string(da.UID), rev.Name)
@@ -301,7 +302,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 
 		// Best-effort delete; use Background so a cancelled ctx doesn't
 		// abort cleanup of the libcontainer + netns.
-		if err := m.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := m.sandboxMgr.Delete(context.Background(), sandboxID); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
 			log.Error(err, "Failed to delete sandbox")
 		}
 
@@ -351,7 +352,7 @@ func (m *daemonLifecycleManager) run(ctx context.Context, da *clrkv1alpha1.Daemo
 // unwinds. Without this escalation a non-cooperating sandbox strands
 // its supervisor goroutine forever, blocking GCMissing/Stop callers
 // and ultimately the heartbeat loop.
-func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID) (int, error) {
+func (m *DaemonLifecycle) waitOrCancel(ctx context.Context, id sandbox.SandboxID) (int, error) {
 	type waitResult struct {
 		code int
 		err  error
@@ -380,7 +381,7 @@ func (m *daemonLifecycleManager) waitOrCancel(ctx context.Context, id SandboxID)
 
 // sleepBackoff sleeps with exponential back-off and returns false if ctx
 // was cancelled mid-sleep.
-func (m *daemonLifecycleManager) sleepBackoff(ctx context.Context, exp *int) bool {
+func (m *DaemonLifecycle) sleepBackoff(ctx context.Context, exp *int) bool {
 	d := time.Duration(math.Min(float64(maxBackoff), float64(time.Second)*math.Pow(2, float64(*exp))))
 	*exp++
 	t := time.NewTimer(d)
@@ -431,7 +432,7 @@ type daemonStatusUpdate struct {
 // patchStatus merge-patches the worker-owned status fields (Phase / UpSince
 // / RestartCount), leaving controller-written fields (Conditions,
 // ObservedGeneration, Latest*RevisionName) untouched.
-func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alpha1.DaemonAgent, upd daemonStatusUpdate) {
+func (m *DaemonLifecycle) patchStatus(ctx context.Context, da *clrkv1alpha1.DaemonAgent, upd daemonStatusUpdate) {
 	log := ctrl.LoggerFrom(ctx).WithName("daemon-lifecycle")
 
 	statusObj := map[string]any{
@@ -476,7 +477,7 @@ func (m *daemonLifecycleManager) patchStatus(ctx context.Context, da *clrkv1alph
 // EgressRefs": no MITM, no enforced policy, direct dial. A non-nil
 // error means we should back off and retry — typically the EG exists
 // but its data plane isn't up yet.
-func (m *daemonLifecycleManager) resolveEgressConfig(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]egress.BackendListener, *egress.SandboxPolicy, error) {
+func (m *DaemonLifecycle) resolveEgressConfig(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]egress.BackendListener, *egress.SandboxPolicy, error) {
 	if len(da.Spec.EgressRefs) == 0 {
 		return nil, nil, nil
 	}
@@ -541,7 +542,7 @@ func (m *daemonLifecycleManager) resolveEgressConfig(ctx context.Context, da *cl
 // either fails closed or is bypassed depending on route table policy). An
 // error here means the Secret hasn't landed yet and the caller should back
 // off.
-func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]byte, error) {
+func (m *DaemonLifecycle) loadEgressCA(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]byte, error) {
 	if len(da.Spec.EgressRefs) == 0 {
 		return nil, nil
 	}
@@ -567,7 +568,7 @@ func (m *daemonLifecycleManager) loadEgressCA(ctx context.Context, da *clrkv1alp
 // those addresses is TCP-dialable. Returns (caPEM, backends, policy,
 // nil) on success. Designed to be called BEFORE libcontainer Create so
 // the cold-start window doesn't churn netstack state on every retry.
-func (m *daemonLifecycleManager) waitForEgressReady(
+func (m *DaemonLifecycle) waitForEgressReady(
 	ctx context.Context,
 	da *clrkv1alpha1.DaemonAgent,
 	log logr.Logger,

@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"crypto/sha256"
@@ -23,7 +23,7 @@ import (
 // outbound TCP from the Sentry lands here for central policy + MITM
 // dispatch. resolvers is the worker's DNS resolver list — the
 // in-Sentry UDP forwarder dials these for any :53 traffic.
-func buildSandboxInitStr(sb *SandboxInstance, imdsHostAddr, egressHostAddr string, resolvers []netip.AddrPort) (string, error) {
+func buildSandboxInitStr(sb *Instance, imdsHostAddr, egressHostAddr string, resolvers []netip.AddrPort) (string, error) {
 	is := &sentrystack.InitStr{
 		SandboxID:      string(sb.ID),
 		Eth0MAC:        synthesizeSandboxMAC(string(sb.ID)),

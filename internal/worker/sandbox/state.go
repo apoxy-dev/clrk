@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"errors"
@@ -20,6 +20,12 @@ const (
 	// AgentState.MountPath is unset.
 	defaultStateGuestMount = "/var/clrk/state"
 )
+
+// HostStateRoot returns clrkStateHostRoot. Exposed for the worker
+// root's startup mkdir loop — the constant itself stays unexported
+// to discourage other packages from baking the path into their own
+// helpers.
+func HostStateRoot() string { return clrkStateHostRoot }
 
 // stateHostPath returns the on-host directory backing the bind-mount
 // for (ns, agentRef). Layout: /var/lib/clrk/state/<ns>/<agent>/.

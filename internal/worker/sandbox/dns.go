@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"fmt"
@@ -12,15 +12,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// readWorkerResolvers parses the worker's own /etc/resolv.conf via
+// ReadWorkerResolvers parses the worker's own /etc/resolv.conf via
 // libnetwork/resolvconf (the same parser dockerd uses) and returns one
 // AddrPort per nameserver entry, all on port 53.
 //
-// These addresses are the *destination* the IdentityDialer rewrites DNS
-// queries to. The dial happens from the worker's network namespace, so
-// loopback entries like Docker's embedded resolver at 127.0.0.11 are
-// reachable here even though they aren't in the sandbox netns.
-func readWorkerResolvers() []netip.AddrPort {
+// These addresses are the *destination* the in-Sentry UDP forwarder
+// dials for resolution. The dial happens from the worker's network
+// namespace, so loopback entries like Docker's embedded resolver at
+// 127.0.0.11 are reachable here even though they aren't in the
+// sandbox netns. Exported so the worker root (cross-package) can
+// drive the lookup at startup.
+func ReadWorkerResolvers() []netip.AddrPort {
 	log := ctrl.Log.WithName("worker.dns")
 	host, err := resolvconf.GetSpecific("/etc/resolv.conf")
 	if err != nil {
@@ -54,7 +56,7 @@ func readWorkerResolvers() []netip.AddrPort {
 // device and get picked up by the netstack's UDP forwarder. The
 // IdentityDialer then rewrites the destination back to the worker's
 // real resolver before dialing out.
-func (m *SandboxManager) writeSandboxResolvConf(id SandboxID, gw netip.Addr) (string, error) {
+func (m *Manager) writeSandboxResolvConf(id SandboxID, gw netip.Addr) (string, error) {
 	dir := filepath.Join(m.rootDir, string(id)+"-net")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating netconfig dir: %w", err)
@@ -71,7 +73,7 @@ func (m *SandboxManager) writeSandboxResolvConf(id SandboxID, gw netip.Addr) (st
 
 // removeSandboxNetConfig cleans up the per-sandbox netconfig dir on
 // sandbox delete.
-func (m *SandboxManager) removeSandboxNetConfig(id SandboxID) {
+func (m *Manager) removeSandboxNetConfig(id SandboxID) {
 	_ = os.RemoveAll(filepath.Join(m.rootDir, string(id)+"-net"))
 }
 

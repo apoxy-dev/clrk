@@ -1,4 +1,4 @@
-package worker
+package agents
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
 const (
@@ -83,7 +84,7 @@ type WarmPool struct {
 	maxPerKey  int
 
 	mu       sync.Mutex
-	pools    map[WarmKey][]*SandboxInstance
+	pools    map[WarmKey][]*sandbox.Instance
 	targets  map[WarmKey]warmTarget
 	filling  map[WarmKey]bool
 	knownKey map[types.NamespacedName]WarmKey // TA NN → last-seen WarmKey
@@ -115,7 +116,7 @@ func NewWarmPool(
 		poolName:   poolName,
 		podName:    podName,
 		maxPerKey:  maxPerKey,
-		pools:      make(map[WarmKey][]*SandboxInstance),
+		pools:      make(map[WarmKey][]*sandbox.Instance),
 		targets:    make(map[WarmKey]warmTarget),
 		filling:    make(map[WarmKey]bool),
 		knownKey:   make(map[types.NamespacedName]WarmKey),
@@ -179,7 +180,7 @@ func (w *WarmPool) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	newKey := WarmKey{Namespace: ta.Namespace, Agent: ta.Name, Revision: ta.Status.LatestReadyRevisionName}
 
 	var (
-		toEvict []*SandboxInstance
+		toEvict []*sandbox.Instance
 		toFill  bool
 	)
 
@@ -241,9 +242,9 @@ func (w *WarmPool) evictByName(nn types.NamespacedName) {
 // cancel its idle timer (if any) and tear down the underlying
 // libcontainer state. Callers must have already removed the slot
 // from w.pools so the slot can't be Acquired or expired in parallel.
-func (w *WarmPool) teardownSlot(sb *SandboxInstance) {
-	if sb.idleTimer != nil {
-		sb.idleTimer.Stop()
+func (w *WarmPool) teardownSlot(sb *sandbox.Instance) {
+	if sb.IdleTimer != nil {
+		sb.IdleTimer.Stop()
 	}
 	w.deleteWarm(sb.ID)
 }
@@ -253,7 +254,7 @@ func (w *WarmPool) teardownSlot(sb *SandboxInstance) {
 // after use, same as a cold-path Create). Triggers a background fill
 // so the pool is ready for the next request before the next
 // reconcile.
-func (w *WarmPool) Acquire(key WarmKey) *SandboxInstance {
+func (w *WarmPool) Acquire(key WarmKey) *sandbox.Instance {
 	w.mu.Lock()
 	pool := w.pools[key]
 	if len(pool) == 0 {
@@ -270,9 +271,9 @@ func (w *WarmPool) Acquire(key WarmKey) *SandboxInstance {
 
 	// Cancel idle expiry. If the timer beat us, expireWarm finds the
 	// slot gone (we already removed it) and bails.
-	if sb.idleTimer != nil {
-		sb.idleTimer.Stop()
-		sb.idleTimer = nil
+	if sb.IdleTimer != nil {
+		sb.IdleTimer.Stop()
+		sb.IdleTimer = nil
 	}
 
 	w.notifier.broadcast()
@@ -368,7 +369,7 @@ func (w *WarmPool) fillLoop(key WarmKey) {
 // fillOne resolves the TA's current spec, creates one warm sandbox
 // for key, and schedules its idle-expiry timer. Does NOT touch
 // w.pools — caller appends.
-func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Duration) (*SandboxInstance, error) {
+func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Duration) (*sandbox.Instance, error) {
 	var ta clrkv1alpha1.TaskAgent
 	if err := w.client.Get(ctx, types.NamespacedName{Namespace: key.Namespace, Name: key.Agent}, &ta); err != nil {
 		return nil, fmt.Errorf("get TaskAgent: %w", err)
@@ -404,14 +405,14 @@ func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Durati
 		return nil, fmt.Errorf("sandbox Create: %w", err)
 	}
 
-	sb.idleTimer = time.AfterFunc(idleTTL, func() { w.expireWarm(key, sb) })
+	sb.IdleTimer = time.AfterFunc(idleTTL, func() { w.expireWarm(key, sb) })
 	return sb, nil
 }
 
 // expireWarm is the AfterFunc callback for a warm slot's idle timer.
 // If the slot is still in the pool, remove it and tear it down; if
 // Acquire (or a Reconcile evict) already pulled it, no-op.
-func (w *WarmPool) expireWarm(key WarmKey, sb *SandboxInstance) {
+func (w *WarmPool) expireWarm(key WarmKey, sb *sandbox.Instance) {
 	w.mu.Lock()
 	pool := w.pools[key]
 	idx := -1
@@ -447,11 +448,11 @@ func (w *WarmPool) StopFill() {
 // sandboxes are guaranteed to be unconsumed.
 func (w *WarmPool) DestroyAll(ctx context.Context) {
 	w.mu.Lock()
-	var all []*SandboxInstance
+	var all []*sandbox.Instance
 	for _, pool := range w.pools {
 		all = append(all, pool...)
 	}
-	w.pools = make(map[WarmKey][]*SandboxInstance)
+	w.pools = make(map[WarmKey][]*sandbox.Instance)
 	w.mu.Unlock()
 
 	if len(all) == 0 {
@@ -473,10 +474,10 @@ func (w *WarmPool) DestroyAll(ctx context.Context) {
 
 // deleteWarm wraps SandboxManager.Delete with a bounded context so a
 // hung libcontainer destroy can't stall a fill loop or shutdown.
-func (w *WarmPool) deleteWarm(id SandboxID) {
+func (w *WarmPool) deleteWarm(id sandbox.SandboxID) {
 	ctx, cancel := context.WithTimeout(context.Background(), warmDeleteTimeout)
 	defer cancel()
-	if err := w.sandboxMgr.Delete(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
+	if err := w.sandboxMgr.Delete(ctx, id); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
 		ctrl.Log.WithName("warmpool").Error(err, "Deleting warm sandbox", "sandboxID", id)
 	}
 }

@@ -1,4 +1,4 @@
-package worker
+package agents
 
 import "k8s.io/apimachinery/pkg/types"
 

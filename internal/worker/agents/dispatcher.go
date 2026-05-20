@@ -1,4 +1,4 @@
-package worker
+package agents
 
 import (
 	"bytes"
@@ -28,6 +28,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/ports"
 	"github.com/apoxy-dev/clrk/internal/sandbox/metadata"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
 const (
@@ -123,7 +124,7 @@ type Dispatcher struct {
 
 	// metaReg is the worker-wide IMDS entry registry. Metadata-mode
 	// dispatches Register against it; the central IMDS HTTP server
-	// reads from it on every request via SandboxID lookup.
+	// reads from it on every request via sandbox.SandboxID lookup.
 	metaReg *metadata.Registry
 
 	active *activeCounter
@@ -146,7 +147,7 @@ type Dispatcher struct {
 // stays out of the platform-agnostic Dispatcher and tests can pass a
 // nil-or-fake.
 type WarmAcquirer interface {
-	Acquire(key WarmKey) *SandboxInstance
+	Acquire(key WarmKey) *sandbox.Instance
 }
 
 type sema struct {
@@ -321,8 +322,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// CA is captured at warm time; egress backends/policy are
 	// re-resolved here so spec changes that don't bump the revision
 	// (e.g. EgressRefs swap) still take effect at consume time.
-	var sb *SandboxInstance
-	var sandboxID SandboxID
+	var sb *sandbox.Instance
+	var sandboxID sandbox.SandboxID
 	warmHit := false
 	if d.warmPool != nil {
 		if warm := d.warmPool.Acquire(WarmKey{Namespace: ns, Agent: name, Revision: rev.Name}); warm != nil {
@@ -355,7 +356,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.sandboxMgr.Purge(ctx, sandboxID)
 		sb, err = d.sandboxMgr.Create(ctx, sandboxID, name, identity, caPEM, rev.Spec.AgentSandbox, ta.Spec.Resources, ta.Spec.State, true, 0)
 		if err != nil {
-			if errors.Is(err, ErrStateOverLimit) {
+			if errors.Is(err, sandbox.ErrStateOverLimit) {
 				log.Info("Refusing dispatch — agent state over size limit", "err", err)
 				http.Error(w, "agent state over size limit", http.StatusInsufficientStorage)
 				return
@@ -690,7 +691,7 @@ func streamWithFlush(dst io.Writer, src io.Reader, flusher http.Flusher) bool {
 // cancellation triggers a sandbox Stop and lets Wait return. Mirrors
 // the daemon path's waitOrCancel; duplicated to avoid coupling the
 // dispatcher to a daemon-only file.
-func waitOrStop(ctx context.Context, mgr SandboxRuntime, id SandboxID) (int, error) {
+func waitOrStop(ctx context.Context, mgr SandboxRuntime, id sandbox.SandboxID) (int, error) {
 	type result struct {
 		code int
 		err  error

@@ -1,6 +1,6 @@
 //go:build linux
 
-package worker
+package sandbox
 
 import (
 	"net"
@@ -33,6 +33,6 @@ func SynthesizeSandboxMACForTest(id string) string {
 }
 
 // BuildSandboxInitStrForTest exposes buildSandboxInitStr.
-func BuildSandboxInitStrForTest(sb *SandboxInstance, imdsHostAddr, egressHostAddr string, resolvers []netip.AddrPort) (string, error) {
+func BuildSandboxInitStrForTest(sb *Instance, imdsHostAddr, egressHostAddr string, resolvers []netip.AddrPort) (string, error) {
 	return buildSandboxInitStr(sb, imdsHostAddr, egressHostAddr, resolvers)
 }
