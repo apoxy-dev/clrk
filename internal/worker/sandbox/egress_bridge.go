@@ -150,26 +150,19 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	if state.Policy != nil {
 		proto := clrkv1alpha1.L4ProtocolTCP
 		if !state.Policy.Allow(origDst, proto, hdr.DstName) {
-			logger.Info("Egress dial denied",
-				slog.String("agent.kind", fmt.Sprintf("%d", state.Identity.Kind)),
-				slog.String("agent.namespace", state.Identity.Namespace),
-				slog.String("agent.name", state.Identity.Name),
+			logger.Info("Egress dial denied", append(
+				identityLogFields(state.Identity),
 				slog.String("default_policy", string(state.Policy.DefaultPolicy())),
-			)
+			)...)
 			return
 		}
 	}
 
 	backend := pickBackend(state.Backends, origDst.Port())
-	logger.Info("Egress dial",
-		slog.String("agent.kind", fmt.Sprintf("%d", state.Identity.Kind)),
-		slog.String("agent.namespace", state.Identity.Namespace),
-		slog.String("agent.name", state.Identity.Name),
-		slog.String("agent.uid", state.Identity.UID),
-		slog.String("agent.revision", state.Identity.Revision),
-		slog.String("invocation.id", state.Identity.InvocationID),
+	logger.Info("Egress dial", append(
+		identityLogFields(state.Identity),
 		slog.String("mode", backendMode(backend)),
-	)
+	)...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

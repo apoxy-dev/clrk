@@ -388,7 +388,7 @@ func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Durati
 	// Egress backends/policy aren't pinned — the dispatcher re-resolves
 	// and applies them at consume time. The CA cert IS pinned via the
 	// rootfs trust mount, hence resolved here.
-	caPEM, _, _, err := resolveEgressForExecution(ctx, w.client, w.router, key.Namespace, ta.Spec.EgressRefs)
+	bundle, err := ResolveEgress(ctx, w.client, w.router, key.Namespace, ta.Spec.EgressRefs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve egress for warm fill: %w", err)
 	}
@@ -404,7 +404,7 @@ func (w *WarmPool) fillOne(ctx context.Context, key WarmKey, idleTTL time.Durati
 		ID:        sandboxID,
 		AgentRef:  key.Agent,
 		Identity:  identity,
-		CAPEM:     caPEM,
+		CAPEM:     bundle.CAPEM,
 		Sandbox:   rev.Spec.AgentSandbox,
 		Resources: ta.Spec.Resources,
 		State:     ta.Spec.State,

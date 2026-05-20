@@ -286,11 +286,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Instance, err
 	if err := wireSandboxStdio(sb, req.Stdio); err != nil {
 		return nil, err
 	}
-	pushCleanup(func() {
-		closeStdioChildren(sb)
-		closeStdioParents(sb)
-		closeStdioInternals(sb)
-	})
+	pushCleanup(sb.closeStdio)
 
 	initStr, err := buildSandboxInitStr(sb, m.imdsHostAddr, m.egressHostAddr, m.workerResolvers)
 	if err != nil {
@@ -338,13 +334,10 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 		return ErrNotFound
 	}
 
-	sbLogger := slog.With(
-		slog.String("sandbox.id", string(id)),
-		slog.String("agent.namespace", sb.Identity.Namespace),
-		slog.String("agent.name", sb.Identity.Name),
-		slog.String("agent.uid", sb.Identity.UID),
-		slog.String("agent.revision", sb.Identity.Revision),
-	)
+	sbLogger := slog.With(append(
+		[]any{slog.String("sandbox.id", string(id))},
+		identityLogFields(sb.Identity)...,
+	)...)
 	logFile, err := openAgentLogFile(m.logsDir, sb.Identity.Namespace, sb.Identity.Name)
 	if err != nil {
 		log.Error(err, "Opening agent log file (continuing without file tee)")
@@ -469,7 +462,10 @@ func (m *Manager) Wait(ctx context.Context, id SandboxID) (int, error) {
 	m.mu.Unlock()
 
 	if sbOK {
-		closeStdioChildren(sb)
+		// On Wait completion the Sentry exited; child-side FDs are
+		// useless. Close everything so the dispatcher's reader on
+		// sb.Stdout / sb.Stderr sees EOF promptly.
+		sb.closeStdio()
 	}
 
 	if hasLogs {
@@ -567,9 +563,7 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 	// Sentry logs for post-mortem inspection during the LLM-hang +
 	// start-crash investigation. Re-enable after diagnosis.
 
-	closeStdioChildren(sb)
-	closeStdioParents(sb)
-	closeStdioInternals(sb)
+	sb.closeStdio()
 
 	m.mu.Lock()
 	delete(m.sandboxes, id)
@@ -731,27 +725,31 @@ func wireSandboxStdio(sb *Instance, stdio bool) error {
 	return nil
 }
 
-func closeStdioChildren(sb *Instance) {
+// closeStdio tears down every stdio FD on the instance. Replaces the
+// prior trio of closeStdio{Children,Parents,Internals} helpers — they
+// were always called together at every site (Create cleanup, Wait
+// completion, Delete), and splitting them into three obscured that
+// the lifecycle is monolithic.
+func (sb *Instance) closeStdio() {
 	if sb == nil {
 		return
 	}
-	if sb.stdinChild != nil {
-		_ = sb.stdinChild.Close()
-		sb.stdinChild = nil
+	closers := []*struct {
+		f **os.File
+	}{
+		{&sb.stdinChild},
+		{&sb.stdoutChild},
+		{&sb.stderrChild},
+		{&sb.stdoutInternalR},
+		{&sb.stderrInternalR},
+		{&sb.stdoutToDispatcher},
+		{&sb.stderrToDispatcher},
 	}
-	if sb.stdoutChild != nil {
-		_ = sb.stdoutChild.Close()
-		sb.stdoutChild = nil
-	}
-	if sb.stderrChild != nil {
-		_ = sb.stderrChild.Close()
-		sb.stderrChild = nil
-	}
-}
-
-func closeStdioParents(sb *Instance) {
-	if sb == nil {
-		return
+	for _, c := range closers {
+		if *c.f != nil {
+			_ = (*c.f).Close()
+			*c.f = nil
+		}
 	}
 	if sb.Stdin != nil {
 		_ = sb.Stdin.Close()
@@ -764,28 +762,6 @@ func closeStdioParents(sb *Instance) {
 	if sb.Stderr != nil {
 		_ = sb.Stderr.Close()
 		sb.Stderr = nil
-	}
-}
-
-func closeStdioInternals(sb *Instance) {
-	if sb == nil {
-		return
-	}
-	if sb.stdoutInternalR != nil {
-		_ = sb.stdoutInternalR.Close()
-		sb.stdoutInternalR = nil
-	}
-	if sb.stderrInternalR != nil {
-		_ = sb.stderrInternalR.Close()
-		sb.stderrInternalR = nil
-	}
-	if sb.stdoutToDispatcher != nil {
-		_ = sb.stdoutToDispatcher.Close()
-		sb.stdoutToDispatcher = nil
-	}
-	if sb.stderrToDispatcher != nil {
-		_ = sb.stderrToDispatcher.Close()
-		sb.stderrToDispatcher = nil
 	}
 }
 

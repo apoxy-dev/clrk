@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,7 +22,6 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/cloudevents"
-	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/ports"
@@ -350,7 +348,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	caPEM, backends, policy, err := resolveEgressForExecution(ctx, d.client, d.router, ns, ta.Spec.EgressRefs)
+	bundle, err := ResolveEgress(ctx, d.client, d.router, ns, ta.Spec.EgressRefs)
 	if err != nil {
 		if warmHit {
 			// Cleanup the warm sandbox we already pulled — caller will
@@ -374,7 +372,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ID:        sandboxID,
 			AgentRef:  name,
 			Identity:  identity,
-			CAPEM:     caPEM,
+			CAPEM:     bundle.CAPEM,
 			Sandbox:   rev.Spec.AgentSandbox,
 			Resources: ta.Spec.Resources,
 			State:     ta.Spec.State,
@@ -392,13 +390,13 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer deleteSandboxBounded(d.sandboxMgr, sandboxID, log, "Failed to delete sandbox")
-	if len(backends) > 0 {
-		if err := d.sandboxMgr.SetEgressBackends(sandboxID, backends); err != nil {
+	if len(bundle.Backends) > 0 {
+		if err := d.sandboxMgr.SetEgressBackends(sandboxID, bundle.Backends); err != nil {
 			log.Error(err, "Set egress backends failed")
 		}
 	}
-	if policy != nil {
-		if err := d.sandboxMgr.SetEgressPolicy(sandboxID, policy); err != nil {
+	if bundle.Policy != nil {
+		if err := d.sandboxMgr.SetEgressPolicy(sandboxID, bundle.Policy); err != nil {
 			log.Error(err, "Set egress policy failed")
 		}
 	}
@@ -734,79 +732,6 @@ func waitOrStop(ctx context.Context, mgr SandboxRuntime, id sandbox.SandboxID) (
 		r := <-ch
 		return r.code, r.err
 	}
-}
-
-// resolveEgressForExecution loads the EG MITM CA, listener backends,
-// and per-sandbox policy for a one-shot execution. Returns nil/nil/nil
-// when the agent has no EgressRefs (no MITM, direct dial). Returns an
-// error if the EG exists but isn't ready yet — the caller should map
-// that to a retryable status (we use 503).
-//
-// Unlike the daemon path's waitForEgressReady, this returns immediately
-// without polling: a TaskAgent execution can't afford a multi-minute
-// warm-up loop, and the caller (cron or HTTP client) is responsible for
-// retry semantics.
-func resolveEgressForExecution(ctx context.Context, c client.Client, router *egress.Router, namespace string, refs []clrkv1alpha1.AgentEgressRef) ([]byte, []egress.BackendListener, *egress.SandboxPolicy, error) {
-	if len(refs) == 0 {
-		return nil, nil, nil, nil
-	}
-	egName := refs[0].GatewayRef
-
-	var sec corev1.Secret
-	caKey := types.NamespacedName{Namespace: namespace, Name: clrkcontroller.EgressGatewayCASecretName(egName)}
-	if err := c.Get(ctx, caKey, &sec); err != nil {
-		return nil, nil, nil, fmt.Errorf("fetching EgressGateway CA secret %s: %w", caKey, err)
-	}
-	caPEM := sec.Data[corev1.TLSCertKey]
-	if len(caPEM) == 0 {
-		return nil, nil, nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", caKey, corev1.TLSCertKey)
-	}
-
-	var eg clrkv1alpha1.EgressGateway
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: egName}, &eg); err != nil {
-		return nil, nil, nil, fmt.Errorf("get EgressGateway %s/%s: %w", namespace, egName, err)
-	}
-
-	specByName := make(map[string]clrkv1alpha1.EgressListener, len(eg.Spec.Listeners))
-	for _, el := range eg.Spec.Listeners {
-		specByName[el.Name] = el
-	}
-	backends := make([]egress.BackendListener, 0, len(eg.Status.Listeners))
-	for _, ls := range eg.Status.Listeners {
-		if ls.BackendAddress == "" {
-			continue
-		}
-		spec, ok := specByName[ls.Name]
-		if !ok {
-			continue
-		}
-		shape, err := clrkv1alpha1.ShapeForListener(spec)
-		if err != nil {
-			continue
-		}
-		var matchPort int32
-		if spec.Port != nil {
-			matchPort = *spec.Port
-		}
-		backends = append(backends, egress.BackendListener{
-			Name:      ls.Name,
-			Addr:      ls.BackendAddress,
-			Shape:     string(shape),
-			MatchPort: matchPort,
-			Priority:  clrkv1alpha1.ShapePriority(shape),
-		})
-	}
-	if len(backends) == 0 {
-		return nil, nil, nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready", namespace, egName)
-	}
-
-	var l4Routes clrkv1alpha1.EgressL4RouteList
-	if err := c.List(ctx, &l4Routes, client.InNamespace(namespace)); err != nil {
-		return nil, nil, nil, fmt.Errorf("list EgressL4Routes in %s: %w", namespace, err)
-	}
-	policy := router.SyncPolicy(eg, l4Routes.Items)
-
-	return caPEM, backends, policy, nil
 }
 
 // runHTTP starts the dispatcher's HTTP server and returns when ctx is

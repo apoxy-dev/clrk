@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
@@ -106,4 +107,31 @@ func openAgentLogFile(rootDir, namespace, name string) (*os.File, error) {
 	}
 	return os.OpenFile(workerlog.AgentPath(rootDir, namespace, name),
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+}
+
+// identityLogFields returns slog key/value args for the populated
+// fields of an AgentIdentity, ready to be spread into slog.With /
+// logger.Info. Single source of truth for the agent.kind /
+// agent.namespace / agent.name / agent.uid / agent.revision /
+// invocation.id field names across the sandbox package — sites used
+// to rebuild this attr set inline and drifted from each other.
+//
+// Empty UID / Revision / InvocationID are omitted so a "no UID"
+// reading is distinguishable from a daemon that never had one.
+func identityLogFields(id proxyproto.AgentIdentity) []any {
+	fields := []any{
+		slog.String("agent.kind", fmt.Sprintf("%d", id.Kind)),
+		slog.String("agent.namespace", id.Namespace),
+		slog.String("agent.name", id.Name),
+	}
+	if id.UID != "" {
+		fields = append(fields, slog.String("agent.uid", id.UID))
+	}
+	if id.Revision != "" {
+		fields = append(fields, slog.String("agent.revision", id.Revision))
+	}
+	if id.InvocationID != "" {
+		fields = append(fields, slog.String("invocation.id", id.InvocationID))
+	}
+	return fields
 }

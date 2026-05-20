@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	clrkcontroller "github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
@@ -472,110 +470,18 @@ func (m *DaemonLifecycle) patchStatus(ctx context.Context, da *clrkv1alpha1.Daem
 	}
 }
 
-// resolveEgressConfig returns the per-listener EG backends and the
-// SandboxPolicy handle for this DaemonAgent's first EgressGateway ref.
-// Backends are sourced from EgressGateway.Status.Listeners (published
-// by the EgressGateway controller once the Envoy-Gateway-managed
-// Service is provisioned). Policy is compiled from the EG's
-// DefaultPolicy plus the EgressL4Routes targeting it, then registered
-// on the worker router so the ConfigWatcher can refresh it in place
-// on subsequent CRD edits.
-//
-// Empty backends + nil policy + nil error means "agent has no
-// EgressRefs": no MITM, no enforced policy, direct dial. A non-nil
-// error means we should back off and retry — typically the EG exists
-// but its data plane isn't up yet.
-func (m *DaemonLifecycle) resolveEgressConfig(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]egress.BackendListener, *egress.SandboxPolicy, error) {
-	if len(da.Spec.EgressRefs) == 0 {
-		return nil, nil, nil
-	}
-	egName := da.Spec.EgressRefs[0].GatewayRef
-	var eg clrkv1alpha1.EgressGateway
-	if err := m.client.Get(ctx, types.NamespacedName{Namespace: da.Namespace, Name: egName}, &eg); err != nil {
-		return nil, nil, fmt.Errorf("get EgressGateway %s/%s: %w", da.Namespace, egName, err)
-	}
-
-	specByName := make(map[string]clrkv1alpha1.EgressListener, len(eg.Spec.Listeners))
-	for _, el := range eg.Spec.Listeners {
-		specByName[el.Name] = el
-	}
-	backends := make([]egress.BackendListener, 0, len(eg.Status.Listeners))
-	for _, ls := range eg.Status.Listeners {
-		if ls.BackendAddress == "" {
-			continue
-		}
-		spec, ok := specByName[ls.Name]
-		if !ok {
-			continue
-		}
-		shape, err := clrkv1alpha1.ShapeForListener(spec)
-		if err != nil {
-			continue
-		}
-		var matchPort int32
-		if spec.Port != nil {
-			matchPort = *spec.Port
-		}
-		backends = append(backends, egress.BackendListener{
-			Name:      ls.Name,
-			Addr:      ls.BackendAddress,
-			Shape:     string(shape),
-			MatchPort: matchPort,
-			Priority:  clrkv1alpha1.ShapePriority(shape),
-		})
-	}
-	if len(backends) == 0 {
-		return nil, nil, fmt.Errorf("EgressGateway %s/%s has no listener backends ready yet", da.Namespace, egName)
-	}
-
-	// Compile policy from the EG + every L4Route in the namespace
-	// whose ParentRef points at it. Listing in the EG's namespace is
-	// safe because EgressL4Route can only target EGs in the same
-	// namespace (routesForEG enforces this). The handle returned by
-	// SyncPolicy is stable: ConfigWatcher hot-swaps its underlying
-	// state on later CRD changes, so existing sandboxes pick up
-	// route/policy edits without restart.
-	var l4Routes clrkv1alpha1.EgressL4RouteList
-	if err := m.client.List(ctx, &l4Routes, client.InNamespace(da.Namespace)); err != nil {
-		return nil, nil, fmt.Errorf("list EgressL4Routes in %s: %w", da.Namespace, err)
-	}
-	policy := m.router.SyncPolicy(eg, l4Routes.Items)
-
-	return backends, policy, nil
-}
-
-// loadEgressCA fetches the MITM CA cert PEM for the DaemonAgent's first
-// EgressGateway ref. An agent with no EgressRefs has nothing to MITM, so we
-// return nil (sandbox is then created without trust injection and egress
-// either fails closed or is bypassed depending on route table policy). An
-// error here means the Secret hasn't landed yet and the caller should back
-// off.
-func (m *DaemonLifecycle) loadEgressCA(ctx context.Context, da *clrkv1alpha1.DaemonAgent) ([]byte, error) {
-	if len(da.Spec.EgressRefs) == 0 {
-		return nil, nil
-	}
-	egName := da.Spec.EgressRefs[0].GatewayRef
-	var sec corev1.Secret
-	key := types.NamespacedName{
-		Name:      clrkcontroller.EgressGatewayCASecretName(egName),
-		Namespace: da.Namespace,
-	}
-	if err := m.client.Get(ctx, key, &sec); err != nil {
-		return nil, fmt.Errorf("fetching EgressGateway CA secret %s: %w", key, err)
-	}
-	caPEM := sec.Data[corev1.TLSCertKey]
-	if len(caPEM) == 0 {
-		return nil, fmt.Errorf("EgressGateway CA secret %s has empty %s", key, corev1.TLSCertKey)
-	}
-	return caPEM, nil
-}
-
 // waitForEgressReady polls until all of the DaemonAgent's EG
 // dependencies are usable: the CA Secret exists, the EG status
 // carries at least one listener BackendAddress, and at least one of
 // those addresses is TCP-dialable. Returns (caPEM, backends, policy,
 // nil) on success. Designed to be called BEFORE libcontainer Create so
 // the cold-start window doesn't churn netstack state on every retry.
+//
+// CA load and backend resolution are kept as separate calls (vs. the
+// dispatcher's single ResolveEgress) so the poll loop can distinguish
+// "CA Secret not yet provisioned" from "EG status not yet populated"
+// in the once-per-EG log line, rather than collapsing both into one
+// composite error.
 func (m *DaemonLifecycle) waitForEgressReady(
 	ctx context.Context,
 	da *clrkv1alpha1.DaemonAgent,
@@ -588,8 +494,8 @@ func (m *DaemonLifecycle) waitForEgressReady(
 	deadline := time.Now().Add(warmupTimeout)
 	logged := false
 	for {
-		caPEM, caErr := m.loadEgressCA(ctx, da)
-		backends, policy, cfgErr := m.resolveEgressConfig(ctx, da)
+		caPEM, caErr := LoadEgressCA(ctx, m.client, da.Namespace, da.Spec.EgressRefs)
+		backends, policy, cfgErr := ResolveEgressNoCA(ctx, m.client, m.router, da.Namespace, da.Spec.EgressRefs)
 		if caErr == nil && cfgErr == nil {
 			if len(backends) == 0 {
 				return caPEM, nil, nil, nil
