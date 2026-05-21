@@ -38,26 +38,11 @@ const runscNetwork = "plugin"
 //     the worker has processes in it. Resource limits baked into the
 //     OCI spec are dropped along with cgroup setup; we rely on the
 //     parent (k8s) cgroup limits applied to the worker pod.
-//
-//   - --TESTONLY-unsafe-nonroot: skip runsc's setUpChroot pivot-root
-//     dance. With it the Sentry doesn't bind-mount its own binary
-//     into a tmpfs chroot and doesn't fork a /proc-umounter helper;
-//     both rely on `/proc/self/exe` being resolvable after pivot_root,
-//     which only works when the Sentry binary lives at the same
-//     filesystem path inside the chroot. Our worker binary is at
-//     /worker (the OCI image entrypoint), not /usr/local/bin/runsc,
-//     so the umounter fork fails with ENOENT and runsc create aborts.
-//     The "test-only" naming is a warning about defence-in-depth, not
-//     correctness — clrk's worker already runs inside a k8s-managed
-//     container so the worker process's mount namespace is already
-//     scoped; skipping the additional Sentry chroot loses only one
-//     defence-in-depth layer.
 func commonRunscFlags(rootDir string) []string {
 	return []string{
 		"--root=" + rootDir,
 		"--network=" + runscNetwork,
 		"--ignore-cgroups",
-		"--TESTONLY-unsafe-nonroot=true",
 		"--platform=" + runscPlatform,
 	}
 }
