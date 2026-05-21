@@ -4,8 +4,10 @@ package sandbox
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -160,8 +162,19 @@ func buildResolvMountSpec(source string) specs.Mount {
 
 func buildStateMountSpec(hostPath string, state *clrkv1alpha1.AgentState) specs.Mount {
 	dest := defaultStateGuestMount
+	// Admission (api/clrk/v1alpha1.validateAgentState) is the normative
+	// gate. This re-check defends in-process callers (tests, future
+	// programmatic construction) and any TaskAgent objects that landed
+	// in etcd before admission validation existed: rather than fail the
+	// sandbox, we fall back to the default mount and log a warning.
 	if state != nil && state.MountPath != "" {
-		dest = state.MountPath
+		if isSafeStateMountPath(state.MountPath) {
+			dest = state.MountPath
+		} else {
+			slog.Warn("Rejecting unsafe AgentState.MountPath; falling back to default",
+				slog.String("mountPath", state.MountPath),
+				slog.String("fallback", defaultStateGuestMount))
+		}
 	}
 	return specs.Mount{
 		Destination: dest,
@@ -169,6 +182,46 @@ func buildStateMountSpec(hostPath string, state *clrkv1alpha1.AgentState) specs.
 		Type:        "bind",
 		Options:     []string{"bind", "rec"},
 	}
+}
+
+// isSafeStateMountPath mirrors api/clrk/v1alpha1.validateAgentState so
+// the worker rejects the same shapes admission rejects, without
+// importing the api package's reserved list (it's intentionally
+// duplicated there because that package is cross-platform). The
+// reserved set here is derived from this package's own sources of
+// truth — defaultSpecMounts, buildResolvMountSpec, wellKnownTrustPaths
+// — plus the rootfs binary/system-config dirs.
+func isSafeStateMountPath(p string) bool {
+	if !filepath.IsAbs(p) || p != filepath.Clean(p) || p == "/" {
+		return false
+	}
+	for _, r := range reservedGuestMountPaths() {
+		if mountPathConflicts(p, r) {
+			return false
+		}
+	}
+	return true
+}
+
+func reservedGuestMountPaths() []string {
+	out := make([]string, 0, 16)
+	for _, m := range defaultSpecMounts() {
+		out = append(out, m.Destination)
+	}
+	out = append(out, "/etc/resolv.conf")
+	out = append(out, wellKnownTrustPaths...)
+	out = append(out,
+		"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/root",
+	)
+	return out
+}
+
+func mountPathConflicts(candidate, reserved string) bool {
+	if candidate == reserved {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(candidate, reserved+sep) || strings.HasPrefix(reserved, candidate+sep)
 }
 
 func buildSandboxAnnotations(identity proxyproto.AgentIdentity, podName string, attempt int32) map[string]string {

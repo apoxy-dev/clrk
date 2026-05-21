@@ -49,6 +49,9 @@ type AgentState struct {
 	// +optional
 	SizeLimitMB int32 `json:"sizeLimitMB,omitempty"`
 	// MountPath is where state is mounted in the sandbox. Default "/var/clrk/state".
+	// Must be a clean absolute path other than "/" and must not overlap with
+	// runtime-managed paths (e.g. /proc, /dev, /sys, /tmp, /etc, /usr, /bin,
+	// system CA bundles, /etc/resolv.conf). Admission rejects conflicts.
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 }

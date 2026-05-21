@@ -2,6 +2,8 @@ package v1alpha1
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -54,6 +56,85 @@ func validateEgressRefs(refs []AgentEgressRef, fp *field.Path) field.ErrorList {
 	for i, r := range refs {
 		if r.GatewayRef == "" {
 			errs = append(errs, field.Required(fp.Index(i).Child("gatewayRef"), "gatewayRef is required"))
+		}
+	}
+	return errs
+}
+
+// reservedMountPaths enumerates in-sandbox paths that the runtime owns
+// and must not be shadowed by an agent's persistent-state bind mount.
+// The state mount is appended last in the OCI spec and is writable, so
+// without this guard a TaskAgent could overlay system mounts, the trust
+// CA bundle, /etc/resolv.conf, or rootfs binary dirs and persist the
+// overlay across executions via the per-(ns,agent) host backing dir.
+//
+// The list duplicates the sources of truth in the worker package
+// (internal/worker/sandbox/oci_spec.go defaultSpecMounts and
+// buildResolvMountSpec, internal/worker/sandbox/trust.go
+// wellKnownTrustPaths) because this file is cross-platform and the
+// worker package is //go:build linux. Keep the two in sync when either
+// side changes.
+var reservedMountPaths = []string{
+	// defaultSpecMounts destinations.
+	"/proc",
+	"/dev",
+	"/sys",
+	"/sys/fs/cgroup",
+	"/dev/pts",
+	"/tmp",
+	// buildResolvMountSpec destination.
+	"/etc/resolv.conf",
+	// wellKnownTrustPaths CA bundle locations.
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+	"/etc/ssl/cert.pem",
+	// Rootfs binary and system-config dirs. Mounting a writable
+	// overlay over any of these lets an agent plant binaries or
+	// config that re-applies on the next execution.
+	"/etc",
+	"/usr",
+	"/bin",
+	"/sbin",
+	"/lib",
+	"/lib64",
+	"/boot",
+	"/root",
+}
+
+// pathConflicts reports whether candidate and reserved name the same
+// path, or one is an ancestor of the other. Both arguments must be
+// clean absolute paths.
+func pathConflicts(candidate, reserved string) bool {
+	if candidate == reserved {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(candidate, reserved+sep) || strings.HasPrefix(reserved, candidate+sep)
+}
+
+// validateAgentState rejects MountPath values that are non-clean,
+// non-absolute, root, or that overlap with a reserved system mount.
+// An empty MountPath is valid and means "use the worker default".
+func validateAgentState(state *AgentState, fp *field.Path) field.ErrorList {
+	if state == nil || state.MountPath == "" {
+		return nil
+	}
+	var errs field.ErrorList
+	p := state.MountPath
+	mp := fp.Child("mountPath")
+	if !filepath.IsAbs(p) {
+		return append(errs, field.Invalid(mp, p, "mountPath must be an absolute path"))
+	}
+	if p != filepath.Clean(p) {
+		return append(errs, field.Invalid(mp, p, "mountPath must be a clean path (no '.', '..', '//' or trailing '/')"))
+	}
+	if p == "/" {
+		return append(errs, field.Invalid(mp, p, "mountPath must not be the root path"))
+	}
+	for _, r := range reservedMountPaths {
+		if pathConflicts(p, r) {
+			return append(errs, field.Invalid(mp, p, fmt.Sprintf("mountPath conflicts with reserved path %q", r)))
 		}
 	}
 	return errs
@@ -118,6 +199,7 @@ func (ta *TaskAgent) Validate(_ context.Context) field.ErrorList {
 
 	errs = append(errs, validateEgressRefs(ta.Spec.EgressRefs, specPath.Child("egressRefs"))...)
 	errs = append(errs, validateIdentity(ta.Spec.Identity, specPath.Child("identity"))...)
+	errs = append(errs, validateAgentState(ta.Spec.State, specPath.Child("state"))...)
 
 	return errs
 }
