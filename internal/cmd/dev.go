@@ -95,6 +95,7 @@ func newDevCmd() *cobra.Command {
 	cmd.AddCommand(newDevLogsCmd())
 	cmd.AddCommand(newDevWaitReadyCmd())
 	cmd.AddCommand(newDevReloadCmd())
+	cmd.AddCommand(newDevPushImageCmd())
 	return cmd
 }
 

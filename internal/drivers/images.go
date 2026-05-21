@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"fmt"
 	"runtime/debug"
 	"strings"
 )
@@ -27,6 +28,16 @@ const (
 	// LocalRegistryWorkerImage is the matching ref for the worker.
 	LocalRegistryWorkerImage = "clrk-registry:5000/clrk/worker:dev"
 )
+
+// LocalRegistryHostRef returns the host-side image ref for the dev
+// session's local registry on the supplied port. The pods see the same
+// content via LocalRegistry{ControllerManager,Worker}Image (resolved via
+// docker DNS on the shared clrk network); the host has to address the
+// registry as localhost:<port>. Callers like `clrk dev push-image` use
+// this to push bytes the pods will pull.
+func LocalRegistryHostRef(component string, port int) string {
+	return fmt.Sprintf("localhost:%d/clrk/%s:dev", port, component)
+}
 
 // ImageTag returns the GAR tag matching this clrk binary, derived
 // from the binary's embedded VCS info. Two cases:
