@@ -53,6 +53,7 @@ type EgressStateLookup func(sandboxID string) (EgressState, bool)
 type EgressBridge struct {
 	ln     net.Listener
 	lookup EgressStateLookup
+	filter *localDstFilter
 
 	wg     sync.WaitGroup
 	stopCh chan struct{}
@@ -60,8 +61,24 @@ type EgressBridge struct {
 
 // NewEgressBridge binds a TCP listener on hostAddr ("127.0.0.1:port")
 // and starts serving in the background. lookup is the SandboxManager-
-// owned getter into the per-sandbox EgressState map.
+// owned getter into the per-sandbox EgressState map. Snapshots the
+// worker's local interface IPs up front for the worker-local
+// destination filter; a failure to enumerate interfaces is fatal so
+// the runtime crashes loudly rather than running with a half-built
+// deny set.
 func NewEgressBridge(hostAddr string, lookup EgressStateLookup) (*EgressBridge, error) {
+	filter, err := newLocalDstFilter()
+	if err != nil {
+		return nil, fmt.Errorf("build local destination filter: %w", err)
+	}
+	return newBridge(hostAddr, lookup, filter)
+}
+
+// newBridge is the shared constructor used by NewEgressBridge and the
+// test seams in testseams.go. Centralises the listen + struct + serve
+// goroutine setup so behavior can't drift between the production and
+// test paths.
+func newBridge(hostAddr string, lookup EgressStateLookup, filter *localDstFilter) (*EgressBridge, error) {
 	ln, err := net.Listen("tcp", hostAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", hostAddr, err)
@@ -69,6 +86,7 @@ func NewEgressBridge(hostAddr string, lookup EgressStateLookup) (*EgressBridge, 
 	b := &EgressBridge{
 		ln:     ln,
 		lookup: lookup,
+		filter: filter,
 		stopCh: make(chan struct{}),
 	}
 	b.wg.Add(1)
@@ -144,6 +162,19 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	state, ok := b.lookup(sandboxID)
 	if !ok {
 		logger.Warn("Egress bridge: no live sandbox for ID; dropping")
+		return
+	}
+
+	// Reject sandbox-supplied destinations that point back at the
+	// worker itself. The bridge runs in the worker's netns (see
+	// oci_spec.go: NetworkNamespace pinned to /proc/self/ns/net), so
+	// loopback / worker pod IPs would otherwise reach control surfaces
+	// like the dispatcher (:8090) and worker status gRPC (:8091).
+	if reason, deny := b.filter.deny(origDst); deny {
+		logger.Warn("Egress dial denied: worker-local destination", append(
+			identityLogFields(state.Identity),
+			slog.String("reason", string(reason)),
+		)...)
 		return
 	}
 
@@ -258,6 +289,88 @@ func pickBackend(backends []egress.BackendListener, dstPort uint16) *egress.Back
 		}
 	}
 	return best
+}
+
+// denyReason categorises why localDstFilter rejected a sandbox-
+// supplied destination. Values are stable strings so log readers (and
+// the future OTLP span attribute clrk.egress.deny.reason — see
+// APO-601) have a fixed vocabulary to query.
+type denyReason string
+
+const (
+	denyReasonLoopback          denyReason = "loopback"
+	denyReasonUnspecified       denyReason = "unspecified"
+	denyReasonLinkLocal         denyReason = "link_local"
+	denyReasonMulticast         denyReason = "multicast"
+	denyReasonWorkerLocalIfAddr denyReason = "worker_local_ifaddr"
+)
+
+// localDstFilter rejects sandbox-supplied destinations that point at
+// the worker itself. See handleConn for the call-site reasoning. IMDS
+// targets are pre-empted in forwarder.go's IMDS bridge before reaching
+// this path, so blanket-denying link-local here is safe.
+type localDstFilter struct {
+	// K8s pod IPs are stable for a pod's lifetime, so we snapshot
+	// once at construction rather than refreshing on every conn.
+	localIPs map[netip.Addr]struct{}
+}
+
+// newLocalDstFilter snapshots all IPs assigned to the worker's
+// interfaces.
+func newLocalDstFilter() (*localDstFilter, error) {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate interfaces: %w", err)
+	}
+	ips := make(map[netip.Addr]struct{})
+	for _, ifi := range ifs {
+		addrs, err := ifi.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("addrs for %s: %w", ifi.Name, err)
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			default:
+				continue
+			}
+			na, ok := netip.AddrFromSlice(ip)
+			if !ok {
+				continue
+			}
+			ips[na.Unmap()] = struct{}{}
+		}
+	}
+	return &localDstFilter{localIPs: ips}, nil
+}
+
+// deny reports whether dst is a worker-local destination that must
+// not be reached via the egress bridge, plus the categorical reason.
+// A nil receiver allows everything (see testseams.go).
+func (f *localDstFilter) deny(dst netip.AddrPort) (denyReason, bool) {
+	if f == nil {
+		return "", false
+	}
+	addr := dst.Addr()
+	if addr.IsLoopback() {
+		return denyReasonLoopback, true
+	}
+	if _, ok := f.localIPs[addr]; ok {
+		return denyReasonWorkerLocalIfAddr, true
+	}
+	switch {
+	case addr.IsUnspecified():
+		return denyReasonUnspecified, true
+	case addr.IsLinkLocalUnicast():
+		return denyReasonLinkLocal, true
+	case addr.IsMulticast():
+		return denyReasonMulticast, true
+	}
+	return "", false
 }
 
 // sanitizedSrc returns the upstream conn's local addr as a netip.AddrPort,
