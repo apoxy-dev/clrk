@@ -48,6 +48,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}
 
+	// Fail-closed on cgroup v1 or missing write access — silent
+	// fallback would re-create the silent under-enforcement of
+	// ExecutionResources we're fixing.
+	workerCgroupPath, err := sandbox.InitWorkerCgroup()
+	if err != nil {
+		return fmt.Errorf("initializing worker cgroup: %w", err)
+	}
+	log.Info("Worker cgroup ready", "path", workerCgroupPath)
+
 	// Initialize egress router.
 	router := egress.NewRouter(clrkv1alpha1.EgressPolicyAllowAll)
 
@@ -74,14 +83,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 	resolvers := sandbox.ReadWorkerResolvers()
 	imageStore := sandbox.NewImageStore(clrkImagesDir)
 	sandboxMgr := sandbox.NewManager(sandbox.ManagerConfig{
-		StateDir:       clrkStateDir,
-		RootDir:        clrkRootDir,
-		LogsDir:        clrkLogsDir,
-		PodName:        r.PodName,
-		ImageStore:     imageStore,
-		IMDSHostAddr:   imdsHostAddr,
-		EgressHostAddr: egressHostAddr,
-		Resolvers:      resolvers,
+		StateDir:         clrkStateDir,
+		RootDir:          clrkRootDir,
+		LogsDir:          clrkLogsDir,
+		PodName:          r.PodName,
+		ImageStore:       imageStore,
+		IMDSHostAddr:     imdsHostAddr,
+		EgressHostAddr:   egressHostAddr,
+		Resolvers:        resolvers,
+		WorkerCgroupPath: workerCgroupPath,
 	})
 
 	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)

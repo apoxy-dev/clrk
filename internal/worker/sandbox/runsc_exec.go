@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/apoxy-dev/clrk/internal/sentrystack"
 )
@@ -30,14 +31,16 @@ const runscNetwork = "plugin"
 // commonRunscFlags are the flags every runsc subcommand we invoke
 // (create, start, kill, etc.) shares.
 //
-//   - --ignore-cgroups: skip runsc's own cgroup-v2 controller
-//     delegation. The worker already runs inside a container whose
-//     cgroup hierarchy is owned by the host runtime (Docker / k3s /
-//     containerd); attempting to enable controllers on the worker's
-//     cgroup via cgroup.subtree_control fails with EBUSY as soon as
-//     the worker has processes in it. Resource limits baked into the
-//     OCI spec are dropped along with cgroup setup; we rely on the
-//     parent (k8s) cgroup limits applied to the worker pod.
+//   - --ignore-cgroups: bypass runsc's own cgroup-v2 controller
+//     delegation. The worker owns the cgroup hierarchy directly: at
+//     startup InitWorkerCgroup moves the worker into <worker>/init
+//     and enables +memory +cpu on <worker>/cgroup.subtree_control,
+//     and each sandbox is created into its own <worker>/system/<id>
+//     cgroup via clone3 CLONE_INTO_CGROUP (see runscCreateOpts.
+//     cgroupDirFD). Letting runsc manage cgroups would race ours and
+//     re-trip the "no internal process" EBUSY that motivated this
+//     ownership split — the OCI Linux.Resources block in buildSpec
+//     is preserved for diagnostic value but not consulted at runtime.
 func commonRunscFlags(rootDir string) []string {
 	return []string{
 		"--root=" + rootDir,
@@ -57,14 +60,22 @@ const runscPlatform = "systrap"
 // addition to the bundle dir. initStr ships through the
 // CLRK_SENTRYSTACK_INITSTR env var so the Sentry's PluginStack PreInit
 // can read it (see internal/sentrystack/initstr.go).
+//
+// cgroupDirFD is the worker-opened per-sandbox cgroup v2 directory
+// (see createSandboxCgroup). When non-nil it's passed through to the
+// runsc-create subprocess as SysProcAttr.CgroupFD with UseCgroupFD=true
+// so the kernel uses clone3 + CLONE_INTO_CGROUP to place the child —
+// and every descendant the Sentry later spawns — into the per-sandbox
+// cgroup atomically at fork time.
 type runscCreateOpts struct {
-	id        string
-	rootDir   string // runsc --root
-	bundleDir string
-	initStr   string
-	stdin     *os.File
-	stdout    *os.File
-	stderr    *os.File
+	id          string
+	rootDir     string // runsc --root
+	bundleDir   string
+	initStr     string
+	stdin       *os.File
+	stdout      *os.File
+	stderr      *os.File
+	cgroupDirFD *os.File
 }
 
 // sandboxDebugLog returns the per-sandbox runsc/Sentry debug-log path.
@@ -106,6 +117,12 @@ func runscCreate(ctx context.Context, opts runscCreateOpts) error {
 		opts.id,
 	)
 	cmd := exec.CommandContext(ctx, "/proc/self/exe", args...)
+	if opts.cgroupDirFD != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			UseCgroupFD: true,
+			CgroupFD:    int(opts.cgroupDirFD.Fd()),
+		}
+	}
 	cmd.Stdin = opts.stdin
 	cmd.Stdout = opts.stdout
 	cmd.Stderr = opts.stderr

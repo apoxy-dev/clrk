@@ -89,16 +89,20 @@ func buildSpec(
 		},
 	}
 
+	// Linux.Resources is cosmetic under --ignore-cgroups — runsc never
+	// reads it. Real per-sandbox enforcement happens in the worker-
+	// owned cgroup at <worker>/system/<id> (see createSandboxCgroup);
+	// we still populate the OCI block so the on-disk config.json
+	// matches what the kernel is actually enforcing, which keeps
+	// `runsc state` / config dumps useful during post-mortem.
 	if !resources.Memory.IsZero() {
 		v := resources.Memory.Value()
 		spec.Linux.Resources.Memory = &specs.LinuxMemory{Limit: &v}
 	}
 	if !resources.CPU.IsZero() {
-		// CFS quota: quota = millicores * period / 1000.
-		millis := resources.CPU.MilliValue()
-		quota := millis * 100000 / 1000
-		var period uint64 = 100000
-		spec.Linux.Resources.CPU = &specs.LinuxCPU{Quota: &quota, Period: &period}
+		quota, period := cpuMaxFor(resources.CPU.MilliValue())
+		p := uint64(period)
+		spec.Linux.Resources.CPU = &specs.LinuxCPU{Quota: &quota, Period: &p}
 	}
 
 	return spec

@@ -1221,7 +1221,7 @@ func schema_clrk_api_clrk_v1alpha1_AgentState(ref common.ReferenceCallback) comm
 					},
 					"mountPath": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MountPath is where state is mounted in the sandbox. Default \"/var/clrk/state\".",
+							Description: "MountPath is where state is mounted in the sandbox. Default \"/var/clrk/state\". Must be a clean absolute path other than \"/\" and must not overlap with runtime-managed paths (e.g. /proc, /dev, /sys, /tmp, /etc, /usr, /bin, system CA bundles, /etc/resolv.conf). Admission rejects conflicts.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -2489,24 +2489,24 @@ func schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref common.ReferenceCallba
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ExecutionResources defines per-execution CPU/memory limits enforced by the worker runtime via cgroups/gVisor.",
+				Description: "ExecutionResources defines per-execution CPU/memory limits enforced by the worker runtime via cgroup v2 controllers on a per-sandbox cgroup (<worker>/system/<id>) that contains the full sandbox process tree (Sentry + gofer + guest).",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cpu": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CPU limit for a single execution. Default \"1\".",
+							Description: "CPU limit for a single execution, enforced via cgroup v2 cpu.max (CFS quota/period). Applies to the entire sandbox process tree. Default \"1\".",
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
 					"memory": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Memory limit for a single execution. Default \"512Mi\".",
+							Description: "Memory limit for a single execution, enforced via cgroup v2 memory.max on the entire sandbox process tree. Budget ~32MB on top of the guest's working set for Sentry+gofer baseline overhead; guest pages mirrored into the Sentry's address space count against this limit too. Swap is pinned to zero so the OOM killer fires deterministically at memory.max. Default \"512Mi\".",
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
 					"ephemeralStorage": {
 						SchemaProps: spec.SchemaProps{
-							Description: "EphemeralStorage limit for a single execution.",
+							Description: "EphemeralStorage limit for a single execution. Currently advisory only — /tmp tmpfs sizing is controlled statically by the worker's OCI spec and per-sandbox cgroup enforcement is not yet wired through for this field.",
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},

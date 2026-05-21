@@ -53,6 +53,13 @@ type Manager struct {
 	// startup; never re-read.
 	workerResolvers []netip.AddrPort
 
+	// workerCgroupPath is the absolute path of the worker's own
+	// cgroup v2 directory (e.g. /sys/fs/cgroup/kubepods.slice/...),
+	// captured by InitWorkerCgroup at startup. Per-sandbox cgroups
+	// are mkdir'd under <workerCgroupPath>/system/<id> in Create and
+	// rmdir'd in Delete.
+	workerCgroupPath string
+
 	// mu guards every map below. RWMutex because LookupEgressState is
 	// on the per-egress-conn hot path (one acquire per accepted SYN
 	// from any Sentry) and must not serialize against the lifecycle
@@ -100,23 +107,29 @@ type ManagerConfig struct {
 	// Resolvers is the host-side DNS resolver list shipped to each
 	// Sentry via InitStr.DNSResolvers.
 	Resolvers []netip.AddrPort
+	// WorkerCgroupPath is the absolute path of the worker's cgroup
+	// v2 directory as returned by InitWorkerCgroup. Required: Create
+	// fails if it's empty because per-sandbox enforcement depends on
+	// being able to mkdir under <WorkerCgroupPath>/system/<id>.
+	WorkerCgroupPath string
 }
 
 // NewManager constructs the worker's sandbox lifecycle manager.
 func NewManager(cfg ManagerConfig) *Manager {
 	return &Manager{
-		stateDir:        cfg.StateDir,
-		rootDir:         cfg.RootDir,
-		logsDir:         cfg.LogsDir,
-		podName:         cfg.PodName,
-		imageStore:      cfg.ImageStore,
-		imdsHostAddr:    cfg.IMDSHostAddr,
-		egressHostAddr:  cfg.EgressHostAddr,
-		workerResolvers: cfg.Resolvers,
-		sandboxes:       make(map[SandboxID]*Instance),
-		waiters:         make(map[SandboxID]context.CancelFunc),
-		stdLogs:         make(map[SandboxID]sandboxLogs),
-		egressStates:    make(map[SandboxID]*EgressState),
+		stateDir:         cfg.StateDir,
+		rootDir:          cfg.RootDir,
+		logsDir:          cfg.LogsDir,
+		podName:          cfg.PodName,
+		imageStore:       cfg.ImageStore,
+		imdsHostAddr:     cfg.IMDSHostAddr,
+		egressHostAddr:   cfg.EgressHostAddr,
+		workerResolvers:  cfg.Resolvers,
+		workerCgroupPath: cfg.WorkerCgroupPath,
+		sandboxes:        make(map[SandboxID]*Instance),
+		waiters:          make(map[SandboxID]context.CancelFunc),
+		stdLogs:          make(map[SandboxID]sandboxLogs),
+		egressStates:     make(map[SandboxID]*EgressState),
 	}
 }
 
@@ -263,14 +276,25 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Instance, err
 	}
 	sb.initStr = initStr
 
+	// LIFO defer order closes cgroupFD before the cleanup chain
+	// rmdirs the directory — rmdir on a cgroup with an open dir FD
+	// returns EBUSY.
+	cgroupFD, err := createSandboxCgroup(m.workerCgroupPath, req.ID, req.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("creating sandbox cgroup: %w", err)
+	}
+	defer func() { _ = cgroupFD.Close() }()
+	pushCleanup(func() { _ = removeSandboxCgroup(m.workerCgroupPath, req.ID) })
+
 	createErr := runscCreate(ctx, runscCreateOpts{
-		id:        string(req.ID),
-		rootDir:   m.stateDir,
-		bundleDir: bundleDir,
-		initStr:   initStr,
-		stdin:     sb.stdinChild,
-		stdout:    sb.stdoutChild,
-		stderr:    sb.stderrChild,
+		id:          string(req.ID),
+		rootDir:     m.stateDir,
+		bundleDir:   bundleDir,
+		initStr:     initStr,
+		stdin:       sb.stdinChild,
+		stdout:      sb.stdoutChild,
+		stderr:      sb.stderrChild,
+		cgroupDirFD: cgroupFD,
 	})
 	if createErr != nil {
 		return nil, fmt.Errorf("creating sandbox via runsc: %w", createErr)
@@ -523,6 +547,13 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 
 	if err := runscDelete(ctx, m.stateDir, string(id)); err != nil && !isRunscNotExist(err) {
 		log.Error(err, "Failed to destroy sandbox via runsc")
+	}
+
+	if err := removeSandboxCgroup(m.workerCgroupPath, id); err != nil {
+		// Leftover cgroup dirs don't compromise correctness — the next
+		// worker incarnation rebuilds the hierarchy from scratch — but
+		// they shouldn't accumulate silently either.
+		log.Error(err, "Failed to remove per-sandbox cgroup")
 	}
 
 	m.removeAgentCA(id)

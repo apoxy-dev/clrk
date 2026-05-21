@@ -21,15 +21,28 @@ type AgentSandbox struct {
 }
 
 // ExecutionResources defines per-execution CPU/memory limits enforced by the
-// worker runtime via cgroups/gVisor.
+// worker runtime via cgroup v2 controllers on a per-sandbox cgroup
+// (<worker>/system/<id>) that contains the full sandbox process tree
+// (Sentry + gofer + guest).
 type ExecutionResources struct {
-	// CPU limit for a single execution. Default "1".
+	// CPU limit for a single execution, enforced via cgroup v2
+	// cpu.max (CFS quota/period). Applies to the entire sandbox
+	// process tree. Default "1".
 	// +optional
 	CPU resource.Quantity `json:"cpu,omitempty"`
-	// Memory limit for a single execution. Default "512Mi".
+	// Memory limit for a single execution, enforced via cgroup v2
+	// memory.max on the entire sandbox process tree. Budget ~32MB on
+	// top of the guest's working set for Sentry+gofer baseline
+	// overhead; guest pages mirrored into the Sentry's address space
+	// count against this limit too. Swap is pinned to zero so the
+	// OOM killer fires deterministically at memory.max. Default
+	// "512Mi".
 	// +optional
 	Memory resource.Quantity `json:"memory,omitempty"`
-	// EphemeralStorage limit for a single execution.
+	// EphemeralStorage limit for a single execution. Currently
+	// advisory only — /tmp tmpfs sizing is controlled statically by
+	// the worker's OCI spec and per-sandbox cgroup enforcement is
+	// not yet wired through for this field.
 	// +optional
 	EphemeralStorage *resource.Quantity `json:"ephemeralStorage,omitempty"`
 }
