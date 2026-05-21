@@ -4,6 +4,7 @@ package sentrystack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,6 +20,13 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// ErrNonDNSUDPDenied is returned by routedUDPDialer.DialUDP when an
+// agent attempts UDP egress to anything other than :53. Worker-side
+// UDP policy is not wired yet; until it is, non-DNS UDP fails closed
+// so an agent can't bypass SandboxPolicy / Envoy MITM by switching
+// protocols. Stable error value — cross-module tests rely on it.
+var ErrNonDNSUDPDenied = errors.New("non-DNS UDP egress denied (no UDP policy plumbing yet)")
 
 const (
 	// udpFlowTableCap bounds the per-stack 4-tuple session table.
@@ -246,7 +254,13 @@ func runUDPFlow(
 	downConn := gonet.NewUDPConn(&wq, ep)
 	upConn, err := dial(sCtx, srcAddrPort, dstAddrPort)
 	if err != nil {
-		logger.Error("Failed to dial upstream", slog.Any("error", err))
+		// Dial-site emits its own Warn for the deny so we don't
+		// double-log; everything else is a real upstream failure.
+		if errors.Is(err, ErrNonDNSUDPDenied) {
+			logger.Debug("Non-DNS UDP denied", slog.Any("error", err))
+		} else {
+			logger.Error("Failed to dial upstream", slog.Any("error", err))
+		}
 		downConn.Close()
 		close(flow.ready)
 		return
@@ -339,26 +353,34 @@ type routedUDPDialer struct {
 }
 
 // DialUDP implements udpDialFunc. Picks a resolver from the configured
-// list when dst is DNS; otherwise dials the original dst directly.
-func (d *routedUDPDialer) DialUDP(ctx context.Context, _, dst netip.AddrPort) (net.Conn, error) {
-	var target netip.AddrPort
-	if dst.Port() == dnsPort && len(d.resolvers) > 0 {
+// list when dst is DNS; otherwise fails closed with ErrNonDNSUDPDenied
+// (worker-side UDP policy is not wired yet — see the doc on
+// ErrNonDNSUDPDenied). Once SandboxPolicy is reachable from the Sentry
+// the else branch swaps to a real policy.Allow check.
+func (d *routedUDPDialer) DialUDP(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error) {
+	if dst.Port() != dnsPort {
+		slog.Warn("Non-DNS UDP denied",
+			slog.String("src", src.String()),
+			slog.String("dst", dst.String()))
+		return nil, ErrNonDNSUDPDenied
+	}
+	target := dst
+	if len(d.resolvers) > 0 {
 		// Stable resolver selection: first entry wins. The worker
 		// resolver list is the host's /etc/resolv.conf order so the
 		// primary nameserver answers first. Failover via stdlib
 		// resolver retries would need a richer dialer; agents that
 		// care drive multi-resolver lookup themselves.
 		target = d.resolvers[0]
-	} else {
-		target = dst
 	}
 	return d.fallback.DialContext(ctx, "udp", target.String())
 }
 
 // newRoutedUDPDialer builds the UDP dialer from initStr. Empty resolver
-// list means direct dial for everything (including DNS, which inside
-// the Sentry's host netns would hit the host's resolver stack — the
-// worker is expected to populate DNSResolvers in normal operation).
+// list means DNS falls through to the Sentry's host resolver stack —
+// the worker is expected to populate DNSResolvers in normal operation.
+// Non-DNS UDP is denied unconditionally by DialUDP regardless of this
+// list (see ErrNonDNSUDPDenied).
 func newRoutedUDPDialer(init *InitStr) *routedUDPDialer {
 	d := &routedUDPDialer{fallback: &net.Dialer{}}
 	for _, s := range init.DNSResolvers {

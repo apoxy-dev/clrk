@@ -224,7 +224,9 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 	// and Envoy MITM can attribute the connection by hostname.
 	//
 	// UDP: routedUDPDialer branches on port — :53 dials the worker's
-	// resolver list (from initStr); everything else dials direct.
+	// resolver list (from initStr); everything else is denied (worker-
+	// side UDP policy is not wired yet, so non-DNS UDP fails closed to
+	// prevent agents from bypassing SandboxPolicy via protocol switch).
 	// The forwarder feeds every :53 response payload into dnsCache
 	// before forwarding it back to the sandbox.
 	dns := newDNSCache()
