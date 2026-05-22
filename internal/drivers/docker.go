@@ -1,11 +1,8 @@
 // Package drivers orchestrates the docker-side state of `clrk dev`: the
 // shared bridge network the k3d cluster + local registry sit on, and
-// the ctlptl-driven cluster controller that brings them up.
-//
-// Originally also owned the docker drivers for controller-manager and
-// worker containers; those were retired when both moved into the
-// cluster as Pods. The package keeps the docker network helpers because
-// the k3d node + registry still attach to the same bridge.
+// the k3d-library-driven cluster controller that brings them up. The
+// k3d node and the (optional) local registry both attach to the
+// `clrk` bridge so in-cluster pods reach the registry via docker DNS.
 package drivers
 
 import (

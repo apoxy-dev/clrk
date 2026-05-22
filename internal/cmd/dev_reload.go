@@ -125,6 +125,15 @@ func readDevSession(dataDir string) (*devSession, error) {
 	return &s, nil
 }
 
+// registryEnabled reports whether the dev session needs the local OCI
+// registry. The registry is opt-in — it's only useful for the inner
+// dev loop where `clrk dev push-image` lands locally-built images into
+// the in-cluster registry, gated by at least one --registry-image=
+// flag on launch.
+func (o *devOpts) registryEnabled() bool {
+	return len(o.registryImages) > 0
+}
+
 // applyRegistryImageOverrides folds --registry-image flags into the
 // effective image refs and forces --pull always on the matching
 // component. Must run before bringUp consumes o.controllerImage /

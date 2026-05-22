@@ -20,9 +20,10 @@ const (
 	// dev's controller-manager container uses when launched with
 	// --registry-image=controller-manager=<…>. ClusterDriver brings up
 	// a docker registry container at this exact name on the shared
-	// `clrk` network, so the docker daemon resolves the host part via
-	// docker DNS and serves layers from the registry that ctlptl wired
-	// into k3d's containerd registries.yaml. The host pushes against
+	// `clrk` network and wires it into the k3d cluster via the
+	// SimpleConfig's Registries.Use field, so docker resolves the host
+	// part via docker DNS and k3s's containerd pulls from it without
+	// a registries.yaml override. The host pushes against
 	// localhost:<RegistryHostPort()> for the same content.
 	LocalRegistryControllerManagerImage = "clrk-registry:5000/clrk/controller-manager:dev"
 	// LocalRegistryWorkerImage is the matching ref for the worker.

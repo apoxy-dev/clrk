@@ -5,11 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"strings"
-
-	"golang.org/x/mod/semver"
 
 	"github.com/apoxy-dev/clrk/internal/drivers"
 )
@@ -30,7 +27,6 @@ func preflight(ctx context.Context, o *devOpts) error {
 	var errs []string
 	for _, check := range []func(context.Context, *devOpts) error{
 		checkDocker,
-		checkK3d,
 		checkLinuxKernel,
 		checkImagePullable,
 	} {
@@ -57,44 +53,6 @@ func checkDocker(ctx context.Context, _ *devOpts) error {
 			hint += " (and add yourself to the `docker` group: `sudo usermod -aG docker $USER && newgrp docker`)"
 		}
 		return fmt.Errorf("docker daemon unreachable: %s — %s", strings.TrimSpace(string(out)), hint)
-	}
-	return nil
-}
-
-// k3dVersionRE pulls the major.minor.patch out of the first line of
-// `k3d version` output ("k3d version v5.4.6"). Any prerelease suffix is
-// intentionally dropped so a -dev build of a release we accept doesn't
-// rank below the bare release tag under semver's prerelease ordering.
-var k3dVersionRE = regexp.MustCompile(`(?m)^k3d version (v\d+\.\d+\.\d+)`)
-
-// checkK3d fails fast when the k3d binary isn't on PATH or is older
-// than drivers.MinK3dVersion. ClusterDriver shells out to k3d via the
-// ctlptl library with a k3d.io/v1alpha5 config, so an older k3d (or no
-// k3d at all) otherwise surfaces deep in bringUp as either a generic
-// "exec: k3d: executable file not found" or a cryptic "creating k3d
-// cluster: exit status 1" from ctlptl swallowing the real "unsupported
-// apiVersion 'k3d.io/v1alpha5'" message.
-func checkK3d(ctx context.Context, _ *devOpts) error {
-	if _, err := exec.LookPath("k3d"); err != nil {
-		return fmt.Errorf("k3d binary not found on PATH: %w — install k3d (brew install k3d, or follow https://k3d.io/#installation)", err)
-	}
-	out, err := exec.CommandContext(ctx, "k3d", "version").CombinedOutput()
-	if err != nil {
-		// `k3d version` is supposed to be infallible; if it isn't, let
-		// the deeper cluster.Apply path produce the real error rather
-		// than blocking on a flaky probe.
-		return nil
-	}
-	m := k3dVersionRE.FindStringSubmatch(string(out))
-	if len(m) < 2 {
-		// Unknown output format from a future k3d release — skip
-		// rather than blocking a working install on a parser glitch.
-		return nil
-	}
-	got := m[1]
-	if semver.Compare(got, drivers.MinK3dVersion) < 0 {
-		return fmt.Errorf("k3d %s is too old: clrk requires %s+ (its cluster config uses apiVersion k3d.io/v1alpha5, introduced in k3d v5.5.0) — upgrade k3d (brew upgrade k3d, or re-run https://k3d.io/#installation)",
-			got, drivers.MinK3dVersion)
 	}
 	return nil
 }

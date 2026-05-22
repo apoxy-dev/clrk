@@ -72,7 +72,7 @@ func newDevPushImageCmd() *cobra.Command {
 // network) so a successful push + rollout swaps the running image.
 func pushImageToDevRegistry(ctx context.Context, sess *devSession, comp, tarPath string, reload bool) error {
 	if sess.RegistryHostPort == 0 {
-		return fmt.Errorf("dev session has no local registry port recorded; restart `clrk dev` to pick up the registry-aware bring-up")
+		return fmt.Errorf("dev session has no local registry; relaunch `clrk dev` with at least one --registry-image=COMPONENT=clrk-registry:5000/... to enable it")
 	}
 	refStr := drivers.LocalRegistryHostRef(comp, sess.RegistryHostPort)
 	ref, err := name.NewTag(refStr)

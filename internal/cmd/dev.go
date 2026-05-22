@@ -380,13 +380,19 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 
 	state.cluster = drivers.NewClusterDriver(o.dataDir, o.k3sImage, o.registryPort)
+	state.cluster.EnableRegistry = o.registryEnabled()
 	if err := withStatus(prog, drivers.ClusterServerContainerName, func() error {
 		if err := state.cluster.Start(ctx); err != nil {
 			return fmt.Errorf("starting cluster: %w", err)
 		}
-		slog.Info("k3d cluster + registry running",
-			"node", drivers.ClusterServerContainerName,
-			"registry_port", state.cluster.RegistryHostPort())
+		if state.cluster.EnableRegistry {
+			slog.Info("k3d cluster + registry running",
+				"node", drivers.ClusterServerContainerName,
+				"registry_port", state.cluster.RegistryHostPort())
+		} else {
+			slog.Info("k3d cluster running",
+				"node", drivers.ClusterServerContainerName)
+		}
 		return nil
 	}); err != nil {
 		return state, err
