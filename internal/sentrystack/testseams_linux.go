@@ -11,7 +11,10 @@ import (
 
 	"gvisor.dev/gvisor/pkg/sentry/socket/plugin"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -179,4 +182,56 @@ func (d *RoutedUDPDialer) ResolversForTest() []netip.AddrPort {
 	out := make([]netip.AddrPort, len(d.resolvers))
 	copy(out, d.resolvers)
 	return out
+}
+
+// DialTCPThroughStackForTest opens a TCP connection from inside s to
+// dst, routed through the in-Sentry TCP forwarder that Init() installed.
+// Returns the sandbox-side net.Conn — read/write bytes through it to
+// exercise the splice loop. Caller is responsible for closing the conn.
+//
+// Drives the same code path a Sentry-attached process would: gonet
+// builds an endpoint on the stack, Connect emits a SYN, the loopether
+// LinkEndpoint loops it back to DeliverNetworkPacket, the forwarder
+// catches it (no listening endpoint matches), and req.CreateEndpoint
+// completes the handshake. From the test's perspective this is the
+// only handle needed to drive installTCPForwarder + makeTCPHandler +
+// handleTCP end-to-end.
+func DialTCPThroughStackForTest(ctx context.Context, s *Stack, dst string) (net.Conn, error) {
+	dstAP, err := netip.ParseAddrPort(dst)
+	if err != nil {
+		return nil, fmt.Errorf("parse dst %q: %w", dst, err)
+	}
+	proto := ipv4.ProtocolNumber
+	dstAddr := tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
+	if dstAP.Addr().Is6() {
+		proto = ipv6.ProtocolNumber
+		dstAddr = tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
+	}
+	return gonet.DialContextTCP(ctx, s.tcpipStack(), tcpip.FullAddress{
+		Addr: dstAddr,
+		Port: dstAP.Port(),
+	}, proto)
+}
+
+// DialUDPThroughStackForTest opens a UDP socket on s pointed at dst.
+// The first datagram written through the returned conn flows out via
+// the sandbox-side eth0 (loopether), gets caught by the installed UDP
+// forwarder, and is dialed upstream by routedUDPDialer.DialUDP — i.e.
+// the test drives runUDPFlow + copyUDPPackets through their full
+// happy path.
+func DialUDPThroughStackForTest(s *Stack, dst string) (net.Conn, error) {
+	dstAP, err := netip.ParseAddrPort(dst)
+	if err != nil {
+		return nil, fmt.Errorf("parse dst %q: %w", dst, err)
+	}
+	proto := ipv4.ProtocolNumber
+	dstAddr := tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
+	if dstAP.Addr().Is6() {
+		proto = ipv6.ProtocolNumber
+		dstAddr = tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
+	}
+	return gonet.DialUDP(s.tcpipStack(), nil, &tcpip.FullAddress{
+		Addr: dstAddr,
+		Port: dstAP.Port(),
+	}, proto)
 }
