@@ -41,7 +41,8 @@ func buildEmitter(ctx context.Context, r *Runtime) otelemit.Emitter {
 
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
-		semconv.ServiceName("clrk-worker"),
+		semconv.ServiceName("clrk"),
+		semconv.ServiceInstanceID(r.PodName),
 		semconv.K8SPodName(r.PodName),
 		semconv.K8SNamespaceName(r.Namespace),
 		attribute.String(otelemit.AttrComponent, "worker"),

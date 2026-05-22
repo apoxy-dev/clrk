@@ -334,8 +334,21 @@ func main() {
 		log.Error(err, "Unable to bind ingress ext_proc listener", "addr", *ingressExtProcAddr)
 		os.Exit(1)
 	}
+	// Ingress OTLP emitter — resolves the OTLP backend off an
+	// EgressGateway (env var or single-EG-in-namespace fallback) so the
+	// ingress.dispatch span lands in the same backend as the worker
+	// and the per-EG egress sinks. Noop when no EG is configured.
+	ingressEmitter := ingressextproc.BuildEmitter(ctx, cm.GetAPIReader(), runtimeNS)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := ingressEmitter.Close(shutCtx); err != nil {
+			log.Error(err, "Shutting down ingress OTLP emitter")
+		}
+	}()
 	ingressGRPC := grpc.NewServer()
-	extprocv3.RegisterExternalProcessorServer(ingressGRPC, ingressextproc.New(cm.GetClient(), healthChecker, invocations))
+	extprocv3.RegisterExternalProcessorServer(ingressGRPC,
+		ingressextproc.New(cm.GetClient(), healthChecker, invocations, ingressEmitter))
 	go func() {
 		slog.Info("Serving ingress ext_proc gRPC", "addr", ingressLis.Addr().String())
 		if err := ingressGRPC.Serve(ingressLis); err != nil {

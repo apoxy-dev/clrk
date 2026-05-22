@@ -55,4 +55,24 @@ const (
 
 	AttrEgressDenyReason = "clrk.egress.deny_reason"
 	AttrEgressDstAddr    = "clrk.egress.dst_addr"
+
+	// Stamped on the ingress.dispatch span emitted per inbound TaskAgent
+	// request. The pool key already lives at AttrWorkerPool.
+	AttrTaskAgentNamespace = "clrk.taskagent.namespace"
+	AttrTaskAgentName      = "clrk.taskagent.name"
+	AttrTaskAgentRevision  = "clrk.taskagent.revision"
+	AttrWorkerAddr         = "clrk.worker.addr"
+	AttrIngressOutcome     = "clrk.ingress.outcome"
+)
+
+// IngressOutcome* are the enumerated values for AttrIngressOutcome.
+// Operator dashboards filter on these verbatim, so they're frozen.
+const (
+	IngressOutcomeOK              = "ok"
+	IngressOutcomeBadRequest      = "bad_request"
+	IngressOutcomeNotFound        = "task_agent_not_found"
+	IngressOutcomeNoReadyRevision = "no_ready_revision"
+	IngressOutcomeNoReadyWorker   = "no_ready_worker"
+	IngressOutcomeAtMaxConcurrent = "at_max_concurrent"
+	IngressOutcomeInternal        = "internal_error"
 )

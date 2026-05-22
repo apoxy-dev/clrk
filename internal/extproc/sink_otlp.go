@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -41,11 +42,22 @@ type otlpSink struct {
 }
 
 func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink, func(context.Context) error, error) {
-	res := resource.NewWithAttributes(
-		semconv.SchemaURL,
-		semconv.ServiceName("clrk-egress"),
+	// POD_NAME / POD_NAMESPACE come from the controller-manager
+	// Deployment via Downward API. Empty when unset (e.g. `go run`); the
+	// resource just omits the semconv attr in that case.
+	podName := os.Getenv("POD_NAME")
+	podNS := os.Getenv("POD_NAMESPACE")
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName("clrk"),
 		attribute.String(otelemit.AttrComponent, "extproc"),
-	)
+	}
+	if podName != "" {
+		attrs = append(attrs, semconv.ServiceInstanceID(podName), semconv.K8SPodName(podName))
+	}
+	if podNS != "" {
+		attrs = append(attrs, semconv.K8SNamespaceName(podNS))
+	}
+	res := resource.NewWithAttributes(semconv.SchemaURL, attrs...)
 
 	em, err := otelemit.New(ctx, spec, "github.com/apoxy-dev/clrk/internal/extproc", res)
 	if err != nil {
