@@ -138,6 +138,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							{Name: "grpc", ContainerPort: 9443, Protocol: corev1.ProtocolTCP},
 							{Name: "extproc", ContainerPort: 9444, Protocol: corev1.ProtocolTCP},
 							{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
+							{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "data", MountPath: "/var/lib/clrk"},
@@ -195,6 +196,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 				{Name: "grpc", Port: 9443, TargetPort: intstr.FromInt(9443), Protocol: corev1.ProtocolTCP},
 				{Name: "extproc", Port: 9444, TargetPort: intstr.FromInt(9444), Protocol: corev1.ProtocolTCP},
 				{Name: "health", Port: 8082, TargetPort: intstr.FromInt(8082), Protocol: corev1.ProtocolTCP},
+				{Name: "admin", Port: 8085, TargetPort: intstr.FromInt(8085), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/admin"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/controller"
@@ -33,6 +35,7 @@ import (
 	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 const (
@@ -84,6 +87,7 @@ func main() {
 		ingressExtProcAddr   = flag.String("ingress-extproc-addr", ":9444", "Bind address for the ingress (TaskAgent) ext_proc gRPC server. Per-TA EnvoyExtensionPolicy points at this server via a per-namespace Backend.")
 		ingressExtProcHost   = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
 		ingressExtProcPort   = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
+		adminAddr            = flag.String("admin-addr", ":8085", "Bind address for the /admin/* system-state HTTP endpoint. Read-only, unauthenticated; gate via network reachability (bind to loopback or to the in-cluster Service only).")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -231,6 +235,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// /admin system-state surface. Dedicated listener so a wedged
+	// handler can't cause kube-probes to fail (controller-runtime
+	// owns the healthz listener). Bound to whatever --admin-addr
+	// says — defaults to :8085 in the controller-manager Service.
+	adminMux := admin.New()
+	adminLis, err := net.Listen("tcp", *adminAddr)
+	if err != nil {
+		log.Error(err, "Unable to bind admin listener", "addr", *adminAddr)
+		os.Exit(1)
+	}
+	adminSrv := &http.Server{Handler: adminMux}
+	go func() {
+		slog.Info("Serving /admin", "addr", adminLis.Addr().String())
+		if err := adminSrv.Serve(adminLis); err != nil && err != http.ErrServerClosed {
+			log.Error(err, "admin HTTP server exited")
+		}
+	}()
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = adminSrv.Shutdown(shutCtx)
+	}()
+
 	if *ingressController {
 		if *ingressExtProcHost == "" {
 			log.Error(fmt.Errorf("--ingress-extproc-host is required when --ingress-controller is on"), "Missing required flag")
@@ -334,21 +361,46 @@ func main() {
 		log.Error(err, "Unable to bind ingress ext_proc listener", "addr", *ingressExtProcAddr)
 		os.Exit(1)
 	}
-	// Ingress OTLP emitter — resolves the OTLP backend off an
-	// EgressGateway (env var or single-EG-in-namespace fallback) so the
-	// ingress.dispatch span lands in the same backend as the worker
-	// and the per-EG egress sinks. Noop when no EG is configured.
-	ingressEmitter := ingressextproc.BuildEmitter(ctx, cm.GetAPIReader(), runtimeNS)
+	// Ingress OTLP emitter — warm start: resolves the OTLP backend off
+	// an EgressGateway (env var or single-EG-in-namespace fallback) so
+	// the ingress.dispatch span lands in the same backend as the
+	// worker and the per-EG egress sinks. We use the APIReader (uncached)
+	// here so resolution works before the controller-runtime cache is
+	// hot. The IngressOTLPReconciler below takes over once the cache
+	// syncs and keeps the emitter in sync with EG changes at runtime.
+	// Noop when no EG is configured.
+	warmResolved, warmErr := ingressextproc.Resolve(ctx, cm.GetAPIReader(), runtimeNS)
+	warmReason := "cold_boot"
+	if warmErr != nil {
+		log.Info("Ingress OTLP emitter is noop at warm start", "reason", warmErr.Error())
+		warmReason = "no_eg"
+	} else if warmResolved.Spec.Endpoint != "" {
+		slog.Info("Ingress OTLP emitter wired (warm start)",
+			"egress_gateway", warmResolved.EGRef,
+			"endpoint", warmResolved.Spec.Endpoint)
+	}
+	adminMux.SetIngressOTLPStatus(admin.IngressOTLPStatus{
+		EgressGateway: warmResolved.EGRef,
+		Endpoint:      warmResolved.Spec.Endpoint,
+		LastReason:    warmReason,
+		Noop:          warmResolved.Spec.Endpoint == "",
+	})
+	ingressSrv := ingressextproc.New(cm.GetClient(), healthChecker, invocations, warmResolved.Emitter)
 	defer func() {
+		// Swap in a noop emitter and Close whatever was live at
+		// shutdown — the reconciler may have replaced the warm-start
+		// emitter, so we cannot use a captured-variable reference.
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := ingressEmitter.Close(shutCtx); err != nil {
-			log.Error(err, "Shutting down ingress OTLP emitter")
+		current := ingressSrv.SwapEmitter(otelemit.Noop())
+		if current != nil {
+			if err := current.Close(shutCtx); err != nil {
+				log.Error(err, "Shutting down ingress OTLP emitter")
+			}
 		}
 	}()
 	ingressGRPC := grpc.NewServer()
-	extprocv3.RegisterExternalProcessorServer(ingressGRPC,
-		ingressextproc.New(cm.GetClient(), healthChecker, invocations, ingressEmitter))
+	extprocv3.RegisterExternalProcessorServer(ingressGRPC, ingressSrv)
 	go func() {
 		slog.Info("Serving ingress ext_proc gRPC", "addr", ingressLis.Addr().String())
 		if err := ingressGRPC.Serve(ingressLis); err != nil {
@@ -356,6 +408,23 @@ func main() {
 		}
 	}()
 	defer ingressGRPC.GracefulStop()
+
+	// Reconciler that keeps ingressSrv's emitter in sync with the
+	// resolved EgressGateway's spec.OTLP at runtime. Registered
+	// unconditionally — operators may want ingress.dispatch spans
+	// even when neither the in-cluster ingress controller nor the
+	// EG provisioning controller is on (e.g. the per-TA Envoy data
+	// plane is managed externally).
+	if err := (&controller.IngressOTLPReconciler{
+		Client:      cm.GetClient(),
+		RuntimeNS:   runtimeNS,
+		Server:      ingressSrv,
+		Admin:       adminMux,
+		InitialSpec: warmResolved.Spec,
+	}).SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "IngressOTLPEmitter")
+		os.Exit(1)
+	}
 
 	egErrCh := make(chan error, 1)
 	if clusterCfg != nil && (*ingressController || *egController) {

@@ -23,20 +23,33 @@ import (
 // use it" so `clrk dev` works without explicit identity.
 const EgressGatewayEnv = "CLRK_INGRESS_OTLP_GATEWAY"
 
-// BuildEmitter always returns a non-nil Emitter; any discovery /
-// construction failure logs the reason and falls back to Noop so
-// ingress dispatch never blocks on telemetry.
-func BuildEmitter(ctx context.Context, api client.Reader, ns string) otelemit.Emitter {
-	log := ctrl.LoggerFrom(ctx).WithName("ingress-otel")
+// ResolvedEmitter is what Resolve returns to the reconciler: the live
+// emitter plus the OTLP spec snapshot the reconciler uses for spec-
+// equality short-circuit, and an "ns/name" tag for the EG so the
+// /admin surface and logs can name the source. All three are
+// always-set: Emitter is at minimum otelemit.Noop(), Spec is the
+// zero value when there's no EG (so DeepEqual still works), and
+// EGRef is empty in the no-EG case.
+type ResolvedEmitter struct {
+	Emitter otelemit.Emitter
+	Spec    clrkv1alpha1.OTLPLogsSinkSpec
+	EGRef   string
+}
 
+// Resolve performs the same EG-discovery + emitter-construction the
+// warm-start path does, but returns the spec snapshot alongside the
+// emitter so the reconciler can compare against its last-applied
+// snapshot before deciding whether to swap. The returned emitter is
+// always non-nil; on any discovery or construction failure the
+// Emitter field is otelemit.Noop() and err carries the reason.
+func Resolve(ctx context.Context, api client.Reader, ns string) (ResolvedEmitter, error) {
 	eg, err := resolveEgressGateway(ctx, api, ns)
 	if err != nil {
-		log.Info("EgressGateway not resolved; ingress OTLP emitter is noop", "reason", err.Error())
-		return otelemit.Noop()
+		return ResolvedEmitter{Emitter: otelemit.Noop()}, err
 	}
+	egRef := eg.Namespace + "/" + eg.Name
 	if eg.Spec.OTLP == nil || strings.TrimSpace(eg.Spec.OTLP.Endpoint) == "" {
-		log.Info("EgressGateway has no OTLP endpoint; ingress OTLP emitter is noop")
-		return otelemit.Noop()
+		return ResolvedEmitter{Emitter: otelemit.Noop(), EGRef: egRef}, nil
 	}
 
 	// POD_NAME / POD_NAMESPACE come from the CM Deployment via Downward
@@ -54,15 +67,33 @@ func BuildEmitter(ctx context.Context, api client.Reader, ns string) otelemit.Em
 
 	em, err := otelemit.New(ctx, *eg.Spec.OTLP, "github.com/apoxy-dev/clrk/internal/extproc/ingress", res)
 	if err != nil {
-		log.Error(err, "Building ingress OTLP emitter; continuing with noop",
-			"egress_gateway", eg.Namespace+"/"+eg.Name,
-			"endpoint", eg.Spec.OTLP.Endpoint)
-		return otelemit.Noop()
+		return ResolvedEmitter{Emitter: otelemit.Noop(), Spec: *eg.Spec.OTLP, EGRef: egRef},
+			fmt.Errorf("build ingress OTLP emitter for %s: %w", egRef, err)
+	}
+	return ResolvedEmitter{Emitter: em, Spec: *eg.Spec.OTLP, EGRef: egRef}, nil
+}
+
+// BuildEmitter always returns a non-nil Emitter; any discovery /
+// construction failure logs the reason and falls back to Noop so
+// ingress dispatch never blocks on telemetry. Thin wrapper around
+// Resolve, kept for the controller-manager's warm-start path where
+// the caller wants "always-non-nil, log-and-swallow".
+func BuildEmitter(ctx context.Context, api client.Reader, ns string) otelemit.Emitter {
+	log := ctrl.LoggerFrom(ctx).WithName("ingress-otel")
+	resolved, err := Resolve(ctx, api, ns)
+	if err != nil {
+		log.Info("Ingress OTLP emitter is noop", "reason", err.Error())
+		return resolved.Emitter
+	}
+	if resolved.Spec.Endpoint == "" {
+		log.Info("EgressGateway has no OTLP endpoint; ingress OTLP emitter is noop",
+			"egress_gateway", resolved.EGRef)
+		return resolved.Emitter
 	}
 	log.Info("Ingress OTLP emitter wired",
-		"egress_gateway", eg.Namespace+"/"+eg.Name,
-		"endpoint", eg.Spec.OTLP.Endpoint)
-	return em
+		"egress_gateway", resolved.EGRef,
+		"endpoint", resolved.Spec.Endpoint)
+	return resolved.Emitter
 }
 
 func resolveEgressGateway(ctx context.Context, api client.Reader, ns string) (*clrkv1alpha1.EgressGateway, error) {

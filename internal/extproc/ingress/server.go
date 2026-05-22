@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -43,6 +44,12 @@ type Picker interface {
 	Pick(pool types.NamespacedName, ns, agent, revision string, maxConcurrent uint32, tieBreaker string) (healthcheck.PickResult, bool)
 }
 
+// emitterCell wraps the Emitter interface so we can store it in an
+// atomic.Pointer (Go atomics cannot hold interface types directly).
+type emitterCell struct {
+	em otelemit.Emitter
+}
+
 // Server implements envoy.service.ext_proc.v3.ExternalProcessor for
 // inbound TaskAgent traffic. One stream per HTTP transaction; we only
 // act on RequestHeaders and continue everything else untouched.
@@ -59,10 +66,12 @@ type Server struct {
 	// propagation is a no-op and downstream egress spans start as roots.
 	invocations *invocationctx.Store
 
-	// tracer is always non-nil — defaults to otelemit.Noop().Tracer()
-	// when the caller passes a nil Emitter, so call sites stamp spans
+	// emitter holds the live OTLP emitter, swappable atomically by
+	// IngressOTLPReconciler when an EgressGateway's spec.OTLP changes
+	// at runtime. Always non-nil — New seeds it with the caller-supplied
+	// emitter (or otelemit.Noop() if nil) so Process can Load
 	// unconditionally.
-	tracer trace.Tracer
+	emitter atomic.Pointer[emitterCell]
 }
 
 // New constructs an ingress ext_proc server. A nil Emitter falls back
@@ -71,12 +80,29 @@ func New(c client.Client, picker Picker, invocations *invocationctx.Store, em ot
 	if em == nil {
 		em = otelemit.Noop()
 	}
-	return &Server{
+	s := &Server{
 		client:      c,
 		picker:      picker,
 		invocations: invocations,
-		tracer:      em.Tracer(),
 	}
+	s.emitter.Store(&emitterCell{em: em})
+	return s
+}
+
+// SwapEmitter atomically replaces the live emitter and returns the
+// displaced one. The caller owns the returned emitter — it must be
+// Closed (typically in a background goroutine with a deadline) to
+// release the OTLP exporter's batcher and connection. Passing nil is
+// equivalent to passing otelemit.Noop().
+func (s *Server) SwapEmitter(em otelemit.Emitter) otelemit.Emitter {
+	if em == nil {
+		em = otelemit.Noop()
+	}
+	prev := s.emitter.Swap(&emitterCell{em: em})
+	if prev == nil {
+		return nil
+	}
+	return prev.em
 }
 
 // Process handles one ext_proc stream. The only message we act on is
@@ -111,9 +137,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		case *extprocv3.ProcessingRequest_RequestHeaders:
 			hdrs := headersToMap(m.RequestHeaders.Headers)
 			if span == nil {
+				// Load the live emitter for this stream's whole lifetime
+				// (a subsequent SwapEmitter must not retroactively reroute
+				// in-flight spans — the displaced emitter's Close drains
+				// them). The same tracer is reused for any later
+				// RequestHeaders message on this stream.
+				tracer := s.emitter.Load().em.Tracer()
 				parent := resolveOrSynthesizeParent(hdrs)
 				parentCtx := trace.ContextWithSpanContext(ctx, parent)
-				_, span = s.tracer.Start(parentCtx, "ingress.dispatch",
+				_, span = tracer.Start(parentCtx, "ingress.dispatch",
 					trace.WithSpanKind(trace.SpanKindServer))
 			}
 			resp := s.handleRequestHeaders(ctx, hdrs, span)
