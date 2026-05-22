@@ -4,6 +4,8 @@ package worker
 import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // Runtime is the top-level worker runtime that manages sandbox lifecycle.
@@ -14,6 +16,11 @@ type Runtime struct {
 	PoolName  string
 	PodName   string
 	Namespace string
+
+	// Emitter is always non-nil; falls back to Noop when no
+	// EgressGateway / OTLP endpoint is configured so consumers emit
+	// unconditionally.
+	Emitter otelemit.Emitter
 }
 
 // NeedLeaderElection returns false — every worker pod runs independently.

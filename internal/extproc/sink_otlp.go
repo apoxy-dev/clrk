@@ -12,66 +12,14 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otellog "go.opentelemetry.io/otel/log"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
-)
-
-// Attribute keys clrk publishes that don't live in OTel semconv.
-// Anything semconv has a key for (http.*, server.*, url.*) is sourced
-// from the semconv package directly.
-//
-// gen_ai.* are OTel GenAI semconv keys. semconv/v1.26.0 doesn't ship
-// typed helpers for them yet, so we declare the strings here. Swap to
-// typed helpers once the upstream package adds them.
-const (
-	attrAgentKind      = "agent.kind"
-	attrAgentNamespace = "agent.namespace"
-	attrAgentName      = "agent.name"
-	attrAgentUID       = "agent.uid"
-	attrAgentRevision  = "agent.revision"
-	attrInvocationID   = "invocation.id"
-	attrReqBytes       = "clrk.req.bytes"
-	attrRespBytes      = "clrk.resp.bytes"
-	attrReqTruncated   = "clrk.req.truncated"
-	attrRespTruncated  = "clrk.resp.truncated"
-	attrDurationMs     = "clrk.duration_ms"
-	attrTraceID        = "trace_id"
-	attrSpanID         = "span_id"
-	attrBodyBytes      = "clrk.body.bytes"
-	attrBodyTruncated  = "clrk.body.truncated"
-	attrBodyB64        = "clrk.body.b64"
-	attrRespChunks     = "clrk.resp.chunks"
-
-	attrGenAISystem        = "gen_ai.system"
-	attrGenAIOperationName = "gen_ai.operation.name"
-	attrGenAIRequestModel  = "gen_ai.request.model"
-	attrGenAIResponseModel = "gen_ai.response.model"
-	attrGenAIInputTokens   = "gen_ai.usage.input_tokens"
-	attrGenAIOutputTokens  = "gen_ai.usage.output_tokens"
-	attrGenAIStream        = "gen_ai.response.stream"
-
-	attrAPRRouteMatched   = "clrk.aiproviderroute.matched"
-	attrAPRRouteName      = "clrk.aiproviderroute.name"
-	attrAPRRouteNamespace = "clrk.aiproviderroute.namespace"
-	attrBodyUsageVisible  = "clrk.body.usage_visible"
-	attrBodyReqRewritten  = "clrk.body.request_rewritten"
-
-	attrBudgetDenied    = "clrk.budget.denied"
-	attrBudgetDailyUsed = "clrk.budget.daily_used"
-	attrBudgetDailyMax  = "clrk.budget.daily_max"
-
-	attrL4BytesUpstream = "clrk.l4.bytes_upstream"
-	attrL4DstName       = "clrk.dst.name"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // otlpSink fans out each captured Record to two OTLP signals:
@@ -96,98 +44,18 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceName("clrk-egress"),
-		attribute.String("clrk.component", "extproc"),
+		attribute.String(otelemit.AttrComponent, "extproc"),
 	)
 
-	logsExp, err := otlploghttp.New(ctx, logsExporterOptions(spec)...)
+	em, err := otelemit.New(ctx, spec, "github.com/apoxy-dev/clrk/internal/extproc", res)
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct otlploghttp exporter: %w", err)
+		return nil, nil, fmt.Errorf("construct otlp emitter: %w", err)
 	}
-	// 1s flush keeps dev/TUI feedback snappy; the upstream defaults
-	// (logs: 1s, traces: 5s) introduced a visible 5s gap between an
-	// HTTP transaction completing and its span landing in the
-	// otel-traces pane. Production OTLP collectors batch on their own
-	// receiver side, so making the exporter chatty here doesn't change
-	// what the backend ultimately stores.
-	const dfltBatchTimeout = 1 * time.Second
-	logsProvider := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(logsExp,
-			sdklog.WithExportInterval(dfltBatchTimeout),
-		)),
-		sdklog.WithResource(res),
-	)
-
-	tracesExp, err := otlptrace.New(ctx, otlptracehttp.NewClient(tracesExporterOptions(spec)...))
-	if err != nil {
-		_ = logsProvider.Shutdown(ctx)
-		return nil, nil, fmt.Errorf("construct otlptracehttp exporter: %w", err)
-	}
-	tracesProvider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(tracesExp,
-			sdktrace.WithBatchTimeout(dfltBatchTimeout),
-		),
-		sdktrace.WithResource(res),
-	)
-
 	sink := &otlpSink{
-		logger: logsProvider.Logger("github.com/apoxy-dev/clrk/internal/extproc"),
-		tracer: tracesProvider.Tracer("github.com/apoxy-dev/clrk/internal/extproc"),
+		logger: em.Logger(),
+		tracer: em.Tracer(),
 	}
-	shutdown := func(ctx context.Context) error {
-		var errs []string
-		if err := tracesProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Sprintf("traces: %v", err))
-		}
-		if err := logsProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Sprintf("logs: %v", err))
-		}
-		if len(errs) == 0 {
-			return nil
-		}
-		return fmt.Errorf("otlp sink shutdown: %s", strings.Join(errs, "; "))
-	}
-	return sink, shutdown, nil
-}
-
-// WithEndpointURL on both exporters already derives insecure-mode from
-// the http:// scheme — no separate WithInsecure needed. We always
-// append the signal-specific path (`/v1/logs`, `/v1/traces`) when the
-// configured endpoint has no path or just `/` so users can write
-// `Endpoint: http://otel-collector:4318` without remembering to
-// enumerate per-signal suffixes. Existing endpoints that already
-// include a non-trivial path are left untouched.
-
-func logsExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlploghttp.Option {
-	opts := []otlploghttp.Option{otlploghttp.WithEndpointURL(endpointForSignal(spec.Endpoint, "/v1/logs"))}
-	if len(spec.Headers) > 0 {
-		opts = append(opts, otlploghttp.WithHeaders(spec.Headers))
-	}
-	return opts
-}
-
-func tracesExporterOptions(spec clrkv1alpha1.OTLPLogsSinkSpec) []otlptracehttp.Option {
-	opts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpointForSignal(spec.Endpoint, "/v1/traces"))}
-	if len(spec.Headers) > 0 {
-		opts = append(opts, otlptracehttp.WithHeaders(spec.Headers))
-	}
-	return opts
-}
-
-// endpointForSignal appends the signal-specific path when the
-// configured endpoint has no path or only the root `/`. Required
-// because otlploghttp/otlptracehttp WithEndpointURL uses the URL's
-// Path verbatim — a bare `http://host:4318` ends up POSTing to `/`,
-// which collectors return 404 for.
-func endpointForSignal(endpoint, signalPath string) string {
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" {
-		return endpoint
-	}
-	if u.Path == "" || u.Path == "/" {
-		u.Path = signalPath
-		return u.String()
-	}
-	return endpoint
+	return sink, em.Close, nil
 }
 
 // derived caches the request/response fields parsed once per Emit so
@@ -249,17 +117,17 @@ func (s *otlpSink) EmitL4(r L4Record) {
 
 	attrs := make([]attribute.KeyValue, 0, 9)
 	attrs = append(attrs,
-		attribute.String(attrAgentKind, r.AgentKind),
-		attribute.String(attrAgentNamespace, r.AgentNamespace),
-		attribute.String(attrAgentName, r.AgentName),
-		attribute.String(attrAgentUID, r.AgentUID),
-		attribute.String(attrAgentRevision, r.AgentRevision),
-		attribute.String(attrInvocationID, r.InvocationID),
-		attribute.Int64(attrL4BytesUpstream, r.BytesUpstream),
-		attribute.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+		attribute.String(otelemit.AttrAgentKind, r.AgentKind),
+		attribute.String(otelemit.AttrAgentNamespace, r.AgentNamespace),
+		attribute.String(otelemit.AttrAgentName, r.AgentName),
+		attribute.String(otelemit.AttrAgentUID, r.AgentUID),
+		attribute.String(otelemit.AttrAgentRevision, r.AgentRevision),
+		attribute.String(otelemit.AttrInvocationID, r.InvocationID),
+		attribute.Int64(otelemit.AttrL4BytesUpstream, r.BytesUpstream),
+		attribute.Int(otelemit.AttrDurationMs, int(end.Sub(start)/time.Millisecond)),
 	)
 	if r.DstName != "" {
-		attrs = append(attrs, attribute.String(attrL4DstName, r.DstName))
+		attrs = append(attrs, attribute.String(otelemit.AttrL4DstName, r.DstName))
 	}
 	_, span := s.tracer.Start(context.Background(), "egress.tcp",
 		oteltrace.WithTimestamp(start),
@@ -280,23 +148,23 @@ func (s *otlpSink) EmitL4(r L4Record) {
 	// 9 base attrs + DstName + 2 trace IDs = up to 12.
 	logAttrs := make([]otellog.KeyValue, 0, 12)
 	logAttrs = append(logAttrs,
-		otellog.String(attrAgentKind, r.AgentKind),
-		otellog.String(attrAgentNamespace, r.AgentNamespace),
-		otellog.String(attrAgentName, r.AgentName),
-		otellog.String(attrAgentUID, r.AgentUID),
-		otellog.String(attrAgentRevision, r.AgentRevision),
-		otellog.String(attrInvocationID, r.InvocationID),
-		otellog.Int64(attrL4BytesUpstream, r.BytesUpstream),
-		otellog.Int(attrDurationMs, int(end.Sub(start)/time.Millisecond)),
+		otellog.String(otelemit.AttrAgentKind, r.AgentKind),
+		otellog.String(otelemit.AttrAgentNamespace, r.AgentNamespace),
+		otellog.String(otelemit.AttrAgentName, r.AgentName),
+		otellog.String(otelemit.AttrAgentUID, r.AgentUID),
+		otellog.String(otelemit.AttrAgentRevision, r.AgentRevision),
+		otellog.String(otelemit.AttrInvocationID, r.InvocationID),
+		otellog.Int64(otelemit.AttrL4BytesUpstream, r.BytesUpstream),
+		otellog.Int(otelemit.AttrDurationMs, int(end.Sub(start)/time.Millisecond)),
 	)
 	if r.DstName != "" {
-		logAttrs = append(logAttrs, otellog.String(attrL4DstName, r.DstName))
+		logAttrs = append(logAttrs, otellog.String(otelemit.AttrL4DstName, r.DstName))
 	}
 	sc := span.SpanContext()
 	if sc.HasTraceID() {
 		logAttrs = append(logAttrs,
-			otellog.String(attrTraceID, sc.TraceID().String()),
-			otellog.String(attrSpanID, sc.SpanID().String()),
+			otellog.String(otelemit.AttrTraceID, sc.TraceID().String()),
+			otellog.String(otelemit.AttrSpanID, sc.SpanID().String()),
 		)
 	}
 	rec.AddAttributes(logAttrs...)
@@ -317,14 +185,14 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 		semconv.URLPath(d.path),
 		semconv.URLFull(d.urlFull),
 		semconv.HTTPResponseStatusCode(d.status),
-		attribute.Int(attrReqBytes, len(r.RequestBody)),
-		attribute.Int(attrRespBytes, len(r.ResponseBody)),
-		attribute.Int(attrRespChunks, r.ResponseBodyChunks),
-		attribute.Bool(attrReqTruncated, r.RequestTruncated),
-		attribute.Bool(attrRespTruncated, r.ResponseTruncated),
+		attribute.Int(otelemit.AttrReqBytes, len(r.RequestBody)),
+		attribute.Int(otelemit.AttrRespBytes, len(r.ResponseBody)),
+		attribute.Int(otelemit.AttrRespChunks, r.ResponseBodyChunks),
+		attribute.Bool(otelemit.AttrReqTruncated, r.RequestTruncated),
+		attribute.Bool(otelemit.AttrRespTruncated, r.ResponseTruncated),
 	)
 	if r.RequestBodyRewritten {
-		attrs = append(attrs, attribute.Bool(attrBodyReqRewritten, true))
+		attrs = append(attrs, attribute.Bool(otelemit.AttrBodyReqRewritten, true))
 	}
 	attrs = appendGenAIAttrs(attrs, r)
 	attrs = appendAPRAttrs(attrs, r)
@@ -380,22 +248,22 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 		otellog.String(string(semconv.ServerAddressKey), d.authority),
 		otellog.String(string(semconv.URLPathKey), d.path),
 		otellog.Int(string(semconv.HTTPResponseStatusCodeKey), d.status),
-		otellog.Int(attrReqBytes, len(r.RequestBody)),
-		otellog.Int(attrRespBytes, len(r.ResponseBody)),
-		otellog.Int(attrRespChunks, r.ResponseBodyChunks),
-		otellog.Bool(attrReqTruncated, r.RequestTruncated),
-		otellog.Bool(attrRespTruncated, r.ResponseTruncated),
+		otellog.Int(otelemit.AttrReqBytes, len(r.RequestBody)),
+		otellog.Int(otelemit.AttrRespBytes, len(r.ResponseBody)),
+		otellog.Int(otelemit.AttrRespChunks, r.ResponseBodyChunks),
+		otellog.Bool(otelemit.AttrReqTruncated, r.RequestTruncated),
+		otellog.Bool(otelemit.AttrRespTruncated, r.ResponseTruncated),
 	)
 	if dur := durationMillis(r); dur >= 0 {
-		attrs = append(attrs, otellog.Int(attrDurationMs, dur))
+		attrs = append(attrs, otellog.Int(otelemit.AttrDurationMs, dur))
 	}
 	if r.RequestBodyRewritten {
-		attrs = append(attrs, otellog.Bool(attrBodyReqRewritten, true))
+		attrs = append(attrs, otellog.Bool(otelemit.AttrBodyReqRewritten, true))
 	}
 	if sc.HasTraceID() {
 		attrs = append(attrs,
-			otellog.String(attrTraceID, sc.TraceID().String()),
-			otellog.String(attrSpanID, sc.SpanID().String()),
+			otellog.String(otelemit.AttrTraceID, sc.TraceID().String()),
+			otellog.String(otelemit.AttrSpanID, sc.SpanID().String()),
 		)
 	}
 	attrs = appendLogKVs(attrs, genAIAttrs(r))
@@ -415,31 +283,31 @@ func genAIAttrs(r Record) []attribute.KeyValue {
 	}
 	p := r.Provider
 	out := []attribute.KeyValue{
-		attribute.String(attrGenAISystem, p.System),
+		attribute.String(otelemit.AttrGenAISystem, p.System),
 	}
 	if p.Operation != "" {
-		out = append(out, attribute.String(attrGenAIOperationName, p.Operation))
+		out = append(out, attribute.String(otelemit.AttrGenAIOperationName, p.Operation))
 	}
 	if p.RequestModel != "" {
-		out = append(out, attribute.String(attrGenAIRequestModel, p.RequestModel))
+		out = append(out, attribute.String(otelemit.AttrGenAIRequestModel, p.RequestModel))
 	}
 	if p.ResponseModel != "" {
-		out = append(out, attribute.String(attrGenAIResponseModel, p.ResponseModel))
+		out = append(out, attribute.String(otelemit.AttrGenAIResponseModel, p.ResponseModel))
 	}
 	if p.InputTokens > 0 {
-		out = append(out, attribute.Int64(attrGenAIInputTokens, p.InputTokens))
+		out = append(out, attribute.Int64(otelemit.AttrGenAIInputTokens, p.InputTokens))
 	}
 	if p.OutputTokens > 0 {
-		out = append(out, attribute.Int64(attrGenAIOutputTokens, p.OutputTokens))
+		out = append(out, attribute.Int64(otelemit.AttrGenAIOutputTokens, p.OutputTokens))
 	}
 	if p.StreamResponse {
-		out = append(out, attribute.Bool(attrGenAIStream, true))
+		out = append(out, attribute.Bool(otelemit.AttrGenAIStream, true))
 	}
 	// Surface the visibility-of-usage signal only when it's actionable:
 	// usage hidden behind truncation. Any other "absent" state (error
 	// response, stream) doesn't benefit from raising the byte cap.
 	if r.ResponseTruncated && !p.UsageVisible && !p.StreamResponse {
-		out = append(out, attribute.Bool(attrBodyUsageVisible, false))
+		out = append(out, attribute.Bool(otelemit.AttrBodyUsageVisible, false))
 	}
 	return out
 }
@@ -455,15 +323,15 @@ func aprAttrs(r Record) []attribute.KeyValue {
 		return nil
 	}
 	out := []attribute.KeyValue{
-		attribute.Bool(attrAPRRouteMatched, true),
-		attribute.String(attrAPRRouteNamespace, r.MatchedRouteNamespace),
-		attribute.String(attrAPRRouteName, r.MatchedRouteName),
+		attribute.Bool(otelemit.AttrAPRRouteMatched, true),
+		attribute.String(otelemit.AttrAPRRouteNamespace, r.MatchedRouteNamespace),
+		attribute.String(otelemit.AttrAPRRouteName, r.MatchedRouteName),
 	}
 	if r.BudgetDenied {
 		out = append(out,
-			attribute.Bool(attrBudgetDenied, true),
-			attribute.Int64(attrBudgetDailyUsed, r.BudgetDailyUsed),
-			attribute.Int64(attrBudgetDailyMax, r.BudgetDailyMax),
+			attribute.Bool(otelemit.AttrBudgetDenied, true),
+			attribute.Int64(otelemit.AttrBudgetDailyUsed, r.BudgetDailyUsed),
+			attribute.Int64(otelemit.AttrBudgetDailyMax, r.BudgetDailyMax),
 		)
 	}
 	return out
@@ -476,12 +344,12 @@ func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 // agentAttrs returns the identity sub-slice common to span + log.
 func agentAttrs(r Record) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.String(attrAgentKind, r.AgentKind),
-		attribute.String(attrAgentNamespace, r.AgentNamespace),
-		attribute.String(attrAgentName, r.AgentName),
-		attribute.String(attrAgentUID, r.AgentUID),
-		attribute.String(attrAgentRevision, r.AgentRevision),
-		attribute.String(attrInvocationID, r.InvocationID),
+		attribute.String(otelemit.AttrAgentKind, r.AgentKind),
+		attribute.String(otelemit.AttrAgentNamespace, r.AgentNamespace),
+		attribute.String(otelemit.AttrAgentName, r.AgentName),
+		attribute.String(otelemit.AttrAgentUID, r.AgentUID),
+		attribute.String(otelemit.AttrAgentRevision, r.AgentRevision),
+		attribute.String(otelemit.AttrInvocationID, r.InvocationID),
 	}
 }
 
@@ -553,9 +421,9 @@ func headerAttrs(prefix string, headers map[string]string) []attribute.KeyValue 
 
 func bodyAttrs(body []byte, truncated bool) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.Int(attrBodyBytes, len(body)),
-		attribute.Bool(attrBodyTruncated, truncated),
-		attribute.String(attrBodyB64, base64.StdEncoding.EncodeToString(body)),
+		attribute.Int(otelemit.AttrBodyBytes, len(body)),
+		attribute.Bool(otelemit.AttrBodyTruncated, truncated),
+		attribute.String(otelemit.AttrBodyB64, base64.StdEncoding.EncodeToString(body)),
 	}
 }
 

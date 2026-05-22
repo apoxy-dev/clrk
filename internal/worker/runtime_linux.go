@@ -57,6 +57,17 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	log.Info("Worker cgroup ready", "path", workerCgroupPath)
 
+	// Deferred first so Close runs LAST after all sandbox/egress
+	// teardown — late stages still emit denies and lifecycle events.
+	r.Emitter = buildEmitter(ctx, r)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := r.Emitter.Close(shutdownCtx); err != nil {
+			log.Error(err, "Shutting down OTLP emitter")
+		}
+	}()
+
 	// Initialize egress router.
 	router := egress.NewRouter(clrkv1alpha1.EgressPolicyAllowAll)
 
