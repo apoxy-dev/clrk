@@ -62,6 +62,13 @@ const (
 	// ClusterDriver.K3sImage for CI pinning.
 	DefaultK3sImage = "rancher/k3s:v1.34.1-k3s1"
 
+	// MinK3dVersion is the lowest k3d release the driver supports. Pinned
+	// to the introduction of the k3d.io/v1alpha5 SimpleConfig schema we
+	// hand to ctlptl in Start — older k3d binaries reject the apiVersion
+	// at parse time with a generic "exit status 1" that's hard to debug.
+	// Bump this in lockstep with the k3dv1alpha5 import above.
+	MinK3dVersion = "v5.5.0"
+
 	// KubeconfigFileName is written into the shared data dir so other
 	// drivers (and the user) can find the rewritten in-network kubeconfig.
 	KubeconfigFileName = "kubeconfig"
