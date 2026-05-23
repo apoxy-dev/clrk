@@ -13,10 +13,16 @@ import (
 	"time"
 
 	"github.com/dpeckett/contextio"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	otellog "go.opentelemetry.io/otel/log"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // egressHandshakeTimeout bounds how long the bridge waits for the
@@ -51,9 +57,10 @@ type EgressStateLookup func(sandboxID string) (EgressState, bool)
 // upstream — direct for unrouted dsts, Envoy MITM with enriched
 // PROXY v2 (identity + InvocationID) otherwise.
 type EgressBridge struct {
-	ln     net.Listener
-	lookup EgressStateLookup
-	filter *localDstFilter
+	ln      net.Listener
+	lookup  EgressStateLookup
+	filter  *localDstFilter
+	emitter otelemit.Emitter
 
 	wg     sync.WaitGroup
 	stopCh chan struct{}
@@ -61,33 +68,40 @@ type EgressBridge struct {
 
 // NewEgressBridge binds a TCP listener on hostAddr ("127.0.0.1:port")
 // and starts serving in the background. lookup is the SandboxManager-
-// owned getter into the per-sandbox EgressState map. Snapshots the
-// worker's local interface IPs up front for the worker-local
-// destination filter; a failure to enumerate interfaces is fatal so
-// the runtime crashes loudly rather than running with a half-built
-// deny set.
-func NewEgressBridge(hostAddr string, lookup EgressStateLookup) (*EgressBridge, error) {
+// owned getter into the per-sandbox EgressState map. emitter is the
+// worker-wide OTLP emitter used to emit egress.dial.{denied,failed} and
+// egress.proxy.malformed alongside the existing slog trail; a nil
+// emitter is replaced with otelemit.Noop() so the bridge can emit
+// unconditionally. Snapshots the worker's local interface IPs up front
+// for the worker-local destination filter; a failure to enumerate
+// interfaces is fatal so the runtime crashes loudly rather than
+// running with a half-built deny set.
+func NewEgressBridge(hostAddr string, lookup EgressStateLookup, emitter otelemit.Emitter) (*EgressBridge, error) {
 	filter, err := newLocalDstFilter()
 	if err != nil {
 		return nil, fmt.Errorf("build local destination filter: %w", err)
 	}
-	return newBridge(hostAddr, lookup, filter)
+	return newBridge(hostAddr, lookup, filter, emitter)
 }
 
 // newBridge is the shared constructor used by NewEgressBridge and the
 // test seams in testseams.go. Centralises the listen + struct + serve
 // goroutine setup so behavior can't drift between the production and
 // test paths.
-func newBridge(hostAddr string, lookup EgressStateLookup, filter *localDstFilter) (*EgressBridge, error) {
+func newBridge(hostAddr string, lookup EgressStateLookup, filter *localDstFilter, emitter otelemit.Emitter) (*EgressBridge, error) {
 	ln, err := net.Listen("tcp", hostAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", hostAddr, err)
 	}
+	if emitter == nil {
+		emitter = otelemit.Noop()
+	}
 	b := &EgressBridge{
-		ln:     ln,
-		lookup: lookup,
-		filter: filter,
-		stopCh: make(chan struct{}),
+		ln:      ln,
+		lookup:  lookup,
+		filter:  filter,
+		emitter: emitter,
+		stopCh:  make(chan struct{}),
 	}
 	b.wg.Add(1)
 	go b.serve()
@@ -146,6 +160,7 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	hdr, err := proxyproto.ParseHeader(client)
 	if err != nil {
 		slog.Warn("Egress bridge: parse PROXY v2", slog.Any("error", err))
+		b.emitMalformed(context.Background(), client.RemoteAddr(), err)
 		return
 	}
 	_ = client.SetReadDeadline(time.Time{})
@@ -162,6 +177,15 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	state, ok := b.lookup(sandboxID)
 	if !ok {
 		logger.Warn("Egress bridge: no live sandbox for ID; dropping")
+		// hdr.Identity is the orphan's claimed identity from the
+		// PROXY v2 frame; not authoritative (no live state to back
+		// it) but it's the best signal we have for attribution.
+		b.emitDeny(
+			context.Background(),
+			otelemit.DenyReasonOrphanSandbox,
+			b.commonDialAttrs(hdr.Identity, sandboxID, origDst, hdr.DstName),
+			"egress bridge: no live sandbox for ID",
+		)
 		return
 	}
 
@@ -175,6 +199,12 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 			identityLogFields(state.Identity),
 			slog.String("reason", string(reason)),
 		)...)
+		b.emitDeny(
+			context.Background(),
+			reason,
+			b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName),
+			"egress dial denied: worker-local destination",
+		)
 		return
 	}
 
@@ -185,6 +215,17 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 				identityLogFields(state.Identity),
 				slog.String("default_policy", string(state.Policy.DefaultPolicy())),
 			)...)
+			attrs := b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName)
+			attrs = append(attrs, attribute.String(
+				otelemit.AttrEgressPolicyDefault,
+				string(state.Policy.DefaultPolicy()),
+			))
+			b.emitDeny(
+				context.Background(),
+				otelemit.DenyReasonPolicy,
+				attrs,
+				"egress dial denied: policy",
+			)
 			return
 		}
 	}
@@ -206,6 +247,13 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 		upstream, err = d.DialContext(ctx, "tcp", origDst.String())
 		if err != nil {
 			logger.Warn("Egress direct dial failed", slog.Any("error", err))
+			b.emitFailure(
+				ctx,
+				otelemit.FailureReasonDirectDial,
+				err,
+				b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName),
+				"egress direct dial failed",
+			)
 			return
 		}
 	} else {
@@ -214,6 +262,15 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 			logger.Warn("Egress backend dial failed",
 				slog.String("backend", backend.Addr),
 				slog.Any("error", err))
+			attrs := b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName)
+			attrs = append(attrs, attribute.String(otelemit.AttrEgressBackendAddr, backend.Addr))
+			b.emitFailure(
+				ctx,
+				otelemit.FailureReasonBackendDial,
+				err,
+				attrs,
+				"egress backend dial failed",
+			)
 			return
 		}
 		// SandboxID is intentionally NOT echoed on the Envoy-bound
@@ -229,11 +286,29 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 		hdrBytes, encErr := proxyproto.EncodeHeader(src, origDst, id, hdr.DstName)
 		if encErr != nil {
 			logger.Warn("Egress backend PROXY v2 encode failed", slog.Any("error", encErr))
+			attrs := b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName)
+			attrs = append(attrs, attribute.String(otelemit.AttrEgressBackendAddr, backend.Addr))
+			b.emitFailure(
+				ctx,
+				otelemit.FailureReasonProxyEncode,
+				encErr,
+				attrs,
+				"egress backend PROXY v2 encode failed",
+			)
 			_ = upstream.Close()
 			return
 		}
 		if _, werr := upstream.Write(hdrBytes); werr != nil {
 			logger.Warn("Egress backend PROXY v2 write failed", slog.Any("error", werr))
+			attrs := b.commonDialAttrs(state.Identity, sandboxID, origDst, hdr.DstName)
+			attrs = append(attrs, attribute.String(otelemit.AttrEgressBackendAddr, backend.Addr))
+			b.emitFailure(
+				ctx,
+				otelemit.FailureReasonProxyWrite,
+				werr,
+				attrs,
+				"egress backend PROXY v2 write failed",
+			)
 			_ = upstream.Close()
 			return
 		}
@@ -247,6 +322,113 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 		}
 		logger.Warn("Egress splice error", slog.Any("error", err))
 	}
+}
+
+// commonDialAttrs builds the shared attribute prefix for every
+// egress.dial.{denied,failed} emission: agent identity, sandbox id,
+// dst name + addr + port + transport. Per-event extras (deny reason,
+// failure reason, policy default, backend addr) are appended at the
+// call site.
+func (b *EgressBridge) commonDialAttrs(
+	id proxyproto.AgentIdentity,
+	sandboxID string,
+	dst netip.AddrPort,
+	dstName string,
+) []attribute.KeyValue {
+	attrs := otelemit.AgentAttrs(id)
+	attrs = append(attrs,
+		attribute.String(otelemit.AttrSandboxID, sandboxID),
+		attribute.String(otelemit.AttrL4DstName, dstName),
+		semconv.NetworkPeerAddress(dst.Addr().String()),
+		semconv.NetworkPeerPort(int(dst.Port())),
+		semconv.NetworkTransportTCP,
+	)
+	return attrs
+}
+
+// emitDeny publishes one OTLP span and one OTLP log record for an
+// EgressBridge refusal. The slog line is always emitted at the call
+// site beforehand — see `feedback_envoy_logging_endpoint` reasoning:
+// stderr is the local trail that survives OTLP exporter outages.
+func (b *EgressBridge) emitDeny(
+	ctx context.Context,
+	reason otelemit.DenyReason,
+	extra []attribute.KeyValue,
+	bodyMsg string,
+) {
+	attrs := append(extra,
+		attribute.String(otelemit.AttrEgressDenyReason, string(reason)),
+	)
+	_, span := b.emitter.Tracer().Start(ctx, "egress.dial.denied",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...),
+	)
+	span.SetStatus(codes.Error, string(reason))
+	span.End()
+
+	var rec otellog.Record
+	rec.SetSeverity(otellog.SeverityWarn)
+	rec.SetSeverityText("WARN")
+	rec.SetBody(otellog.StringValue(bodyMsg))
+	otelemit.AddLogAttrs(&rec, attrs)
+	b.emitter.Logger().Emit(ctx, rec)
+}
+
+// emitFailure publishes one OTLP span and one OTLP log record for a
+// post-allow upstream or handoff failure. err is attached via
+// span.RecordError and an "error" log attribute.
+func (b *EgressBridge) emitFailure(
+	ctx context.Context,
+	reason otelemit.FailureReason,
+	err error,
+	extra []attribute.KeyValue,
+	bodyMsg string,
+) {
+	attrs := append(extra,
+		attribute.String(otelemit.AttrEgressFailureReason, string(reason)),
+	)
+	_, span := b.emitter.Tracer().Start(ctx, "egress.dial.failed",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...),
+	)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, string(reason))
+	span.End()
+
+	var rec otellog.Record
+	rec.SetSeverity(otellog.SeverityWarn)
+	rec.SetSeverityText("WARN")
+	rec.SetBody(otellog.StringValue(bodyMsg))
+	otelemit.AddLogAttrs(&rec, attrs)
+	rec.AddAttributes(otellog.String("error", err.Error()))
+	b.emitter.Logger().Emit(ctx, rec)
+}
+
+// emitMalformed publishes one OTLP span and one OTLP log record for a
+// PROXY v2 parse failure. No identity/dst attrs are available — the
+// frame couldn't be parsed — so this site uses its own minimal
+// attribute schema rather than commonDialAttrs.
+func (b *EgressBridge) emitMalformed(ctx context.Context, remote net.Addr, err error) {
+	attrs := []attribute.KeyValue{
+		attribute.String(otelemit.AttrEgressProxyError, err.Error()),
+	}
+	if remote != nil {
+		attrs = append(attrs, semconv.ClientAddress(remote.String()))
+	}
+	_, span := b.emitter.Tracer().Start(ctx, "egress.proxy.malformed",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...),
+	)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "proxy_v2_parse")
+	span.End()
+
+	var rec otellog.Record
+	rec.SetSeverity(otellog.SeverityWarn)
+	rec.SetSeverityText("WARN")
+	rec.SetBody(otellog.StringValue("egress bridge: PROXY v2 parse failed"))
+	otelemit.AddLogAttrs(&rec, attrs)
+	b.emitter.Logger().Emit(ctx, rec)
 }
 
 func backendMode(backend *egress.BackendListener) string {
@@ -290,20 +472,6 @@ func pickBackend(backends []egress.BackendListener, dstPort uint16) *egress.Back
 	}
 	return best
 }
-
-// denyReason categorises why localDstFilter rejected a sandbox-
-// supplied destination. Values are stable strings so log readers (and
-// the future OTLP span attribute clrk.egress.deny.reason — see
-// APO-601) have a fixed vocabulary to query.
-type denyReason string
-
-const (
-	denyReasonLoopback          denyReason = "loopback"
-	denyReasonUnspecified       denyReason = "unspecified"
-	denyReasonLinkLocal         denyReason = "link_local"
-	denyReasonMulticast         denyReason = "multicast"
-	denyReasonWorkerLocalIfAddr denyReason = "worker_local_ifaddr"
-)
 
 // localDstFilter rejects sandbox-supplied destinations that point at
 // the worker itself. See handleConn for the call-site reasoning. IMDS
@@ -351,24 +519,24 @@ func newLocalDstFilter() (*localDstFilter, error) {
 // deny reports whether dst is a worker-local destination that must
 // not be reached via the egress bridge, plus the categorical reason.
 // A nil receiver allows everything (see testseams.go).
-func (f *localDstFilter) deny(dst netip.AddrPort) (denyReason, bool) {
+func (f *localDstFilter) deny(dst netip.AddrPort) (otelemit.DenyReason, bool) {
 	if f == nil {
 		return "", false
 	}
 	addr := dst.Addr()
 	if addr.IsLoopback() {
-		return denyReasonLoopback, true
+		return otelemit.DenyReasonLoopback, true
 	}
 	if _, ok := f.localIPs[addr]; ok {
-		return denyReasonWorkerLocalIfAddr, true
+		return otelemit.DenyReasonWorkerLocalIfAddr, true
 	}
 	switch {
 	case addr.IsUnspecified():
-		return denyReasonUnspecified, true
+		return otelemit.DenyReasonUnspecified, true
 	case addr.IsLinkLocalUnicast():
-		return denyReasonLinkLocal, true
+		return otelemit.DenyReasonLinkLocal, true
 	case addr.IsMulticast():
-		return denyReasonMulticast, true
+		return otelemit.DenyReasonMulticast, true
 	}
 	return "", false
 }

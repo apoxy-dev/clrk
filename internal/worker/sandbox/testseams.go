@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	"github.com/apoxy-dev/clrk/internal/egress"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // Test seams for the linux-only surface of internal/worker. Lives
@@ -39,18 +40,20 @@ func BuildSandboxInitStrForTest(sb *Instance, imdsHostAddr, egressHostAddr strin
 
 // NewEgressBridgePermissiveForTest builds an EgressBridge with the
 // worker-local destination filter disabled. Never use in production.
-func NewEgressBridgePermissiveForTest(hostAddr string, lookup EgressStateLookup) (*EgressBridge, error) {
-	return newBridge(hostAddr, lookup, nil)
+// A nil emitter is normalised to otelemit.Noop() so callers that don't
+// care about OTLP attribution can pass nil.
+func NewEgressBridgePermissiveForTest(hostAddr string, lookup EgressStateLookup, emitter otelemit.Emitter) (*EgressBridge, error) {
+	return newBridge(hostAddr, lookup, nil, emitter)
 }
 
 // NewEgressBridgeWithLocalIPsForTest replaces the local-interface IP
 // snapshot with the caller-supplied set so tests can exercise the
 // worker_local_ifaddr branch with an injected IP. Never use in
-// production.
-func NewEgressBridgeWithLocalIPsForTest(hostAddr string, lookup EgressStateLookup, localIPs []netip.Addr) (*EgressBridge, error) {
+// production. A nil emitter is normalised to otelemit.Noop().
+func NewEgressBridgeWithLocalIPsForTest(hostAddr string, lookup EgressStateLookup, localIPs []netip.Addr, emitter otelemit.Emitter) (*EgressBridge, error) {
 	set := make(map[netip.Addr]struct{}, len(localIPs))
 	for _, ip := range localIPs {
 		set[ip.Unmap()] = struct{}{}
 	}
-	return newBridge(hostAddr, lookup, &localDstFilter{localIPs: set})
+	return newBridge(hostAddr, lookup, &localDstFilter{localIPs: set}, emitter)
 }

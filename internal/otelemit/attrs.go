@@ -53,8 +53,12 @@ const (
 	AttrImageRef    = "clrk.image.ref"
 	AttrImageDigest = "clrk.image.digest"
 
-	AttrEgressDenyReason = "clrk.egress.deny_reason"
-	AttrEgressDstAddr    = "clrk.egress.dst_addr"
+	AttrEgressDenyReason    = "clrk.egress.deny_reason"
+	AttrEgressDstAddr       = "clrk.egress.dst_addr"
+	AttrEgressFailureReason = "clrk.egress.failure_reason"
+	AttrEgressPolicyDefault = "clrk.egress.policy.default"
+	AttrEgressBackendAddr   = "clrk.egress.backend.addr"
+	AttrEgressProxyError    = "clrk.egress.proxy_error"
 
 	// Stamped on the ingress.dispatch span emitted per inbound TaskAgent
 	// request. The pool key already lives at AttrWorkerPool.
@@ -75,4 +79,30 @@ const (
 	IngressOutcomeNoReadyWorker   = "no_ready_worker"
 	IngressOutcomeAtMaxConcurrent = "at_max_concurrent"
 	IngressOutcomeInternal        = "internal_error"
+)
+
+// DenyReason values are wire-frozen — operator dashboards filter on
+// AttrEgressDenyReason verbatim. Used by EgressBridge to categorise
+// every "we refused to forward" event into one queryable enum.
+type DenyReason string
+
+const (
+	DenyReasonLoopback          DenyReason = "loopback"
+	DenyReasonUnspecified       DenyReason = "unspecified"
+	DenyReasonLinkLocal         DenyReason = "link_local"
+	DenyReasonMulticast         DenyReason = "multicast"
+	DenyReasonWorkerLocalIfAddr DenyReason = "worker_local_ifaddr"
+	DenyReasonPolicy            DenyReason = "policy"
+	DenyReasonOrphanSandbox     DenyReason = "orphan_sandbox"
+)
+
+// FailureReason values are wire-frozen — see DenyReason. Used by
+// EgressBridge to categorise post-allow upstream and handoff failures.
+type FailureReason string
+
+const (
+	FailureReasonDirectDial  FailureReason = "direct_dial"
+	FailureReasonBackendDial FailureReason = "backend_dial"
+	FailureReasonProxyEncode FailureReason = "proxy_encode"
+	FailureReasonProxyWrite  FailureReason = "proxy_write"
 )

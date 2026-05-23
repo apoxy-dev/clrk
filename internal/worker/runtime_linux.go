@@ -105,7 +105,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		WorkerCgroupPath: workerCgroupPath,
 	})
 
-	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState)
+	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState, r.Emitter)
 	if err != nil {
 		return fmt.Errorf("starting egress bridge on %s: %w", egressHostAddr, err)
 	}
