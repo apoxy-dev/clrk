@@ -57,11 +57,18 @@ type devOpts struct {
 	secrets         []string
 	parsedSecrets   []secretSpec
 	otelEndpoint    string
+	forceRecreate   bool
 	// gatewayIP is the IP a Pod on drivers.NetworkName uses to reach
 	// the host. Resolved once via drivers.HostGatewayIP and injected as
 	// the host.docker.internal HostAlias on the cm PodSpec so OTLP
 	// records reach the devtui receiver bound on the host.
 	gatewayIP string
+	// cfgHash + startedAt are computed once in runDev and stamped into
+	// dev.json by writeDevSessionStamp so the next `clrk dev` invocation
+	// can detect drift against an orphaned cluster (see runDev's drift
+	// gate).
+	cfgHash   string
+	startedAt time.Time
 }
 
 func newDevCmd() *cobra.Command {
@@ -91,6 +98,7 @@ func newDevCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&o.registryImages, "registry-image", nil, "Override an image to a local-registry ref and force '--pull always' on the matching container (repeatable). Format: COMPONENT=REF where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --registry-image=worker=clrk-registry:5000/clrk/worker:dev — pair with 'clrk dev reload <component>' after pushing to the local registry.")
 	cmd.Flags().IntVar(&o.registryPort, "registry-port", 0, "Host port to publish the local OCI registry on. 0 picks a free port; the actual port is logged at startup and is the target for 'docker push localhost:<port>/clrk/...'.")
 	cmd.Flags().StringArrayVar(&o.secrets, "secret", nil, "Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with '_' → '-' (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.")
+	cmd.Flags().BoolVar(&o.forceRecreate, "force-recreate", false, "Tear down any orphaned dev cluster (and the clrk docker network) before starting, instead of attaching. Useful when a prior clrk dev died ungracefully and left poisoned in-cluster state.")
 	cmd.AddCommand(newDevStatusCmd())
 	cmd.AddCommand(newDevLogsCmd())
 	cmd.AddCommand(newDevWaitReadyCmd())
@@ -166,6 +174,30 @@ func runDev(ctx context.Context, o *devOpts) error {
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Compute the config hash now (after applyRegistryImageOverrides so
+	// registry mode counts) and use it both for the drift gate below and
+	// for the on-disk session marker writeDevSessionStamp leaves
+	// immediately afterward. Stamping early — before any container work
+	// — is the whole point: a session that dies mid-bringUp still leaves
+	// a hash for the next session to compare against.
+	o.cfgHash = computeConfigHash(o)
+	o.startedAt = time.Now().UTC()
+
+	ds, err := inspectDrift(ctx, o)
+	if err != nil {
+		return err
+	}
+	proceed, err := resolveDrift(ctx, o, ds)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return fmt.Errorf("clrk dev aborted: cluster config drift not resolved")
+	}
+	if err := writeDevSessionStamp(o.dataDir, o.cfgHash, o.startedAt); err != nil {
+		slog.Warn("Failed to stamp dev session marker", "err", err)
+	}
 
 	// Bring up the docker network and the in-process OTLP receiver
 	// before any container starts so controller-manager can dial

@@ -46,8 +46,12 @@ func EnsureNetwork(ctx context.Context) error {
 		if want := "true;" + V4Subnet + "," + V6Subnet + ","; state == want || state == "true;"+V6Subnet+","+V4Subnet+"," {
 			return nil
 		}
-		if rmOut, rmErr := exec.CommandContext(ctx, "docker", "network", "rm", NetworkName).CombinedOutput(); rmErr != nil {
-			return fmt.Errorf("removing stale docker network %q (detach attached containers first): %w: %s", NetworkName, rmErr, bytes.TrimSpace(rmOut))
+		// Stale network whose IPAM doesn't match what k3d expects;
+		// drop it and recreate below. Surface the underlying docker
+		// error so a still-attached container failure is actionable
+		// ("detach attached containers first").
+		if err := removeDockerNetwork(ctx, NetworkName); err != nil {
+			return fmt.Errorf("removing stale docker network %q (detach attached containers first): %w", NetworkName, err)
 		}
 	}
 	createOut, err := exec.CommandContext(ctx, "docker", "network", "create",
@@ -59,6 +63,22 @@ func EnsureNetwork(ctx context.Context) error {
 		return fmt.Errorf("creating docker network %q: %w: %s", NetworkName, err, bytes.TrimSpace(createOut))
 	}
 	return nil
+}
+
+// removeDockerNetwork tears down the named docker network. A missing
+// network is treated as success so callers don't have to distinguish
+// "wasn't there" from "removed"; everything else propagates so an
+// attached-container failure is actionable. Used by EnsureNetwork's
+// recreate path and by ClusterDriver.Reset on the drift-gate recreate.
+func removeDockerNetwork(ctx context.Context, name string) error {
+	out, err := exec.CommandContext(ctx, "docker", "network", "rm", name).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if bytes.Contains(out, []byte("No such network")) || bytes.Contains(out, []byte("not found")) {
+		return nil
+	}
+	return fmt.Errorf("removing docker network %q: %w: %s", name, err, bytes.TrimSpace(out))
 }
 
 // HostGatewayIP returns the IP that docker resolves the magic

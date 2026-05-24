@@ -29,6 +29,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -310,6 +311,22 @@ func (d *ClusterDriver) Stop(ctx context.Context) error {
 	return firstErr
 }
 
+// Reset is Stop plus the shared docker network. Used by the drift-gate
+// recreate path in `clrk dev`, which has to evict any container still
+// pinning the `clrk` bridge (otherwise the next EnsureNetwork-recreate
+// fails). The network is left in place by Stop because a normal
+// clrk-dev shutdown doesn't need to disturb it.
+func (d *ClusterDriver) Reset(ctx context.Context) error {
+	if err := d.Stop(ctx); err != nil {
+		return err
+	}
+	// Best-effort: removing the network can fail if a container we
+	// don't manage is still attached. The caller (runDev) follows up
+	// with EnsureNetwork which already handles a stale-network case.
+	_ = removeDockerNetwork(ctx, NetworkName)
+	return nil
+}
+
 // KubeconfigPath is the host path to the kubeconfig with the server URL
 // rewritten to the in-network k3d node hostname. Bind-mount into cm /
 // worker containers so they reach k3s via the shared docker network.
@@ -463,6 +480,51 @@ func (d *ClusterDriver) ApplyObjects(ctx context.Context, objs ...client.Object)
 	for _, o := range objs {
 		if err := c.Patch(ctx, o, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
 			return fmt.Errorf("applying %s/%s: %w", o.GetNamespace(), o.GetName(), err)
+		}
+	}
+	return nil
+}
+
+// ApplyAndVerify SSAs obj exactly like ApplyObjects, then GETs the
+// stored object back and runs verify against it. Returns nil iff SSA
+// succeeded *and* verify saw the field it cares about. Used by
+// dev_bootstrap to catch the "SSA returned 200 but the spec didn't
+// change" case that left a stale WorkerPool image in kine across
+// multiple `clrk dev` launches.
+//
+// A free function with a type parameter (Go forbids generic methods)
+// so the verify callback is typed at the call site — no
+// `got.(*appsv1.Deployment)` boilerplate per verifier. The freshly-
+// zeroed verify target is built via the registered scheme rather than
+// reusing obj, because controller-runtime's SSA Patch mutates obj
+// (clears TypeMeta) in ways that confuse a subsequent GET.
+func ApplyAndVerify[T client.Object](ctx context.Context, d *ClusterDriver, obj T, verify func(got T) error) error {
+	c, err := d.kubeClientFor(ctx)
+	if err != nil {
+		return err
+	}
+	gvk, err := apiutil.GVKForObject(obj, c.Scheme())
+	if err != nil {
+		return fmt.Errorf("resolving GVK for %T: %w", obj, err)
+	}
+	key := client.ObjectKeyFromObject(obj)
+	if err := c.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("applying %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
+	}
+	raw, err := c.Scheme().New(gvk)
+	if err != nil {
+		return fmt.Errorf("instantiating verify object for %s: %w", gvk, err)
+	}
+	got, ok := raw.(T)
+	if !ok {
+		return fmt.Errorf("scheme returned %T for %s, expected %T", raw, gvk, obj)
+	}
+	if err := c.Get(ctx, key, got); err != nil {
+		return fmt.Errorf("re-reading %s/%s after apply: %w", key.Namespace, key.Name, err)
+	}
+	if verify != nil {
+		if err := verify(got); err != nil {
+			return fmt.Errorf("apply of %s/%s did not persist: %w", key.Namespace, key.Name, err)
 		}
 	}
 	return nil

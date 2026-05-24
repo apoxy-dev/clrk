@@ -3,17 +3,25 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/apoxy-dev/clrk/internal/drivers"
 )
+
+// errNoSession is the sentinel returned by readDevSession when the
+// dev.json sidecar is absent. Callers that want to distinguish a
+// missing session from a parse/permission error use
+// errors.Is(err, errNoSession) instead of message-sniffing.
+var errNoSession = errors.New("no live clrk dev session")
 
 // devSessionFileName is the JSON sidecar bringUp writes next to dev.lock.
 // Holds the effective image refs and run options for the live session so
@@ -27,16 +35,25 @@ const devSessionFileName = "dev.json"
 // The Forwards slice is the auto-expose reconciler's mirror; it owns
 // rewrites via rewriteForwards while the rest of the session stays
 // immutable for the lifetime of the dev process.
+//
+// ConfigHash + StartedAt are stamped by writeDevSessionStamp the moment
+// the current invocation commits to bringing the cluster up. That early
+// stamp survives an ungraceful exit so the next `clrk dev` can detect
+// drift against the orphaned cluster's last-known config.
 type devSession struct {
-	DataDir          string            `json:"data_dir"`
-	Workers          int               `json:"workers"`
-	ControllerImage  string            `json:"controller_image"`
-	WorkerImage      string            `json:"worker_image"`
-	Pull             string            `json:"pull"`
-	Watch            bool              `json:"watch"`
-	OtelEndpoint     string            `json:"otel_endpoint"`
-	RegistryHostPort int               `json:"registry_host_port"`
-	Forwards         []ExposedForward  `json:"forwards,omitempty"`
+	ConfigHash       string           `json:"config_hash,omitempty"`
+	StartedAt        time.Time        `json:"started_at,omitempty"`
+	DataDir          string           `json:"data_dir"`
+	Workers          int              `json:"workers"`
+	ControllerImage  string           `json:"controller_image"`
+	WorkerImage      string           `json:"worker_image"`
+	K3sImage         string           `json:"k3s_image,omitempty"`
+	Pull             string           `json:"pull"`
+	RegistryEnabled  bool             `json:"registry_enabled,omitempty"`
+	Watch            bool             `json:"watch"`
+	OtelEndpoint     string           `json:"otel_endpoint"`
+	RegistryHostPort int              `json:"registry_host_port"`
+	Forwards         []ExposedForward `json:"forwards,omitempty"`
 }
 
 // ExposedForward is one auto-opened host-port forward managed by the
@@ -52,19 +69,45 @@ type ExposedForward struct {
 // writeDevSession serializes the effective devOpts state to
 // <dataDir>/dev.json so `clrk dev reload` can recover it. Called at the
 // end of bringUp after o.controllerImage / o.workerImage / o.pull have
-// settled (--registry-image overrides applied).
+// settled (--registry-image overrides applied). Preserves the
+// ConfigHash + StartedAt stamped earlier by writeDevSessionStamp.
 func writeDevSession(o *devOpts, state *devState) error {
 	s := devSession{
+		ConfigHash:       o.cfgHash,
+		StartedAt:        o.startedAt,
 		DataDir:          o.dataDir,
 		Workers:          o.workers,
 		ControllerImage:  o.controllerImage,
 		WorkerImage:      o.workerImage,
+		K3sImage:         o.k3sImage,
 		Pull:             o.pull,
+		RegistryEnabled:  o.registryEnabled(),
 		Watch:            o.watch,
 		OtelEndpoint:     o.otelEndpoint,
 		RegistryHostPort: state.cluster.RegistryHostPort(),
 	}
-	path := filepath.Join(o.dataDir, devSessionFileName)
+	return atomicWriteDevSession(o.dataDir, s)
+}
+
+// writeDevSessionStamp writes a partial dev.json containing only the
+// config hash + start time. Called from runDev the moment we commit to
+// bringing the cluster up — before any container work — so the marker
+// survives an ungraceful exit. A subsequent `clrk dev` invocation reads
+// this hash to detect drift against an orphaned cluster.
+func writeDevSessionStamp(dataDir, cfgHash string, startedAt time.Time) error {
+	return atomicWriteDevSession(dataDir, devSession{
+		ConfigHash: cfgHash,
+		StartedAt:  startedAt,
+		DataDir:    dataDir,
+	})
+}
+
+// atomicWriteDevSession writes the encoded session via the same
+// tmp-file + rename dance used everywhere else in this file. Single
+// helper so callers (writeDevSession, writeDevSessionStamp,
+// rewriteForwards) can't drift on file permissions or fsync semantics.
+func atomicWriteDevSession(dataDir string, s devSession) error {
+	path := filepath.Join(dataDir, devSessionFileName)
 	tmp := path + ".tmp"
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -107,14 +150,15 @@ func rewriteForwards(dataDir string, fs []ExposedForward) error {
 }
 
 // readDevSession recovers the session sidecar written by writeDevSession.
-// Returns a clear error when no live session is present so users see
-// "run clrk dev first" instead of a generic missing-file.
+// Returns errNoSession (wrapped, so errors.Is matches) when no live
+// session is present so callers can distinguish missing-file from
+// parse/permission failures.
 func readDevSession(dataDir string) (*devSession, error) {
 	path := filepath.Join(dataDir, devSessionFileName)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("no live clrk dev session at %s — start one with `clrk dev`", dataDir)
+			return nil, fmt.Errorf("%w at %s — start one with `clrk dev`", errNoSession, dataDir)
 		}
 		return nil, err
 	}
