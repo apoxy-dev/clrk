@@ -33,6 +33,32 @@ type ToolPolicyFilter struct {
 	// MaxCallsPerExecution caps total tool invocations per agent run.
 	// +optional
 	MaxCallsPerExecution *int32 `json:"maxCallsPerExecution,omitempty"`
+
+	// RateLimits enforces per-tool rate limits using the same windowing
+	// vocabulary as RateLimitPolicy. Each entry is scoped independently.
+	// +optional
+	RateLimits []ToolRateLimit `json:"rateLimits,omitempty"`
+}
+
+// ToolRateLimit caps invocations for a subset of tools matched by the
+// enclosing rule.
+type ToolRateLimit struct {
+	// Tools selects which tools this limit applies to. Supports glob.
+	// Empty means all tools matched by the enclosing rule.
+	// +optional
+	Tools []string `json:"tools,omitempty"`
+
+	// Requests is the maximum number of invocations permitted within
+	// Window before further calls are rejected.
+	Requests int32 `json:"requests"`
+
+	// Window is a Go duration string (e.g. "1m", "1h", "24h") over which
+	// Requests are counted.
+	Window string `json:"window"`
+
+	// Scope chooses the counter dimension. Defaults to PerAgent.
+	// +kubebuilder:default=PerAgent
+	Scope RateLimitScope `json:"scope,omitempty"`
 }
 
 // MCPRouteFilter defines a filter for MCPRoute rules.
