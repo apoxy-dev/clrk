@@ -1630,6 +1630,11 @@ func (in *MCPRouteMatch) DeepCopyInto(out *MCPRouteMatch) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.ToolsRegex != nil {
+		in, out := &in.ToolsRegex, &out.ToolsRegex
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Resources != nil {
 		in, out := &in.Resources, &out.Resources
 		*out = make([]string, len(*in))
@@ -2087,8 +2092,18 @@ func (in *ToolPolicyFilter) DeepCopyInto(out *ToolPolicyFilter) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.AllowedToolsRegex != nil {
+		in, out := &in.AllowedToolsRegex, &out.AllowedToolsRegex
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.DeniedTools != nil {
 		in, out := &in.DeniedTools, &out.DeniedTools
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.DeniedToolsRegex != nil {
+		in, out := &in.DeniedToolsRegex, &out.DeniedToolsRegex
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
@@ -2127,6 +2142,11 @@ func (in *ToolRateLimit) DeepCopyInto(out *ToolRateLimit) {
 	*out = *in
 	if in.Tools != nil {
 		in, out := &in.Tools, &out.Tools
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ToolsRegex != nil {
+		in, out := &in.ToolsRegex, &out.ToolsRegex
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}

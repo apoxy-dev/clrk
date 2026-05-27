@@ -21,9 +21,20 @@ type ToolPolicyFilter struct {
 	// +optional
 	AllowedTools []string `json:"allowedTools,omitempty"`
 
+	// AllowedToolsRegex is an explicit allowlist of Go regexp patterns.
+	// Evaluated as a union with AllowedTools: when either list is
+	// non-empty, the tool must match at least one entry across both.
+	// +optional
+	AllowedToolsRegex []string `json:"allowedToolsRegex,omitempty"`
+
 	// DeniedTools blocks specific tools. Evaluated after AllowedTools.
 	// +optional
 	DeniedTools []string `json:"deniedTools,omitempty"`
+
+	// DeniedToolsRegex blocks tools by Go regexp pattern. Evaluated as
+	// a union with DeniedTools; a match in either list denies the call.
+	// +optional
+	DeniedToolsRegex []string `json:"deniedToolsRegex,omitempty"`
 
 	// RequireConfirmation lists tools that need out-of-band human
 	// confirmation before execution proceeds.
@@ -47,6 +58,12 @@ type ToolRateLimit struct {
 	// Empty means all tools matched by the enclosing rule.
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// ToolsRegex restricts the limit to tools matching any Go regexp
+	// pattern here. Evaluated as a union with Tools; empty Tools and
+	// empty ToolsRegex means "any tool matched by the enclosing rule".
+	// +optional
+	ToolsRegex []string `json:"toolsRegex,omitempty"`
 
 	// Requests is the maximum number of invocations permitted within
 	// Window before further calls are rejected.
@@ -84,6 +101,11 @@ type MCPRouteMatch struct {
 	// Tools matches by tool name. Supports glob: "github_*".
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// ToolsRegex matches by tool name via Go regexp. Evaluated as a
+	// union with Tools; a match on either selects the rule.
+	// +optional
+	ToolsRegex []string `json:"toolsRegex,omitempty"`
 
 	// Resources matches by MCP resource URI pattern.
 	// +optional
