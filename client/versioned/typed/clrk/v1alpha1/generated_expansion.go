@@ -33,6 +33,8 @@ type EgressGatewayExpansion interface{}
 
 type EgressL4RouteExpansion interface{}
 
+type InvocationExpansion interface{}
+
 type LoggingPolicyExpansion interface{}
 
 type MCPRouteExpansion interface{}

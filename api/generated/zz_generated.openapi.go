@@ -82,6 +82,13 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.HeaderExtractor":                     schema_clrk_api_clrk_v1alpha1_HeaderExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.IdentityExtractor":                   schema_clrk_api_clrk_v1alpha1_IdentityExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ImageCacheConfig":                    schema_clrk_api_clrk_v1alpha1_ImageCacheConfig(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Invocation":                          schema_clrk_api_clrk_v1alpha1_Invocation(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationIdentity":                  schema_clrk_api_clrk_v1alpha1_InvocationIdentity(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationList":                      schema_clrk_api_clrk_v1alpha1_InvocationList(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationParentRef":                 schema_clrk_api_clrk_v1alpha1_InvocationParentRef(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationSpec":                      schema_clrk_api_clrk_v1alpha1_InvocationSpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationStatus":                    schema_clrk_api_clrk_v1alpha1_InvocationStatus(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationTrigger":                   schema_clrk_api_clrk_v1alpha1_InvocationTrigger(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.JWTExtractor":                        schema_clrk_api_clrk_v1alpha1_JWTExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.L4PortMatch":                         schema_clrk_api_clrk_v1alpha1_L4PortMatch(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.L4RouteFilter":                       schema_clrk_api_clrk_v1alpha1_L4RouteFilter(ref),
@@ -2606,6 +2613,255 @@ func schema_clrk_api_clrk_v1alpha1_ImageCacheConfig(ref common.ReferenceCallback
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_Invocation(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "Invocation records one execution of a TaskAgent or DaemonAgent. Parent identity lives on spec.parentRef; the Create strategy synthesises a matching metadata.ownerReferences entry (controller=true, blockOwnerDeletion=false) so Kubernetes GC nukes Invocations when the parent is deleted. Invocations are system-written and immutable from clients: the stub backend returns 405 on POST; the eventual JetStream-backed storage will accept POST only from the ingress service principal.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationStatus"),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationIdentity(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationIdentity is the resolved identity asserted at ingress. Audiences are the validated outputs of the parent's spec.identity extractors. Stays empty until AgentIdentity grows an Audiences field in a follow-up ticket.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"audiences": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationList contains a list of Invocation resources.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Invocation"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Invocation", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationParentRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationParentRef names the TaskAgent or DaemonAgent this Invocation belongs to. The parent must live in the same namespace as the Invocation. This is the canonical API surface for parent identity; the Create strategy synthesises a matching metadata.ownerReferences entry (controller=true, blockOwnerDeletion=false) so Kubernetes garbage collection cascades parent deletion.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"kind", "name"},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationSpec carries the ingress-known descriptors. Set once on Create and immutable thereafter. The canonical invocation ID lives on metadata.name (also mirrored into metadata.uid by the Create strategy); ce-id, metadata.name, metadata.uid, and the JetStream stream key are all the same UUID end-to-end.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"parentRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ParentRef identifies the TaskAgent or DaemonAgent that owns this Invocation. Required.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationParentRef"),
+						},
+					},
+					"trigger": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Trigger describes how this invocation was initiated.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationTrigger"),
+						},
+					},
+					"identity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Identity is the resolved identity asserted at ingress.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationIdentity"),
+						},
+					},
+				},
+				Required: []string{"parentRef", "trigger"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationIdentity", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationParentRef", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.InvocationTrigger"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationStatus intentionally starts minimal: phase plus Conditions. Lifecycle timestamps, exit code, response size, worker assignment, revision selection, and failure detail are all expressed as Conditions (LastTransitionTime / Reason / Message) until a concrete consumer demonstrates need for a first-class status field. CloudEvent envelope attributes are not duplicated here; recover them from the OTel span the ingress emits, keyed by metadata.name.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_InvocationTrigger(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InvocationTrigger describes the source that initiated this invocation. Source is a free-form descriptor: for HTTP the gateway route name, for Cron the parent's spec.schedule expression, for CLI the operator principal. Empty when unavailable.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"source": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+				},
+				Required: []string{"type"},
 			},
 		},
 	}

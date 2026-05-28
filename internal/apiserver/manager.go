@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ClickHouse/ch-go"
+	"github.com/ClickHouse/ch-go/chpool"
 	"github.com/go-logr/logr"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserver "k8s.io/apiserver/pkg/server"
 	apiserveropts "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/client-go/rest"
@@ -29,7 +32,9 @@ import (
 	"github.com/apoxy-dev/apoxy/api/resource"
 	builder "github.com/apoxy-dev/apoxy/pkg/apiserver/server/builder"
 
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
+	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 )
 
 // Option configures the Manager.
@@ -50,6 +55,10 @@ type options struct {
 	leaderElectNS       string
 	metricsBindAddr     string
 	healthBindAddr      string
+
+	clickHouseAddress  string
+	clickHouseDatabase string
+	clickHouseTTLDays  int
 }
 
 // WithSQLitePath sets the SQLite file path. Use "file::memory:" for in-memory.
@@ -133,6 +142,26 @@ func WithHealthBindAddress(addr string) Option {
 	return func(o *options) { o.healthBindAddr = addr }
 }
 
+// WithClickHouseAddress overrides the address (host:port) the
+// embedded-CH Invocation storage dials. Defaults to 127.0.0.1:9000
+// (the loopback the in-cm ClickHouse supervisor exposes).
+func WithClickHouseAddress(addr string) Option {
+	return func(o *options) { o.clickHouseAddress = addr }
+}
+
+// WithClickHouseDatabase overrides the CH schema name. Defaults to
+// "default" — same schema the otel_logs / otel_traces tables live in.
+func WithClickHouseDatabase(db string) Option {
+	return func(o *options) { o.clickHouseDatabase = db }
+}
+
+// WithClickHouseTTLDays overrides the Invocation row retention. The
+// rendered TTL is enforced at the CH MergeTree level. Defaults to 90
+// days.
+func WithClickHouseTTLDays(d int) Option {
+	return func(o *options) { o.clickHouseTTLDays = d }
+}
+
 func defaultOptions() *options {
 	return &options{
 		sqliteConnArgs: map[string]string{
@@ -140,11 +169,14 @@ func defaultOptions() *options {
 			"_journal_mode": "WAL",
 			"_busy_timeout": "30000",
 		},
-		bindAddress:     "127.0.0.1",
-		bindPort:        8443,
-		disableAuth:     true,
-		metricsBindAddr: "0",
-		healthBindAddr:  "0",
+		bindAddress:        "127.0.0.1",
+		bindPort:           8443,
+		disableAuth:        true,
+		metricsBindAddr:    "0",
+		healthBindAddr:     "0",
+		clickHouseAddress:  "127.0.0.1:9000",
+		clickHouseDatabase: "default",
+		clickHouseTTLDays:  90,
 	}
 }
 
@@ -194,6 +226,7 @@ type Manager struct {
 
 	opts    *options
 	ctrlMgr manager.Manager
+	chPool  *chpool.Pool
 }
 
 // New returns an unstarted Manager.
@@ -253,6 +286,10 @@ func (m *Manager) Start(ctx context.Context, opts ...Option) error {
 
 	close(m.ReadyCh)
 
+	if m.chPool != nil {
+		defer m.chPool.Close()
+	}
+
 	// Block until the caller is done registering reconcilers and doing
 	// any APIService / CRD bootstrap it needs. Without this, ctrl.Manager
 	// would start its cache discovery against an apiserver that doesn't
@@ -301,6 +338,49 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	srvBuilder := builder.NewServerBuilder().WithGenerationTracking()
 	for _, r := range o.resources {
 		srvBuilder = srvBuilder.WithResourceAndStorage(r, kineStore)
+	}
+
+	// Invocation: real ClickHouse-backed storage at three GVRs
+	// (top-level + per-parent subresources) sharing one chpool. Not
+	// registered via WithResourceAndStorage because we want our own
+	// rest.Storage rather than the builder's kine-backed generic
+	// store. The pool dials the embedded CH supervisor (cmd-side, see
+	// internal/clickhouse) on the configured address; EnsureTable is
+	// idempotent.
+	//
+	// cmd/controller-manager starts the apiserver Manager BEFORE the
+	// embedded clickhouse supervisor binds 9000, so we dial with a
+	// retry loop bounded by ctx — the supervisor's restart-on-crash
+	// budget is in seconds, never minutes, so 60s of retry covers the
+	// realistic startup window without burning user wait time.
+	chPool, err := dialClickHouseWithRetry(ctx, o)
+	if err != nil {
+		return err
+	}
+	m.chPool = chPool
+	if err := invocation.EnsureTable(ctx, chPool, o.clickHouseTTLDays); err != nil {
+		chPool.Close()
+		m.chPool = nil
+		return err
+	}
+
+	invocationGR := schema.GroupResource{
+		Group:    clrkv1alpha1.GroupName,
+		Resource: "invocations",
+	}
+	srvBuilder = srvBuilder.WithAdditionalSchemeInstallers(clrkv1alpha1.Install)
+	for _, sub := range []struct {
+		resource   string
+		parentKind clrkv1alpha1.InvocationParentKind
+	}{
+		{"invocations", ""},
+		{"taskagents/invocations", clrkv1alpha1.InvocationParentTaskAgent},
+		{"daemonagents/invocations", clrkv1alpha1.InvocationParentDaemonAgent},
+	} {
+		srvBuilder = srvBuilder.WithStorage(
+			clrkv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
+			invocation.NewProvider(chPool, invocationGR, "invocation", sub.parentKind),
+		)
 	}
 
 	if o.disableAuth {
@@ -370,6 +450,42 @@ func newLoopbackConfig(hostPort string) *rest.Config {
 		Host:            "https://" + hostPort,
 		TLSClientConfig: rest.TLSClientConfig{Insecure: true},
 		UserAgent:       "clrk-apiserver",
+	}
+}
+
+// dialClickHouseWithRetry calls chpool.Dial until it succeeds or ctx
+// is cancelled. Each attempt has a 5s timeout (matches chwriter's
+// dialTimeout); attempts are spaced by an exponential backoff capped
+// at 2s. Returns the first non-nil pool or ctx.Err() wrapped with a
+// hint about the address that failed.
+func dialClickHouseWithRetry(ctx context.Context, o *options) (*chpool.Pool, error) {
+	backoff := 200 * time.Millisecond
+	const maxBackoff = 2 * time.Second
+	var lastErr error
+	for {
+		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		pool, err := chpool.Dial(dialCtx, chpool.Options{
+			ClientOptions: ch.Options{
+				Address:  o.clickHouseAddress,
+				Database: o.clickHouseDatabase,
+			},
+		})
+		cancel()
+		if err == nil {
+			return pool, nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("dialing clickhouse at %s: %w (last: %v)", o.clickHouseAddress, ctx.Err(), lastErr)
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
 }
 

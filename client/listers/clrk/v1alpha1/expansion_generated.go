@@ -75,6 +75,14 @@ type EgressL4RouteListerExpansion interface{}
 // EgressL4RouteNamespaceLister.
 type EgressL4RouteNamespaceListerExpansion interface{}
 
+// InvocationListerExpansion allows custom methods to be added to
+// InvocationLister.
+type InvocationListerExpansion interface{}
+
+// InvocationNamespaceListerExpansion allows custom methods to be added to
+// InvocationNamespaceLister.
+type InvocationNamespaceListerExpansion interface{}
+
 // LoggingPolicyListerExpansion allows custom methods to be added to
 // LoggingPolicyLister.
 type LoggingPolicyListerExpansion interface{}

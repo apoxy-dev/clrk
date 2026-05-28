@@ -76,6 +76,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&EgressGatewayList{},
 		&EgressL4Route{},
 		&EgressL4RouteList{},
+		&Invocation{},
+		&InvocationList{},
 		&LoggingPolicy{},
 		&LoggingPolicyList{},
 		&MCPRoute{},

@@ -36,6 +36,7 @@ type ClrkV1alpha1Interface interface {
 	EgressDenyPoliciesGetter
 	EgressGatewaysGetter
 	EgressL4RoutesGetter
+	InvocationsGetter
 	LoggingPoliciesGetter
 	MCPRoutesGetter
 	RateLimitPoliciesGetter
@@ -74,6 +75,10 @@ func (c *ClrkV1alpha1Client) EgressGateways(namespace string) EgressGatewayInter
 
 func (c *ClrkV1alpha1Client) EgressL4Routes(namespace string) EgressL4RouteInterface {
 	return newEgressL4Routes(c, namespace)
+}
+
+func (c *ClrkV1alpha1Client) Invocations(namespace string) InvocationInterface {
+	return newInvocations(c, namespace)
 }
 
 func (c *ClrkV1alpha1Client) LoggingPolicies(namespace string) LoggingPolicyInterface {

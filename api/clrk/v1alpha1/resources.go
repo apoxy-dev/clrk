@@ -81,6 +81,10 @@ var (
 	_ runtime.Object            = &EgressDenyPolicy{}
 	_ resource.Object           = &EgressDenyPolicy{}
 	_ rest.SingularNameProvider = &EgressDenyPolicy{}
+
+	_ runtime.Object            = &Invocation{}
+	_ resource.Object           = &Invocation{}
+	_ rest.SingularNameProvider = &Invocation{}
 )
 
 func gvr(resource string) schema.GroupVersionResource {
@@ -300,3 +304,15 @@ func (r *EgressDenyPolicy) GetGroupVersionResource() schema.GroupVersionResource
 }
 func (r *EgressDenyPolicy) IsStorageVersion() bool  { return true }
 func (r *EgressDenyPolicy) GetSingularName() string { return "egressdenypolicy" }
+
+// Invocation (no status subresource; system-written, immutable from clients).
+
+func (r *Invocation) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
+func (r *Invocation) NamespaceScoped() bool             { return true }
+func (r *Invocation) New() runtime.Object               { return &Invocation{} }
+func (r *Invocation) NewList() runtime.Object           { return &InvocationList{} }
+func (r *Invocation) GetGroupVersionResource() schema.GroupVersionResource {
+	return gvr("invocations")
+}
+func (r *Invocation) IsStorageVersion() bool  { return true }
+func (r *Invocation) GetSingularName() string { return "invocation" }

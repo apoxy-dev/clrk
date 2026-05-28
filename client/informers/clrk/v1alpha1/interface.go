@@ -39,6 +39,8 @@ type Interface interface {
 	EgressGateways() EgressGatewayInformer
 	// EgressL4Routes returns a EgressL4RouteInformer.
 	EgressL4Routes() EgressL4RouteInformer
+	// Invocations returns a InvocationInformer.
+	Invocations() InvocationInformer
 	// LoggingPolicies returns a LoggingPolicyInformer.
 	LoggingPolicies() LoggingPolicyInformer
 	// MCPRoutes returns a MCPRouteInformer.
@@ -95,6 +97,11 @@ func (v *version) EgressGateways() EgressGatewayInformer {
 // EgressL4Routes returns a EgressL4RouteInformer.
 func (v *version) EgressL4Routes() EgressL4RouteInformer {
 	return &egressL4RouteInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Invocations returns a InvocationInformer.
+func (v *version) Invocations() InvocationInformer {
+	return &invocationInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // LoggingPolicies returns a LoggingPolicyInformer.

@@ -40,4 +40,8 @@ go.work.sum
 # Only `cmd/clrk` must build standalone via `go build`, and it does
 # not import any proto packages.
 proto/**/*.pb.go
-clrk
+# `go install ./cmd/clrk` drops the binary at the repo root. Anchor
+# with a leading slash so the pattern only matches the root file and
+# does NOT shadow source paths that happen to have `clrk` as a path
+# component (e.g. api/clrk/v1alpha1/types_invocation.go).
+/clrk
