@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/admin"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
+	"github.com/apoxy-dev/clrk/internal/clickhouse"
 	"github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/crds"
 	"github.com/apoxy-dev/clrk/internal/egcontrolplane"
@@ -88,6 +90,15 @@ func main() {
 		ingressExtProcHost   = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
 		ingressExtProcPort   = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
 		adminAddr            = flag.String("admin-addr", ":8085", "Bind address for the /admin/* system-state HTTP endpoint. Read-only, unauthenticated; gate via network reachability (bind to loopback or to the in-cluster Service only).")
+		// Embedded clickhouse: the cm process supervises a
+		// clickhouse-server child if the binary is layered into the
+		// image. Listener is 127.0.0.1-only — the engine is private
+		// to the cm process; workers reach it indirectly via cm's
+		// existing gRPC surface. Empty binary path or a missing file
+		// = no embedded engine, cm still boots (Invocation storage
+		// is unavailable until the binary lands).
+		chBinary  = flag.String("embedded-clickhouse-binary", clickhouse.DefaultBinaryPath, "Path to the clickhouse binary supervised as an embedded engine. Empty disables the engine.")
+		chDataDir = flag.String("embedded-clickhouse-data-dir", clickhouse.DefaultDataDir, "On-disk data directory for the embedded clickhouse engine. Backed by a PVC in the cm pod.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -441,6 +452,23 @@ func main() {
 		}()
 	}
 
+	// Embedded clickhouse-server child. Supervisor returns nil (no-op)
+	// when the binary is missing — that's the path during the
+	// apoxy-cloud-side image-layering rollout, where cm boots fine
+	// without an engine until the binary lands.
+	chErrCh := make(chan error, 1)
+	if *chBinary != "" {
+		if *chDataDir == "" {
+			log.Error(errors.New("--embedded-clickhouse-data-dir is required when --embedded-clickhouse-binary is set"), "Invalid flag combination")
+			os.Exit(1)
+		}
+		ch := clickhouse.New(
+			clickhouse.WithBinaryPath(*chBinary),
+			clickhouse.WithDataDir(*chDataDir),
+		)
+		go func() { chErrCh <- ch.Run(ctx) }()
+	}
+
 	slog.Info("Controller-manager running",
 		"apiserver", *bindAddr,
 		"port", *bindPort,
@@ -462,6 +490,11 @@ func main() {
 	case err := <-egErrCh:
 		if err != nil {
 			log.Error(err, "envoy-gateway supervisor exited; tearing down")
+			os.Exit(1)
+		}
+	case err := <-chErrCh:
+		if err != nil {
+			log.Error(err, "Embedded clickhouse supervisor exited; tearing down")
 			os.Exit(1)
 		}
 	}

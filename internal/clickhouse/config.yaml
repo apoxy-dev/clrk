@@ -1,0 +1,36 @@
+logger:
+  level: information
+  console: 1
+listen_host: 127.0.0.1
+http_port: {{.HTTPPort}}
+tcp_port: {{.NativePort}}
+path: {{.DataDir}}/
+tmp_path: {{.DataDir}}/tmp/
+user_files_path: {{.DataDir}}/user_files/
+format_schema_path: {{.DataDir}}/format_schemas/
+mark_cache_size: 536870912
+max_concurrent_queries: 100
+max_server_memory_usage: 0
+max_connections: 1024
+keep_alive_timeout: 3
+allow_run_as_root: 1
+users_config: users.yaml
+default_profile: default
+default_database: default
+user_directories:
+  users_xml:
+    path: users.yaml
+  local_directory:
+    path: {{.DataDir}}/access/
+query_log:
+  database: system
+  table: query_log
+  partition_by: toYYYYMM(event_date)
+  ttl: event_date + INTERVAL 2 DAY DELETE
+part_log:
+  database: system
+  table: part_log
+  partition_by: toYYYYMM(event_date)
+  ttl: event_date + INTERVAL 2 DAY DELETE
+distributed_ddl:
+  path: /clickhouse/task_queue/ddl

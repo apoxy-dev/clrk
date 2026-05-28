@@ -14,6 +14,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/clickhouse"
 	"github.com/apoxy-dev/clrk/internal/drivers"
 	"github.com/apoxy-dev/clrk/internal/extproc"
 	"github.com/apoxy-dev/clrk/internal/ports"
@@ -24,6 +25,15 @@ import (
 // downstream wiring (apiservice ref, --ingress-extproc-host,
 // --grpc-advertise-uri) can't drift.
 const cmAccountName = "clrk-controller-manager"
+
+// chPVCName backs the cm pod's embedded clickhouse data dir. RWO is
+// fine because the cm Deployment is single-replica + Recreate
+// strategy; the old pod releases the volume before the new pod binds.
+// No matching Service — the embedded engine listens on 127.0.0.1 only
+// and is accessed only by the cm process itself via ch-go on
+// loopback. Workers send Invocation records to cm over the existing
+// gRPC surface.
+const chPVCName = "clickhouse-data"
 
 // cmLabels are the selector labels stamped on the cm Deployment's pod
 // template and matched by its Service. Stable across reloads so a
@@ -142,6 +152,12 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "data", MountPath: "/var/lib/clrk"},
+							// Embedded clickhouse data dir. The cm
+							// process supervises a clickhouse-server
+							// child that writes MergeTree parts here;
+							// PVC-backed so Invocation records survive
+							// pod restarts.
+							{Name: chPVCName, MountPath: clickhouse.DefaultDataDir},
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
@@ -172,10 +188,20 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							},
 						},
 					}},
-					Volumes: []corev1.Volume{{
-						Name:         "data",
-						VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-					}},
+					Volumes: []corev1.Volume{
+						{
+							Name:         "data",
+							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+						},
+						{
+							Name: chPVCName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: chPVCName,
+								},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -197,6 +223,25 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 				{Name: "extproc", Port: 9444, TargetPort: intstr.FromInt(9444), Protocol: corev1.ProtocolTCP},
 				{Name: "health", Port: 8082, TargetPort: intstr.FromInt(8082), Protocol: corev1.ProtocolTCP},
 				{Name: "admin", Port: 8085, TargetPort: intstr.FromInt(8085), Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+
+	// Embedded clickhouse data PVC. No matching Service — the
+	// supervised clickhouse-server child binds 127.0.0.1 inside the
+	// cm pod, accessed only by ch-go from the cm process itself.
+	chPVC := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      chPVCName,
+			Namespace: devClrkNamespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("5Gi"),
+				},
 			},
 		},
 	}
@@ -238,7 +283,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 		},
 	}
 
-	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc); err != nil {
+	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc, chPVC); err != nil {
 		return err
 	}
 	// The cm Deployment goes through ApplyAndVerify so a silent SSA

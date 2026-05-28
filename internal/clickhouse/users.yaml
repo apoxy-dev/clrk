@@ -1,0 +1,23 @@
+profiles:
+  default:
+    load_balancing: random
+    max_memory_usage: 10000000000
+    use_uncompressed_cache: 0
+users:
+  default:
+    password: ""
+    networks:
+      ip: 127.0.0.1
+    profile: default
+    quota: default
+    access_management: 1
+    named_collection_control: 1
+quotas:
+  default:
+    interval:
+      duration: 3600
+      queries: 0
+      errors: 0
+      result_rows: 0
+      read_rows: 0
+      execution_time: 0
