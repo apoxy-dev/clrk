@@ -58,6 +58,14 @@ const (
 	AttrWorkerPool = "clrk.worker.pool"
 	AttrSandboxID  = "clrk.sandbox.id"
 
+	// AttrEgressGateway is the resource attribute every producer
+	// (worker, ingress/egress ext_proc) stamps with "<ns>/<name>" of
+	// the EgressGateway the signal belongs to. The cm OTLP receiver
+	// uses it to (a) persist with EGRef as the leading sort key in
+	// the embedded ClickHouse and (b) pick the per-EG forwarder when
+	// re-exporting to a customer endpoint.
+	AttrEgressGateway = "clrk.egress_gateway"
+
 	AttrImageRef    = "clrk.image.ref"
 	AttrImageDigest = "clrk.image.digest"
 

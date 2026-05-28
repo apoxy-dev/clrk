@@ -88,11 +88,12 @@ type EgressGatewaySpec struct {
 	// +kubebuilder:validation:MinItems=1
 	Listeners []EgressListener `json:"listeners"`
 
-	// OTLP configures L7 capture and the OTLP/HTTP logs sink for
-	// captured request/response pairs. L7 capture is always on for HTTP
-	// and MITM-terminated TLS listeners; OTLP defines where the records
-	// go and how much body is captured. When unset, records are emitted
-	// to the controller-manager's structured log instead.
+	// OTLP configures L7 capture for this EgressGateway. The
+	// controller-manager always persists captured request/response
+	// pairs to its embedded ClickHouse and additionally re-exports
+	// them to OTLP.Endpoint when set. L7 capture is always on for
+	// HTTP and MITM-terminated TLS listeners; this field shapes the
+	// re-export destination and the body-capture bounds.
 	// +optional
 	OTLP *OTLPLogsSinkSpec `json:"otlp,omitempty"`
 
@@ -221,27 +222,28 @@ type BodyCaptureSpec struct {
 	IncludeContentTypes []string `json:"includeContentTypes,omitempty"`
 }
 
-// OTLPLogsSinkSpec configures the OTLP/HTTP endpoint receiving captured
-// request/response records from ext_proc, plus the bounds on what gets
-// captured.
+// OTLPLogsSinkSpec configures where the controller-manager re-exports
+// captured signals to and how much of each request/response body is
+// captured. The controller-manager always persists captured signals
+// to its embedded ClickHouse regardless of this field; Endpoint only
+// adds a best-effort fan-out copy to an external collector.
 type OTLPLogsSinkSpec struct {
-	// Endpoint is the OTLP/HTTP base URL (e.g. "https://otel.example.com").
-	// Optional — when empty in dev (`clrk dev` sets the
-	// CLRK_DEV_OTEL_ENDPOINT env on the controller-manager) records flow
-	// to the in-process dev receiver and surface in the TUI's
-	// otel-logs/otel-traces panes; in prod with no env override, capture
-	// falls back to the controller-manager's structured log.
+	// Endpoint is the OTLP/HTTP base URL the controller-manager
+	// forwards captured signals to (e.g. "https://otel.example.com").
+	// Empty disables the customer fan-out; signals are still kept in
+	// the embedded ClickHouse.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// Headers are added to every OTLP export — typically used to carry
-	// authentication tokens.
+	// Headers are added to every forwarded OTLP export — typically
+	// used to carry authentication tokens for the customer endpoint.
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
 
-	// CaptureBody bounds the request/response body bytes captured and
-	// emitted as OTLP log records. Defaults: 64KiB per direction;
-	// capture application/json, application/x-ndjson, text/event-stream.
+	// CaptureBody bounds the request/response body bytes captured by
+	// ext_proc and emitted as OTLP log records. Defaults: 64KiB per
+	// direction; capture application/json, application/x-ndjson,
+	// text/event-stream.
 	// +optional
 	CaptureBody *BodyCaptureSpec `json:"captureBody,omitempty"`
 }

@@ -3,7 +3,6 @@ package extproc
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -15,18 +14,8 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
-
-// DevOTLPEndpointEnv is set by `clrk dev` on the controller-manager
-// container. When per-EG OTLP endpoint is empty and this env is set,
-// the registry routes records to the dev receiver instead of slogSink.
-// Production deployments don't set this env, so behaviour is unchanged.
-const DevOTLPEndpointEnv = "CLRK_DEV_OTEL_ENDPOINT"
-
-// devOTLPEndpoint is captured once at process start. The env doesn't
-// change at runtime; reading it on every per-stream sinkRegistry.get
-// would be needless work.
-var devOTLPEndpoint = strings.TrimSpace(os.Getenv(DevOTLPEndpointEnv))
 
 // sinkShutdownTimeout bounds how long we wait for a replaced sink's
 // background workers to flush during cache rebuild. OTLP exporters use
@@ -43,17 +32,19 @@ var defaultIncludedContentTypes = []string{
 }
 
 // egSink is a per-EgressGateway capture configuration: the resolved Sink
-// (OTLP or fallback slog), the body-capture cap, the content-type
-// allow-list, the AIProviderRoute matcher built from APRs attached to
-// this EG, the credential-injection table built from CIPs attached to
-// this EG (directly or via APR), plus a snapshot of the spec + APR list-
-// version + CIP list-version we use to decide whether to rebuild on
-// subsequent stream starts.
+// (OTLP-to-cm or fallback slog), the body-capture cap, the content-
+// type allow-list, the AIProviderRoute matcher built from APRs
+// attached to this EG, and the credential-injection table built from
+// CIPs attached to this EG (directly or via APR). captureSnapshot is a
+// fingerprint of the body-capture bounds we use to decide whether to
+// rebuild on subsequent stream starts; the OTLP endpoint itself is
+// now process-static (CLRK_CM_OTLP_ENDPOINT) so EG.Spec.OTLP changes
+// no longer invalidate the producer-side sink.
 type egSink struct {
 	sink            Sink
 	maxCaptureBytes int
 	includedTypes   []string
-	specSnapshot    *clrkv1alpha1.OTLPLogsSinkSpec
+	captureSnapshot *clrkv1alpha1.BodyCaptureSpec
 	shutdown        func(context.Context) error
 
 	routes        *routeTable
@@ -139,9 +130,14 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	credVersion := CredPoliciesVersion(ctx, r.client, cips.Items, aprs.Items, key)
 
+	var captureSpec *clrkv1alpha1.BodyCaptureSpec
+	if eg.Spec.OTLP != nil {
+		captureSpec = eg.Spec.OTLP.CaptureBody
+	}
+
 	r.mu.Lock()
 	if hit, ok := r.by[key]; ok &&
-		reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) &&
+		reflect.DeepEqual(hit.captureSnapshot, captureSpec) &&
 		hit.routesVersion == aprVersion &&
 		hit.mcpRoutesVersion == mcpVersion &&
 		hit.credsVersion == credVersion {
@@ -237,13 +233,17 @@ func (r *sinkRegistry) shutdownAll(ctx context.Context) {
 	}
 }
 
-// buildEgSink builds a fresh egSink for the given EG spec. Picks OTLP
-// when an endpoint is configured (either on the EG or via the dev
-// CLRK_DEV_OTEL_ENDPOINT env), falls back to slogSink otherwise.
+// buildEgSink builds a fresh egSink for the given EG. The endpoint is
+// process-static (cm-local OTLP receiver), so OTLP-vs-slog selection
+// depends only on whether CLRK_CM_OTLP_ENDPOINT (or the dev override)
+// is set. The EG identity is stamped as a resource attribute so cm's
+// receiver can pick the right per-EG forwarder.
 func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, error) {
 	maxBytes := captureMaxBytesDefault
 	var included []string
+	var captureSpec *clrkv1alpha1.BodyCaptureSpec
 	if eg.Spec.OTLP != nil && eg.Spec.OTLP.CaptureBody != nil {
+		captureSpec = eg.Spec.OTLP.CaptureBody.DeepCopy()
 		cb := eg.Spec.OTLP.CaptureBody
 		if cb.MaxBytes != nil && *cb.MaxBytes > 0 {
 			maxBytes = int(*cb.MaxBytes)
@@ -259,36 +259,22 @@ func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, 
 	out := &egSink{
 		maxCaptureBytes: maxBytes,
 		includedTypes:   included,
-		specSnapshot:    eg.Spec.OTLP.DeepCopy(),
+		captureSnapshot: captureSpec,
 	}
 
-	if endpoint := effectiveOTLPEndpoint(eg.Spec.OTLP); endpoint != "" {
-		exportSpec := clrkv1alpha1.OTLPLogsSinkSpec{Endpoint: endpoint}
-		if eg.Spec.OTLP != nil {
-			exportSpec.Headers = eg.Spec.OTLP.Headers
-		}
-		sink, shutdown, err := newOTLPSink(ctx, exportSpec)
-		if err != nil {
-			return nil, fmt.Errorf("otlp sink: %w", err)
-		}
-		out.sink = sink
-		out.shutdown = shutdown
+	endpoint := otelemit.ProducerEndpoint()
+	if endpoint == "" {
+		out.sink = slogSink{}
 		return out, nil
 	}
-
-	out.sink = slogSink{}
-	return out, nil
-}
-
-// effectiveOTLPEndpoint returns the URL to dial. Per-EG config always
-// wins. When the EG didn't set an endpoint and clrk dev is running
-// (devOTLPEndpoint is set), the dev receiver is used so capture lands
-// in the TUI's otel panes instead of the controller-manager pane.
-func effectiveOTLPEndpoint(spec *clrkv1alpha1.OTLPLogsSinkSpec) string {
-	if spec != nil && spec.Endpoint != "" {
-		return spec.Endpoint
+	egRef := eg.Namespace + "/" + eg.Name
+	sink, shutdown, err := newOTLPSink(ctx, endpoint, egRef)
+	if err != nil {
+		return nil, fmt.Errorf("otlp sink: %w", err)
 	}
-	return devOTLPEndpoint
+	out.sink = sink
+	out.shutdown = shutdown
+	return out, nil
 }
 
 func lowerAll(in []string) []string {

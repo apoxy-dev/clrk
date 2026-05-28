@@ -5,17 +5,13 @@
 package devotel
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,9 +19,11 @@ import (
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+
+	"github.com/apoxy-dev/clrk/internal/otelemit"
+	"github.com/apoxy-dev/clrk/internal/otelreceiver"
 )
 
 // LogRecord is the receiver's flattened view of one OTLP log record.
@@ -129,7 +127,7 @@ func (r *Receiver) Logs() <-chan LogRecord { return r.logsCh }
 func (r *Receiver) Traces() <-chan Span { return r.spansCh }
 
 func (r *Receiver) handleLogs(w http.ResponseWriter, req *http.Request) {
-	body, err := readBody(req)
+	body, err := otelreceiver.ReadBody(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -140,7 +138,7 @@ func (r *Receiver) handleLogs(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for _, rl := range msg.GetResourceLogs() {
-		resAttrs := flattenAttrs(rl.GetResource().GetAttributes())
+		resAttrs := otelemit.FlattenAttrs(rl.GetResource().GetAttributes())
 		for _, sl := range rl.GetScopeLogs() {
 			for _, lr := range sl.GetLogRecords() {
 				r.dispatchLog(decodeLog(lr, resAttrs))
@@ -148,11 +146,11 @@ func (r *Receiver) handleLogs(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(emptyLogsResp)
+	_, _ = w.Write(otelreceiver.EmptyLogsResp)
 }
 
 func (r *Receiver) handleTraces(w http.ResponseWriter, req *http.Request) {
-	body, err := readBody(req)
+	body, err := otelreceiver.ReadBody(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -163,7 +161,7 @@ func (r *Receiver) handleTraces(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for _, rs := range msg.GetResourceSpans() {
-		resAttrs := flattenAttrs(rs.GetResource().GetAttributes())
+		resAttrs := otelemit.FlattenAttrs(rs.GetResource().GetAttributes())
 		for _, ss := range rs.GetScopeSpans() {
 			for _, sp := range ss.GetSpans() {
 				r.dispatchSpan(decodeSpan(sp, resAttrs))
@@ -171,7 +169,7 @@ func (r *Receiver) handleTraces(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(emptyTracesResp)
+	_, _ = w.Write(otelreceiver.EmptyTracesResp)
 }
 
 func (r *Receiver) dispatchLog(rec LogRecord) {
@@ -207,36 +205,8 @@ func (r *Receiver) recordDrop(signal string) {
 	r.mu.Unlock()
 }
 
-// readBody decompresses gzip if present then returns the raw body.
-// otlploghttp defaults to no compression today, but operators may set
-// WithCompression so we accept either.
-func readBody(req *http.Request) ([]byte, error) {
-	defer req.Body.Close()
-	if strings.EqualFold(req.Header.Get("Content-Encoding"), "gzip") {
-		gz, err := gzip.NewReader(req.Body)
-		if err != nil {
-			return nil, fmt.Errorf("gzip: %w", err)
-		}
-		defer gz.Close()
-		return io.ReadAll(gz)
-	}
-	return io.ReadAll(req.Body)
-}
-
-// emptyLogsResp / emptyTracesResp are pre-marshalled empty responses
-// so handlers don't allocate a zero-value proto on every request.
-var (
-	emptyLogsResp   []byte
-	emptyTracesResp []byte
-)
-
-func init() {
-	emptyLogsResp, _ = proto.Marshal(&collogspb.ExportLogsServiceResponse{})
-	emptyTracesResp, _ = proto.Marshal(&coltracepb.ExportTraceServiceResponse{})
-}
-
 func decodeLog(lr *logspb.LogRecord, resAttrs map[string]string) LogRecord {
-	attrs := mergeAttrs(resAttrs, flattenAttrs(lr.GetAttributes()))
+	attrs := otelemit.MergeAttrs(resAttrs, otelemit.FlattenAttrs(lr.GetAttributes()))
 	traceID := ""
 	if id := lr.GetTraceId(); len(id) > 0 {
 		traceID = hex.EncodeToString(id)
@@ -247,7 +217,7 @@ func decodeLog(lr *logspb.LogRecord, resAttrs map[string]string) LogRecord {
 	}
 	body := ""
 	if b := lr.GetBody(); b != nil {
-		body = anyValueString(b)
+		body = otelemit.AnyValueString(b)
 	}
 	t := time.Unix(0, int64(lr.GetTimeUnixNano()))
 	if t.IsZero() || lr.GetTimeUnixNano() == 0 {
@@ -264,7 +234,7 @@ func decodeLog(lr *logspb.LogRecord, resAttrs map[string]string) LogRecord {
 }
 
 func decodeSpan(sp *tracepb.Span, resAttrs map[string]string) Span {
-	attrs := mergeAttrs(resAttrs, flattenAttrs(sp.GetAttributes()))
+	attrs := otelemit.MergeAttrs(resAttrs, otelemit.FlattenAttrs(sp.GetAttributes()))
 	out := Span{
 		Time:       time.Unix(0, int64(sp.GetStartTimeUnixNano())),
 		Duration:   time.Duration(int64(sp.GetEndTimeUnixNano()) - int64(sp.GetStartTimeUnixNano())),
@@ -282,59 +252,8 @@ func decodeSpan(sp *tracepb.Span, resAttrs map[string]string) Span {
 		out.Events = append(out.Events, SpanEvent{
 			Time:       time.Unix(0, int64(ev.GetTimeUnixNano())),
 			Name:       ev.GetName(),
-			Attributes: flattenAttrs(ev.GetAttributes()),
+			Attributes: otelemit.FlattenAttrs(ev.GetAttributes()),
 		})
 	}
 	return out
-}
-
-func flattenAttrs(in []*commonpb.KeyValue) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for _, kv := range in {
-		out[kv.GetKey()] = anyValueString(kv.GetValue())
-	}
-	return out
-}
-
-func mergeAttrs(a, b map[string]string) map[string]string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
-
-// anyValueString stringifies an OTLP AnyValue, preserving primitive
-// types and falling back to the proto's text form for arrays / maps /
-// bytes (rare on the egress signals we render).
-func anyValueString(v *commonpb.AnyValue) string {
-	if v == nil {
-		return ""
-	}
-	switch x := v.GetValue().(type) {
-	case *commonpb.AnyValue_StringValue:
-		return x.StringValue
-	case *commonpb.AnyValue_BoolValue:
-		return strconv.FormatBool(x.BoolValue)
-	case *commonpb.AnyValue_IntValue:
-		return strconv.FormatInt(x.IntValue, 10)
-	case *commonpb.AnyValue_DoubleValue:
-		return strconv.FormatFloat(x.DoubleValue, 'g', -1, 64)
-	case *commonpb.AnyValue_BytesValue:
-		return hex.EncodeToString(x.BytesValue)
-	default:
-		return v.String()
-	}
 }

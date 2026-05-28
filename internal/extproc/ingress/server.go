@@ -66,11 +66,11 @@ type Server struct {
 	// propagation is a no-op and downstream egress spans start as roots.
 	invocations *invocationctx.Store
 
-	// emitter holds the live OTLP emitter, swappable atomically by
-	// IngressOTLPReconciler when an EgressGateway's spec.OTLP changes
-	// at runtime. Always non-nil — New seeds it with the caller-supplied
-	// emitter (or otelemit.Noop() if nil) so Process can Load
-	// unconditionally.
+	// emitter holds the live OTLP emitter, swappable atomically via
+	// SwapEmitter for graceful shutdown (cm replaces the live emitter
+	// with otelemit.Noop() before closing the old one). Always non-nil
+	// — New seeds it with the caller-supplied emitter (or
+	// otelemit.Noop() if nil) so Process can Load unconditionally.
 	emitter atomic.Pointer[emitterCell]
 }
 

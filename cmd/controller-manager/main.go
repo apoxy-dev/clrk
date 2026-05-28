@@ -27,6 +27,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/admin"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
+	"github.com/apoxy-dev/clrk/internal/chwriter"
 	"github.com/apoxy-dev/clrk/internal/clickhouse"
 	"github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/crds"
@@ -38,6 +39,8 @@ import (
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
+	"github.com/apoxy-dev/clrk/internal/otelforward"
+	"github.com/apoxy-dev/clrk/internal/otelreceiver"
 )
 
 const (
@@ -99,6 +102,14 @@ func main() {
 		// is unavailable until the binary lands).
 		chBinary  = flag.String("embedded-clickhouse-binary", clickhouse.DefaultBinaryPath, "Path to the clickhouse binary supervised as an embedded engine. Empty disables the engine.")
 		chDataDir = flag.String("embedded-clickhouse-data-dir", clickhouse.DefaultDataDir, "On-disk data directory for the embedded clickhouse engine. Backed by a PVC in the cm pod.")
+		// OTLP receiver. The cm process runs an OTLP/HTTP receiver
+		// that producers (worker, ingress/egress ext_proc) dial. Every
+		// inbound signal is persisted to the embedded ClickHouse via
+		// internal/chwriter and best-effort re-exported to a per-EG
+		// customer endpoint via internal/otelforward.
+		otlpAddr           = flag.String("otlp-addr", ":4318", "Bind address for the OTLP/HTTP receiver that captures producer signals into ClickHouse and re-exports to customer endpoints. Empty disables the receiver.")
+		otlpTTLDur         = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
+		otlpAdvertiseURI   = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -299,8 +310,9 @@ func main() {
 	// dev-only skip (workers as docker containers) is retired now that
 	// `clrk dev` runs workers as Pods.
 	if err := (&controller.WorkerPoolDeploymentReconciler{
-		Client: cm.GetClient(),
-		Scheme: cm.GetScheme(),
+		Client:         cm.GetClient(),
+		Scheme:         cm.GetScheme(),
+		CMOTLPEndpoint: *otlpAdvertiseURI,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
 		os.Exit(1)
@@ -372,35 +384,14 @@ func main() {
 		log.Error(err, "Unable to bind ingress ext_proc listener", "addr", *ingressExtProcAddr)
 		os.Exit(1)
 	}
-	// Ingress OTLP emitter — warm start: resolves the OTLP backend off
-	// an EgressGateway (env var or single-EG-in-namespace fallback) so
-	// the ingress.dispatch span lands in the same backend as the
-	// worker and the per-EG egress sinks. We use the APIReader (uncached)
-	// here so resolution works before the controller-runtime cache is
-	// hot. The IngressOTLPReconciler below takes over once the cache
-	// syncs and keeps the emitter in sync with EG changes at runtime.
-	// Noop when no EG is configured.
-	warmResolved, warmErr := ingressextproc.Resolve(ctx, cm.GetAPIReader(), runtimeNS)
-	warmReason := "cold_boot"
-	if warmErr != nil {
-		log.Info("Ingress OTLP emitter is noop at warm start", "reason", warmErr.Error())
-		warmReason = "no_eg"
-	} else if warmResolved.Spec.Endpoint != "" {
-		slog.Info("Ingress OTLP emitter wired (warm start)",
-			"egress_gateway", warmResolved.EGRef,
-			"endpoint", warmResolved.Spec.Endpoint)
-	}
-	adminMux.SetIngressOTLPStatus(admin.IngressOTLPStatus{
-		EgressGateway: warmResolved.EGRef,
-		Endpoint:      warmResolved.Spec.Endpoint,
-		LastReason:    warmReason,
-		Noop:          warmResolved.Spec.Endpoint == "",
-	})
-	ingressSrv := ingressextproc.New(cm.GetClient(), healthChecker, invocations, warmResolved.Emitter)
+	// Ingress OTLP emitter targets the cm-local OTLP receiver via
+	// CLRK_CM_OTLP_ENDPOINT (or CLRK_DEV_OTEL_ENDPOINT in dev). The
+	// receiver in turn persists every signal to the embedded
+	// ClickHouse and re-exports per-EG to customer endpoints via
+	// the EgressGatewayOTLPForwardReconciler below.
+	ingressEmitter := ingressextproc.BuildEmitter(ctx, cm.GetAPIReader(), runtimeNS)
+	ingressSrv := ingressextproc.New(cm.GetClient(), healthChecker, invocations, ingressEmitter)
 	defer func() {
-		// Swap in a noop emitter and Close whatever was live at
-		// shutdown — the reconciler may have replaced the warm-start
-		// emitter, so we cannot use a captured-variable reference.
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		current := ingressSrv.SwapEmitter(otelemit.Noop())
@@ -419,23 +410,6 @@ func main() {
 		}
 	}()
 	defer ingressGRPC.GracefulStop()
-
-	// Reconciler that keeps ingressSrv's emitter in sync with the
-	// resolved EgressGateway's spec.OTLP at runtime. Registered
-	// unconditionally — operators may want ingress.dispatch spans
-	// even when neither the in-cluster ingress controller nor the
-	// EG provisioning controller is on (e.g. the per-TA Envoy data
-	// plane is managed externally).
-	if err := (&controller.IngressOTLPReconciler{
-		Client:      cm.GetClient(),
-		RuntimeNS:   runtimeNS,
-		Server:      ingressSrv,
-		Admin:       adminMux,
-		InitialSpec: warmResolved.Spec,
-	}).SetupWithManager(cm); err != nil {
-		log.Error(err, "Unable to register controller", "controller", "IngressOTLPEmitter")
-		os.Exit(1)
-	}
 
 	egErrCh := make(chan error, 1)
 	if clusterCfg != nil && (*ingressController || *egController) {
@@ -457,16 +431,67 @@ func main() {
 	// apoxy-cloud-side image-layering rollout, where cm boots fine
 	// without an engine until the binary lands.
 	chErrCh := make(chan error, 1)
+	var ch *clickhouse.Embedded
 	if *chBinary != "" {
 		if *chDataDir == "" {
 			log.Error(errors.New("--embedded-clickhouse-data-dir is required when --embedded-clickhouse-binary is set"), "Invalid flag combination")
 			os.Exit(1)
 		}
-		ch := clickhouse.New(
+		ch = clickhouse.New(
 			clickhouse.WithBinaryPath(*chBinary),
 			clickhouse.WithDataDir(*chDataDir),
 		)
-		go func() { chErrCh <- ch.Run(ctx) }()
+		go func() {
+			if err := ch.Run(ctx); err != nil {
+				chErrCh <- err
+			}
+		}()
+	}
+
+	// OTLP plane: cm runs an OTLP/HTTP receiver that producers
+	// (worker, ingress/egress ext_proc) dial. Every signal is
+	// persisted to the embedded ClickHouse via internal/chwriter and
+	// best-effort re-exported to a per-EG customer endpoint via
+	// internal/otelforward. Gated on the embedded engine because
+	// chwriter has no destination without it; gated on the receiver
+	// flag so dev/test scenarios can disable the listener entirely.
+	chwErrCh := make(chan error, 1)
+	if ch != nil && *otlpAddr != "" {
+		ttlDays := int(*otlpTTLDur / (24 * time.Hour))
+		if ttlDays < 1 {
+			ttlDays = 1
+		}
+		writer := chwriter.New(chwriter.WithTTLDays(ttlDays))
+		go func() {
+			if err := ch.Ready(ctx); err != nil {
+				if ctx.Err() == nil {
+					chwErrCh <- fmt.Errorf("wait for clickhouse ready: %w", err)
+				}
+				return
+			}
+			if err := writer.Run(ctx); err != nil && ctx.Err() == nil {
+				chwErrCh <- err
+			}
+		}()
+		forwards := otelforward.NewRegistry(ctx)
+		otelSrv, err := otelreceiver.Start(ctx, *otlpAddr, writer, forwards)
+		if err != nil {
+			log.Error(err, "Unable to start OTLP receiver", "addr", *otlpAddr)
+			os.Exit(1)
+		}
+		slog.Info("Serving OTLP receiver", "addr", otelSrv.Addr())
+		if err := (&controller.EgressGatewayOTLPForwardReconciler{
+			Client:   cm.GetClient(),
+			Registry: forwards,
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "EgressGatewayOTLPForward")
+			os.Exit(1)
+		}
+		defer func() {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			forwards.Shutdown(shutCtx)
+		}()
 	}
 
 	slog.Info("Controller-manager running",
@@ -495,6 +520,11 @@ func main() {
 	case err := <-chErrCh:
 		if err != nil {
 			log.Error(err, "Embedded clickhouse supervisor exited; tearing down")
+			os.Exit(1)
+		}
+	case err := <-chwErrCh:
+		if err != nil {
+			log.Error(err, "OTLP chwriter exited; tearing down")
 			os.Exit(1)
 		}
 	}

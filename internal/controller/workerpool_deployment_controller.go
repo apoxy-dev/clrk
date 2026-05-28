@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // WorkerPoolDeploymentReconciler owns the k8s-side half of WorkerPool: it
@@ -24,6 +25,13 @@ import (
 type WorkerPoolDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// CMOTLPEndpoint is the OTLP/HTTP URL of the controller-manager's
+	// receiver. The reconciler stamps it on every worker container as
+	// CLRK_CM_OTLP_ENDPOINT so the worker's OTLP emitter knows where
+	// to ship signals. Empty disables injection — the worker emitter
+	// falls back to noop.
+	CMOTLPEndpoint string
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
@@ -137,17 +145,28 @@ func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.Work
 	// explicitly (manual override wins).
 	for i := range podTemplate.Spec.Containers {
 		c := &podTemplate.Spec.Containers[i]
-		if hasEnv(c.Env, "CLRK_POOL_NAME") {
-			continue
-		}
-		c.Env = append(c.Env, corev1.EnvVar{
-			Name: "CLRK_POOL_NAME",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.labels['clrk.apoxy.dev/workerpool']",
+		if !hasEnv(c.Env, "CLRK_POOL_NAME") {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name: "CLRK_POOL_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.labels['clrk.apoxy.dev/workerpool']",
+					},
 				},
-			},
-		})
+			})
+		}
+		// CLRK_CM_OTLP_ENDPOINT points the worker's OTLP emitter at
+		// the controller-manager's receiver, which persists every
+		// signal to the embedded ClickHouse and re-exports per-EG to
+		// the customer's collector. Empty when the reconciler has no
+		// CM endpoint configured (single-binary mode); the worker
+		// falls back to a noop emitter in that case.
+		if r.CMOTLPEndpoint != "" && !hasEnv(c.Env, otelemit.CMOTLPEndpointEnv) {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name:  otelemit.CMOTLPEndpointEnv,
+				Value: r.CMOTLPEndpoint,
+			})
+		}
 	}
 
 	return &appsv1.Deployment{

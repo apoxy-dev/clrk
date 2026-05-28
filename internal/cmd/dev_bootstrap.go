@@ -16,7 +16,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/clickhouse"
 	"github.com/apoxy-dev/clrk/internal/drivers"
-	"github.com/apoxy-dev/clrk/internal/extproc"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
@@ -56,10 +56,15 @@ var cmLabels = map[string]string{
 // Endpoints object the docker-bridge flow used to need.
 //
 // gatewayIP becomes a hostAlias for `host.docker.internal` (k3d Pods
-// don't inherit Docker Desktop's /etc/hosts injection); otelEndpoint
-// surfaces as extproc.DevOTLPEndpointEnv so the cm's OTLP exporter
-// reaches the in-process devtui receiver.
+// don't inherit Docker Desktop's /etc/hosts injection). The cm's
+// in-process egress ext_proc producer dials cm's own OTLP receiver
+// on loopback (CLRK_CM_OTLP_ENDPOINT below); from there cm persists
+// to its embedded ClickHouse and re-exports per-EG to whatever the
+// EgressGateway's Spec.OTLP.Endpoint points at. otelEndpoint is
+// unused today (kept on the signature for caller-side compatibility
+// during the dev TUI rework).
 func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDriver, image, pullPolicy, otelEndpoint, gatewayIP string) error {
+	_ = otelEndpoint
 	pull := corev1.PullPolicy(pullPolicy)
 	if pull == "" {
 		pull = corev1.PullIfNotPresent
@@ -141,7 +146,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 							}},
-							{Name: extproc.DevOTLPEndpointEnv, Value: otelEndpoint},
+							{Name: otelemit.CMOTLPEndpointEnv, Value: "http://127.0.0.1:4318"},
 						},
 						Ports: []corev1.ContainerPort{
 							{Name: "apiserver", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
@@ -149,6 +154,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							{Name: "extproc", ContainerPort: 9444, Protocol: corev1.ProtocolTCP},
 							{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
 							{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
+							{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "data", MountPath: "/var/lib/clrk"},
@@ -223,6 +229,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 				{Name: "extproc", Port: 9444, TargetPort: intstr.FromInt(9444), Protocol: corev1.ProtocolTCP},
 				{Name: "health", Port: 8082, TargetPort: intstr.FromInt(8082), Protocol: corev1.ProtocolTCP},
 				{Name: "admin", Port: 8085, TargetPort: intstr.FromInt(8085), Protocol: corev1.ProtocolTCP},
+				{Name: "otlp", Port: 4318, TargetPort: intstr.FromInt(4318), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}

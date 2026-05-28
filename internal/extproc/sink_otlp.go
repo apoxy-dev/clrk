@@ -41,7 +41,7 @@ type otlpSink struct {
 	tracer oteltrace.Tracer
 }
 
-func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink, func(context.Context) error, error) {
+func newOTLPSink(ctx context.Context, endpoint, egRef string) (Sink, func(context.Context) error, error) {
 	// POD_NAME / POD_NAMESPACE come from the controller-manager
 	// Deployment via Downward API. Empty when unset (e.g. `go run`); the
 	// resource just omits the semconv attr in that case.
@@ -57,8 +57,12 @@ func newOTLPSink(ctx context.Context, spec clrkv1alpha1.OTLPLogsSinkSpec) (Sink,
 	if podNS != "" {
 		attrs = append(attrs, semconv.K8SNamespaceName(podNS))
 	}
+	if egRef != "" {
+		attrs = append(attrs, attribute.String(otelemit.AttrEgressGateway, egRef))
+	}
 	res := resource.NewWithAttributes(semconv.SchemaURL, attrs...)
 
+	spec := clrkv1alpha1.OTLPLogsSinkSpec{Endpoint: endpoint}
 	em, err := otelemit.New(ctx, spec, "github.com/apoxy-dev/clrk/internal/extproc", res)
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct otlp emitter: %w", err)
