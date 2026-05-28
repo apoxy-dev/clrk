@@ -60,11 +60,13 @@ var cmLabels = map[string]string{
 // in-process egress ext_proc producer dials cm's own OTLP receiver
 // on loopback (CLRK_CM_OTLP_ENDPOINT below); from there cm persists
 // to its embedded ClickHouse and re-exports per-EG to whatever the
-// EgressGateway's Spec.OTLP.Endpoint points at. otelEndpoint is
-// unused today (kept on the signature for caller-side compatibility
-// during the dev TUI rework).
+// EgressGateway's Spec.OTLP.Endpoint points at. otelEndpoint
+// (http://host.docker.internal:14318) is stamped as the cm's
+// --dev-otlp-fallback-endpoint so EGs without an explicit
+// spec.otlp.endpoint forward captured signals to the dev TUI
+// receiver — that's what lights up the otel-logs / traces /
+// token-count panes.
 func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDriver, image, pullPolicy, otelEndpoint, gatewayIP string) error {
-	_ = otelEndpoint
 	pull := corev1.PullPolicy(pullPolicy)
 	if pull == "" {
 		pull = corev1.PullIfNotPresent
@@ -134,6 +136,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							"--ingress-extproc-host=" + cmAccountName + "." + devClrkNamespace + ".svc.cluster.local",
 							"--egressgateway-controller=true",
 							"--grpc-advertise-uri=" + cmAccountName + "." + devClrkNamespace + ".svc.cluster.local:9443",
+							"--dev-otlp-fallback-endpoint=" + otelEndpoint,
 						},
 						Env: []corev1.EnvVar{
 							// envoy-go and envoyproxy/go-control-plane both register

@@ -110,6 +110,11 @@ func main() {
 		otlpAddr           = flag.String("otlp-addr", ":4318", "Bind address for the OTLP/HTTP receiver that captures producer signals into ClickHouse and re-exports to customer endpoints. Empty disables the receiver.")
 		otlpTTLDur         = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
 		otlpAdvertiseURI   = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
+		// devOTLPFallback wires `clrk dev`'s in-process TUI receiver
+		// as a default forward destination for EgressGateways that
+		// don't set spec.otlp.endpoint. Empty in prod (operators set
+		// per-EG endpoints to their real collectors).
+		devOTLPFallback = flag.String("dev-otlp-fallback-endpoint", "", "OTLP/HTTP URL used as the per-EG forward destination for EgressGateways whose spec.otlp.endpoint is empty. clrk dev sets this to its in-process TUI receiver; prod leaves it empty.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -481,8 +486,9 @@ func main() {
 		}
 		slog.Info("Serving OTLP receiver", "addr", otelSrv.Addr())
 		if err := (&controller.EgressGatewayOTLPForwardReconciler{
-			Client:   cm.GetClient(),
-			Registry: forwards,
+			Client:           cm.GetClient(),
+			Registry:         forwards,
+			FallbackEndpoint: *devOTLPFallback,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGatewayOTLPForward")
 			os.Exit(1)

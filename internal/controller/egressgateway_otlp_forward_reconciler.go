@@ -26,6 +26,14 @@ type EgressGatewayOTLPForwardReconciler struct {
 
 	// Registry is the per-EG forwarder map the receiver reads from.
 	Registry *otelforward.Registry
+
+	// FallbackEndpoint is the OTLP/HTTP URL used as the forward
+	// destination for EgressGateways whose spec.otlp.endpoint is
+	// empty. clrk dev sets this to its in-process TUI receiver
+	// (http://host.docker.internal:14318) so the otel-logs / traces /
+	// token-count panels light up without requiring per-EG endpoint
+	// configuration in example manifests. Empty in prod.
+	FallbackEndpoint string
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
@@ -48,11 +56,14 @@ func (r *EgressGatewayOTLPForwardReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 
-	if eg.Spec.OTLP == nil {
-		r.Registry.Apply(egRef, clrkv1alpha1.OTLPLogsSinkSpec{})
-		return ctrl.Result{}, nil
+	spec := clrkv1alpha1.OTLPLogsSinkSpec{}
+	if eg.Spec.OTLP != nil {
+		spec = *eg.Spec.OTLP
 	}
-	r.Registry.Apply(egRef, *eg.Spec.OTLP)
+	if spec.Endpoint == "" && r.FallbackEndpoint != "" {
+		spec.Endpoint = r.FallbackEndpoint
+	}
+	r.Registry.Apply(egRef, spec)
 	return ctrl.Result{}, nil
 }
 
