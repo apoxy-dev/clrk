@@ -458,17 +458,27 @@ func newLoopbackConfig(hostPort string) *rest.Config {
 	}
 }
 
-// dialClickHouseWithRetry calls chpool.Dial until it succeeds or ctx
-// is cancelled. Each attempt has a 5s timeout (matches chwriter's
-// dialTimeout); attempts are spaced by an exponential backoff capped
-// at 2s. Returns the first non-nil pool or ctx.Err() wrapped with a
-// hint about the address that failed.
+// dialDeadline caps how long the background goroutine retries the CH
+// dial before giving up and resolving the LazyPool with an error. The
+// dev controller-manager image ships without the embedded clickhouse
+// binary, so without a deadline the dial would loop indefinitely and
+// every Invocation request would block until ctx.Done; with one, the
+// LazyPool returns "storage unavailable" promptly and the rest of the
+// apiserver is unaffected.
+const dialDeadline = 30 * time.Second
+
+// dialClickHouseWithRetry calls chpool.Dial until it succeeds, ctx is
+// cancelled, or dialDeadline elapses. Each attempt has a 5s timeout
+// (matches chwriter's dialTimeout); attempts are spaced by an
+// exponential backoff capped at 2s.
 func dialClickHouseWithRetry(ctx context.Context, o *options) (*chpool.Pool, error) {
+	deadlineCtx, cancelDeadline := context.WithTimeout(ctx, dialDeadline)
+	defer cancelDeadline()
 	backoff := 200 * time.Millisecond
 	const maxBackoff = 2 * time.Second
 	var lastErr error
 	for {
-		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		dialCtx, cancel := context.WithTimeout(deadlineCtx, 5*time.Second)
 		pool, err := chpool.Dial(dialCtx, chpool.Options{
 			ClientOptions: ch.Options{
 				Address:  o.clickHouseAddress,
@@ -481,8 +491,8 @@ func dialClickHouseWithRetry(ctx context.Context, o *options) (*chpool.Pool, err
 		}
 		lastErr = err
 		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("dialing clickhouse at %s: %w (last: %v)", o.clickHouseAddress, ctx.Err(), lastErr)
+		case <-deadlineCtx.Done():
+			return nil, fmt.Errorf("dialing clickhouse at %s: %w (last: %v)", o.clickHouseAddress, deadlineCtx.Err(), lastErr)
 		case <-time.After(backoff):
 		}
 		if backoff < maxBackoff {
