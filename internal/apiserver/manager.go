@@ -226,7 +226,7 @@ type Manager struct {
 
 	opts    *options
 	ctrlMgr manager.Manager
-	chPool  *chpool.Pool
+	invPool *invocation.LazyPool
 }
 
 // New returns an unstarted Manager.
@@ -286,8 +286,8 @@ func (m *Manager) Start(ctx context.Context, opts ...Option) error {
 
 	close(m.ReadyCh)
 
-	if m.chPool != nil {
-		defer m.chPool.Close()
+	if m.invPool != nil {
+		defer m.invPool.Close()
 	}
 
 	// Block until the caller is done registering reconcilers and doing
@@ -344,25 +344,30 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	// (top-level + per-parent subresources) sharing one chpool. Not
 	// registered via WithResourceAndStorage because we want our own
 	// rest.Storage rather than the builder's kine-backed generic
-	// store. The pool dials the embedded CH supervisor (cmd-side, see
-	// internal/clickhouse) on the configured address; EnsureTable is
-	// idempotent.
+	// store.
 	//
-	// cmd/controller-manager starts the apiserver Manager BEFORE the
-	// embedded clickhouse supervisor binds 9000, so we dial with a
-	// retry loop bounded by ctx — the supervisor's restart-on-crash
-	// budget is in seconds, never minutes, so 60s of retry covers the
-	// realistic startup window without burning user wait time.
-	chPool, err := dialClickHouseWithRetry(ctx, o)
-	if err != nil {
-		return err
-	}
-	m.chPool = chPool
-	if err := invocation.EnsureTable(ctx, chPool, o.clickHouseTTLDays); err != nil {
-		chPool.Close()
-		m.chPool = nil
-		return err
-	}
+	// The CH dial happens in a goroutine: cmd/controller-manager
+	// starts the apiserver Manager before the embedded clickhouse
+	// supervisor binds 9000, so a synchronous dial would hold the
+	// /healthz bind and trip the pod's liveness probe. Storage's
+	// LazyPool Doer blocks individual Invocation requests until the
+	// pool resolves; everything else (Discovery, kine-backed
+	// resources, ctrl.Manager) is unaffected by CH availability.
+	lazyPool := invocation.NewLazyPool()
+	m.invPool = lazyPool
+	go func() {
+		chPool, err := dialClickHouseWithRetry(ctx, o)
+		if err != nil {
+			lazyPool.Set(nil, err)
+			return
+		}
+		if err := invocation.EnsureTable(ctx, chPool, o.clickHouseTTLDays); err != nil {
+			chPool.Close()
+			lazyPool.Set(nil, err)
+			return
+		}
+		lazyPool.Set(chPool, nil)
+	}()
 
 	invocationGR := schema.GroupResource{
 		Group:    clrkv1alpha1.GroupName,
@@ -379,7 +384,7 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	} {
 		srvBuilder = srvBuilder.WithStorage(
 			clrkv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
-			invocation.NewProvider(chPool, invocationGR, "invocation", sub.parentKind),
+			invocation.NewProvider(lazyPool, invocationGR, "invocation", sub.parentKind),
 		)
 	}
 
