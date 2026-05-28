@@ -208,6 +208,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	}
 	attrs = appendGenAIAttrs(attrs, r)
 	attrs = appendAPRAttrs(attrs, r)
+	attrs = appendMCPAttrs(attrs, r)
 
 	_, span := s.tracer.Start(parentCtx, spanName,
 		oteltrace.WithTimestamp(spanStart(r)),
@@ -280,6 +281,7 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 	}
 	attrs = appendLogKVs(attrs, genAIAttrs(r))
 	attrs = appendLogKVs(attrs, aprAttrs(r))
+	attrs = appendLogKVs(attrs, mcpAttrs(r))
 	rec.AddAttributes(attrs...)
 	s.logger.Emit(context.Background(), rec)
 }
@@ -351,6 +353,42 @@ func aprAttrs(r Record) []attribute.KeyValue {
 
 func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 	return append(dst, aprAttrs(r)...)
+}
+
+// mcpAttrs returns the mcp.* + clrk.mcproute.* attribute slice for
+// this record. Empty when the request wasn't parsed as MCP and no
+// MCPRoute matched. Both sub-groups can be present independently: a
+// request that parsed as MCP but didn't match any rule emits mcp.*
+// without clrk.mcproute.*; a matched route emits both.
+func mcpAttrs(r Record) []attribute.KeyValue {
+	if r.MCP == nil && r.MatchedMCPRouteName == "" {
+		return nil
+	}
+	out := make([]attribute.KeyValue, 0, 7)
+	if r.MCP != nil {
+		out = append(out, attribute.String(otelemit.AttrMCPMethod, r.MCP.Method))
+		if r.MCP.ToolName != "" {
+			out = append(out, attribute.String(otelemit.AttrMCPToolName, r.MCP.ToolName))
+		}
+		if r.MCP.ResourceURI != "" {
+			out = append(out, attribute.String(otelemit.AttrMCPResourceURI, r.MCP.ResourceURI))
+		}
+	}
+	if r.MatchedMCPRouteName != "" {
+		out = append(out,
+			attribute.Bool(otelemit.AttrMCPRouteMatched, true),
+			attribute.String(otelemit.AttrMCPRouteNamespace, r.MatchedMCPRouteNamespace),
+			attribute.String(otelemit.AttrMCPRouteName, r.MatchedMCPRouteName),
+		)
+	}
+	if r.MCPToolPolicyDecision != "" {
+		out = append(out, attribute.String(otelemit.AttrMCPToolPolicyDecision, r.MCPToolPolicyDecision))
+	}
+	return out
+}
+
+func appendMCPAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
+	return append(dst, mcpAttrs(r)...)
 }
 
 // agentAttrs returns the identity sub-slice common to span + log.
@@ -476,18 +514,39 @@ func summaryLine(r Record, d derived) string {
 	if r.MatchedRouteName != "" {
 		base += fmt.Sprintf(" route=%s/%s", r.MatchedRouteNamespace, r.MatchedRouteName)
 	}
+	if r.MCP != nil {
+		base += fmt.Sprintf(" mcp_method=%s", r.MCP.Method)
+		if r.MCP.ToolName != "" {
+			base += fmt.Sprintf(" mcp_tool=%s", r.MCP.ToolName)
+		}
+	}
+	if r.MatchedMCPRouteName != "" {
+		base += fmt.Sprintf(" mcp_route=%s/%s", r.MatchedMCPRouteNamespace, r.MatchedMCPRouteName)
+	}
+	if r.MCPToolPolicyDecision != "" {
+		base += fmt.Sprintf(" mcp_decision=%s", r.MCPToolPolicyDecision)
+	}
 	return base
 }
 
 // spanNameFor follows OTel GenAI conventions when the request matched
-// a known provider: "<operation> <model>" (e.g. "chat gpt-4o"). Falls
-// back to the HTTP-style "<METHOD> <host>" otherwise.
+// a known provider: "<operation> <model>" (e.g. "chat gpt-4o"). For
+// MCP traffic uses "mcp <method> <tool>" (e.g. "mcp tools/call
+// search_web") so trace UI groups by tool. Falls back to the HTTP-
+// style "<METHOD> <host>" otherwise.
 func spanNameFor(r Record, d derived) string {
 	if r.Provider != nil && r.Provider.Operation != "" {
 		if r.Provider.RequestModel != "" {
 			return r.Provider.Operation + " " + r.Provider.RequestModel
 		}
 		return r.Provider.Operation
+	}
+	if r.MCP != nil && r.MCP.Method != "" {
+		name := "mcp " + r.MCP.Method
+		if r.MCP.ToolName != "" {
+			name += " " + r.MCP.ToolName
+		}
+		return name
 	}
 	method := d.method
 	if method == "" {

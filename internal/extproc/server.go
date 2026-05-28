@@ -136,6 +136,23 @@ type Record struct {
 	// moment of the deny decision, attached for operator visibility.
 	BudgetDailyUsed int64
 	BudgetDailyMax  int64
+
+	// MCP carries parsed MCP JSON-RPC envelope facts when the
+	// :authority host fell under an attached MCPRoute and the request
+	// body was a single (non-batch) JSON-RPC request. Nil for any
+	// other traffic.
+	MCP *parsers.MCPInfo
+
+	// MatchedMCPRouteNamespace / MatchedMCPRouteName identify the
+	// MCPRoute whose rule accepted this transaction; empty when no
+	// rule matched.
+	MatchedMCPRouteNamespace string
+	MatchedMCPRouteName      string
+
+	// MCPToolPolicyDecision is "allow" or "deny" when the matched
+	// rule's ToolPolicy fired on a tools/call request; empty for
+	// non-tools/call methods, no-policy rules, or unmatched traffic.
+	MCPToolPolicyDecision string
 }
 
 // ServerOption configures the ext_proc Server.
@@ -220,6 +237,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		maxCaptureBytes int  = captureMaxBytesDefault
 		includedTypes   []string
 		routes          *routeTable
+		mcpRoutes       *mcpRouteTable
 		creds           *credTable
 		egKey           types.NamespacedName
 	)
@@ -236,6 +254,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			maxCaptureBytes = es.maxCaptureBytes
 			includedTypes = es.includedTypes
 			routes = es.routes
+			mcpRoutes = es.mcpRoutes
 			creds = es.creds
 			if k, kerr := egidentity.MustFromContext(ctx); kerr == nil {
 				egKey = k
@@ -306,7 +325,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				rec.BudgetDailyUsed = used
 				rec.BudgetDailyMax = max
 				rec.MatchedRouteName = denied
-				if err := stream.Send(immediateResponse429("clrk: token budget exceeded for route " + denied)); err != nil {
+				if err := stream.Send(immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: token budget exceeded for route "+denied)); err != nil {
 					rec.EndAt = time.Now()
 					enrichRecord(&rec, routes)
 					sink.Emit(rec)
@@ -390,9 +409,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// On the terminal body chunk (BUFFERED_PARTIAL delivers the
 			// whole body in one ProcessingRequest under the buffer
 			// limit; multi-chunk only happens when the body exceeds
-			// it), try the OpenAI/OAI-compat include_usage rewrite.
-			// Skip when truncation already kicked in — partial JSON
-			// can't be safely re-serialized.
+			// it), try the OpenAI/OAI-compat include_usage rewrite,
+			// then the MCP enforcement path. Skip when truncation
+			// already kicked in — partial JSON can't be safely
+			// re-serialized or policy-gated.
 			if m.RequestBody.GetEndOfStream() && !rec.RequestTruncated {
 				host, _ := splitHostPort(rec.RequestHeaders[":authority"])
 				if newBody, mut := parsers.EnsureIncludeUsage(host, rec.RequestHeaders[":path"], rec.RequestBody); mut {
@@ -403,6 +423,26 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 					rec.RequestBodyRewritten = true
 					resp = bodyMutation(true, newBody)
 					break
+				}
+				// MCP enforcement. Cheap host + content-type gate so
+				// non-MCP traffic pays nothing for the JSON-RPC parse.
+				// The include-usage rewrite (above) and an MCP deny
+				// are mutually exclusive — the former only fires for
+				// OpenAI-shaped requests, the latter only when a host
+				// falls under an MCPRoute.
+				if mcpCandidate(mcpRoutes, host, rec.RequestHeaders["content-type"]) {
+					res := mcpRoutes.evaluate(host, rec.RequestBody, rec.RequestTruncated)
+					stampMCPResult(&rec, res)
+					if res.decision == mcpDecisionDeny {
+						if err := stream.Send(immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)); err != nil {
+							rec.EndAt = time.Now()
+							enrichRecord(&rec, routes)
+							sink.Emit(rec)
+							return err
+						}
+						// Keep the stream up; EOF emits the record.
+						continue
+					}
 				}
 			}
 			resp = bodyContinue(true)
@@ -559,15 +599,15 @@ func (s *Server) chargeBudget(rr *routeRule, eg types.NamespacedName, rec Record
 	}, tokens)
 }
 
-// immediateResponse429 builds an ext_proc ImmediateResponse that
-// short-circuits the upstream call with HTTP 429 and a small JSON
-// body explaining the deny reason. Envoy synthesizes the client
-// response from this; the client sees a 429 immediately.
-func immediateResponse429(detail string) *extprocv3.ProcessingResponse {
+// immediateResponse builds an ext_proc ImmediateResponse that
+// short-circuits the upstream call with the given HTTP status and a
+// small JSON body explaining the deny reason. Envoy synthesizes the
+// client response from this; the client sees the status immediately.
+func immediateResponse(code typev3.StatusCode, detail string) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extprocv3.ImmediateResponse{
-				Status: &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
+				Status: &typev3.HttpStatus{Code: code},
 				Body:   []byte(`{"error":` + jsonString(detail) + `}`),
 				Headers: &extprocv3.HeaderMutation{
 					SetHeaders: []*corev3.HeaderValueOption{{
@@ -578,6 +618,7 @@ func immediateResponse429(detail string) *extprocv3.ProcessingResponse {
 		},
 	}
 }
+
 
 // jsonString quotes s as a JSON string. Tiny helper so we don't pull
 // encoding/json in just to format an error body.

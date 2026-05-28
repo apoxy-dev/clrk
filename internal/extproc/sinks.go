@@ -59,6 +59,9 @@ type egSink struct {
 	routes        *routeTable
 	routesVersion string
 
+	mcpRoutes        *mcpRouteTable
+	mcpRoutesVersion string
+
 	creds        *credTable
 	credsVersion string
 }
@@ -118,6 +121,16 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	aprVersion := aiproviderRoutesVersion(aprs.Items, key)
 
+	// List MCPRoutes cluster-wide for the same reason as APRs: an
+	// MCPRoute in any namespace can attach via parentRef. The version
+	// fingerprint participates in the cache-equality check below so a
+	// rule edit invalidates the snapshot.
+	var mcprs clrkv1alpha1.MCPRouteList
+	if err := r.client.List(ctx, &mcprs); err != nil {
+		return nil, fmt.Errorf("list MCPRoutes: %w", err)
+	}
+	mcpVersion := mcpRoutesVersion(mcprs.Items, key)
+
 	// Same shape for CredentialInjectionPolicies. Cluster-wide list
 	// because policies can attach across namespaces via parentRefs.
 	var cips clrkv1alpha1.CredentialInjectionPolicyList
@@ -130,6 +143,7 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if hit, ok := r.by[key]; ok &&
 		reflect.DeepEqual(hit.specSnapshot, eg.Spec.OTLP) &&
 		hit.routesVersion == aprVersion &&
+		hit.mcpRoutesVersion == mcpVersion &&
 		hit.credsVersion == credVersion {
 		r.mu.Unlock()
 		return hit, nil
@@ -146,6 +160,8 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	built.routes = buildRouteTable(key.Namespace, key.Name, aprs.Items)
 	built.routesVersion = aprVersion
+	built.mcpRoutes = buildMCPRouteTable(ctx, key.Namespace, key.Name, mcprs.Items)
+	built.mcpRoutesVersion = mcpVersion
 	built.creds = buildCredTable(ctx, r.client, key.Namespace, key.Name, aprs.Items, cips.Items)
 	built.credsVersion = credVersion
 
@@ -184,6 +200,24 @@ func aiproviderRoutesVersion(routes []clrkv1alpha1.AIProviderRoute, eg types.Nam
 	}
 	// Sort for determinism — list order from the cached client isn't
 	// guaranteed stable across calls.
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// mcpRoutesVersion mirrors aiproviderRoutesVersion for MCPRoutes. Kept
+// separate so a change to one route family doesn't invalidate the
+// other's fingerprint and force an unrelated rebuild.
+func mcpRoutesVersion(routes []clrkv1alpha1.MCPRoute, eg types.NamespacedName) string {
+	var parts []string
+	for _, r := range routes {
+		if !mcpRouteAttachesTo(r, eg.Namespace, eg.Name) {
+			continue
+		}
+		parts = append(parts, r.Namespace+"/"+r.Name+"@"+r.ResourceVersion)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
 }

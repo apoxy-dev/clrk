@@ -39,6 +39,14 @@ const (
 	AttrBodyUsageVisible  = "clrk.body.usage_visible"
 	AttrBodyReqRewritten  = "clrk.body.request_rewritten"
 
+	AttrMCPMethod             = "mcp.method"
+	AttrMCPToolName           = "mcp.tool.name"
+	AttrMCPResourceURI        = "mcp.resource.uri"
+	AttrMCPRouteMatched       = "clrk.mcproute.matched"
+	AttrMCPRouteName          = "clrk.mcproute.name"
+	AttrMCPRouteNamespace     = "clrk.mcproute.namespace"
+	AttrMCPToolPolicyDecision = "clrk.mcproute.toolpolicy.decision"
+
 	AttrBudgetDenied    = "clrk.budget.denied"
 	AttrBudgetDailyUsed = "clrk.budget.daily_used"
 	AttrBudgetDailyMax  = "clrk.budget.daily_max"

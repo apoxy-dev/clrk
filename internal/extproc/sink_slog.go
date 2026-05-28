@@ -52,6 +52,25 @@ func (slogSink) Emit(r Record) {
 			"clrk.aiproviderroute.name", r.MatchedRouteName,
 		)
 	}
+	if r.MCP != nil {
+		attrs = append(attrs, "mcp.method", r.MCP.Method)
+		if r.MCP.ToolName != "" {
+			attrs = append(attrs, "mcp.tool.name", r.MCP.ToolName)
+		}
+		if r.MCP.ResourceURI != "" {
+			attrs = append(attrs, "mcp.resource.uri", r.MCP.ResourceURI)
+		}
+	}
+	if r.MatchedMCPRouteName != "" {
+		attrs = append(attrs,
+			"clrk.mcproute.matched", true,
+			"clrk.mcproute.namespace", r.MatchedMCPRouteNamespace,
+			"clrk.mcproute.name", r.MatchedMCPRouteName,
+		)
+	}
+	if r.MCPToolPolicyDecision != "" {
+		attrs = append(attrs, "clrk.mcproute.toolpolicy.decision", r.MCPToolPolicyDecision)
+	}
 	if r.BudgetDenied {
 		attrs = append(attrs,
 			"clrk.budget.denied", true,

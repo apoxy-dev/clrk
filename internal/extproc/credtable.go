@@ -106,7 +106,10 @@ func buildCredTable(
 					tbl.byRoute[key] = append(tbl.byRoute[key], *inj)
 				}
 			case mcpRouteKind:
-				// No-op until MCPRoute consumption ships (APO-556).
+				// CIPs targeting MCPRoute are a separate follow-up
+				// item; APO-556 ships MCPRoute matching + ToolPolicy
+				// enforcement but doesn't yet thread credential
+				// injection through the MCP route table.
 				continue
 			}
 		}
