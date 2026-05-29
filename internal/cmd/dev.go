@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
@@ -285,6 +286,21 @@ func forwardOtel(ctx context.Context, receiver *devotel.Receiver, store *devagen
 // runDevTUI orchestrates components in a background goroutine while the TUI
 // renders status and per-component logs on the main goroutine.
 func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) error {
+	// Redirect FD 2 to a log file for the lifetime of the TUI so
+	// libraries that write to stderr without going through slog (k3d's
+	// logrus, klog, libc, anything in bringUp's exec.* calls that
+	// inherits Stderr) don't corrupt bubbletea's alt-screen render or
+	// scroll prelude-garbage across the terminal before the TUI takes
+	// over. slog records that were emitted via the root.go default
+	// handler (created with os.Stderr before this redirect) follow the
+	// FD swap automatically — the *os.File still points at FD 2. The
+	// file is truncated each session; tail it to debug pre-TUI logs.
+	if restore, err := redirectStderrToFile(filepath.Join(o.dataDir, "dev.stderr.log")); err == nil {
+		defer restore()
+	} else {
+		slog.Warn("Failed to redirect stderr for TUI; pre-render garbage may appear", "err", err)
+	}
+
 	componentNames := []string{
 		drivers.ClusterServerContainerName,
 		controllerManagerComponent,
@@ -628,4 +644,35 @@ func pipeLines(wg *sync.WaitGroup, r io.Reader, prog *devtui.Program, source str
 	for scanner.Scan() {
 		prog.SendLog(source, scanner.Text(), stream)
 	}
+}
+
+// redirectStderrToFile points FD 2 at path so every stderr write (Go
+// os.Stderr, libc, klog, logrus, panic backtraces) lands in the file
+// instead of the user's terminal. Used by runDevTUI to keep
+// bubbletea's alt-screen render clean. Returns a restore closure that
+// reinstates the original FD 2 and closes the file. Restoration is
+// best-effort: a Dup2 failure on the restore path is logged but
+// doesn't propagate, since by then the TUI has already exited.
+func redirectStderrToFile(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	savedFD, err := unix.Dup(int(os.Stderr.Fd()))
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("dup stderr: %w", err)
+	}
+	if err := unix.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
+		_ = unix.Close(savedFD)
+		_ = f.Close()
+		return nil, fmt.Errorf("dup2 stderr: %w", err)
+	}
+	return func() {
+		if err := unix.Dup2(savedFD, int(os.Stderr.Fd())); err != nil {
+			slog.Warn("Failed to restore stderr after TUI", "err", err)
+		}
+		_ = unix.Close(savedFD)
+		_ = f.Close()
+	}, nil
 }
