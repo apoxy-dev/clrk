@@ -62,10 +62,10 @@ var cmLabels = map[string]string{
 // to its embedded ClickHouse and re-exports per-EG to whatever the
 // EgressGateway's Spec.OTLP.Endpoint points at. otelEndpoint
 // (http://host.docker.internal:14318) is stamped as the cm's
-// --dev-otlp-fallback-endpoint so EGs without an explicit
-// spec.otlp.endpoint forward captured signals to the dev TUI
-// receiver — that's what lights up the otel-logs / traces /
-// token-count panes.
+// --dev-otlp-fallback-endpoint so every captured signal is also
+// mirrored to the dev TUI receiver unconditionally — that's what
+// lights up the otel-logs / traces / token-count panes regardless
+// of whether the user has applied an EgressGateway.
 func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDriver, image, pullPolicy, otelEndpoint, gatewayIP string) error {
 	pull := corev1.PullPolicy(pullPolicy)
 	if pull == "" {

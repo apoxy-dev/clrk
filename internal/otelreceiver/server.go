@@ -21,24 +21,32 @@ import (
 )
 
 // Server is cm's OTLP/HTTP receiver. Inbound requests are decoded and
-// dispatched to chwriter (always) plus a per-EG otelforward.Forwarder
-// (when one is registered for the request's EGRef). Cancelling the
-// ctx passed to Start triggers graceful shutdown.
+// dispatched to chwriter (always), an unconditional dev sink (when
+// configured), and a per-EG otelforward.Forwarder (when one is
+// registered for the request's EGRef). Cancelling the ctx passed to
+// Start triggers graceful shutdown.
 type Server struct {
 	writer   *chwriter.Writer
 	forwards *otelforward.Registry
+	// devSink, when non-nil, receives a copy of every inbound payload
+	// regardless of the request's clrk.egress_gateway attribution. It
+	// exists so `clrk dev`'s in-process TUI receiver lights up even
+	// when the user hasn't applied an EgressGateway (and therefore the
+	// per-EG forwarder registry is empty). The Forwarder is owned by
+	// the caller — Server doesn't Close it on shutdown.
+	devSink *otelforward.Forwarder
 
 	addr string
 }
 
 // Start binds an HTTP listener on addr and returns a running Server.
-// writer is required; forwards may be nil to disable customer
-// re-export.
-func Start(ctx context.Context, addr string, writer *chwriter.Writer, forwards *otelforward.Registry) (*Server, error) {
+// writer is required; forwards and devSink may be nil to disable
+// customer re-export and dev fan-out respectively.
+func Start(ctx context.Context, addr string, writer *chwriter.Writer, forwards *otelforward.Registry, devSink *otelforward.Forwarder) (*Server, error) {
 	if writer == nil {
 		return nil, errors.New("writer is required")
 	}
-	s := &Server{writer: writer, forwards: forwards}
+	s := &Server{writer: writer, forwards: forwards, devSink: devSink}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/logs", s.handleLogs)
@@ -95,6 +103,9 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
+		if s.devSink != nil {
+			s.devSink.EnqueueLogs(body)
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(EmptyLogsResp)
@@ -119,6 +130,9 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 					fwd.EnqueueTraces(body)
 				}
 			}
+		}
+		if s.devSink != nil {
+			s.devSink.EnqueueTraces(body)
 		}
 	}
 	w.WriteHeader(http.StatusOK)

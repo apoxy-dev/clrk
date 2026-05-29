@@ -120,7 +120,7 @@ func openAgentLogFile(rootDir, namespace, name string) (*os.File, error) {
 // reading is distinguishable from a daemon that never had one.
 func identityLogFields(id proxyproto.AgentIdentity) []any {
 	fields := []any{
-		slog.String("agent.kind", fmt.Sprintf("%d", id.Kind)),
+		slog.String("agent.kind", id.Kind.String()),
 		slog.String("agent.namespace", id.Namespace),
 		slog.String("agent.name", id.Name),
 	}

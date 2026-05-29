@@ -2,6 +2,8 @@
 // TLVs that carry agent identity into the egress data plane.
 package proxyproto
 
+import "strconv"
+
 // PP2 TLV type IDs in the private-use range (0xE0..0xEF per PROXY v2 spec).
 // The Envoy listener filter decodes these into filter-state keys that our
 // handshaker + ext_proc pick up.
@@ -23,6 +25,21 @@ const (
 	AgentKindDaemon AgentKind = 0
 	AgentKindTask   AgentKind = 1
 )
+
+// String returns the human-readable kind name matching the CRD Kind
+// (clrkv1alpha1.AgentKindTask / AgentKindDaemon). Hardcoded rather
+// than importing the api package to avoid a cycle. Unknown values
+// fall through to the integer rendering so future kinds remain
+// debuggable without panicking.
+func (k AgentKind) String() string {
+	switch k {
+	case AgentKindDaemon:
+		return "DaemonAgent"
+	case AgentKindTask:
+		return "TaskAgent"
+	}
+	return strconv.Itoa(int(k))
+}
 
 // AgentIdentity is the per-sandbox identity encoded into PP2 TLVs so the
 // Envoy MITM listener can attribute traffic back to a clrk agent without

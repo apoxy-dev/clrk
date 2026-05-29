@@ -21,19 +21,18 @@ import (
 // Cm always persists captured signals to the embedded ClickHouse
 // via internal/chwriter regardless of forwarder state, so a missing
 // or wedged forwarder never costs us the durable copy.
+//
+// `clrk dev` doesn't go through this reconciler — the cm OTLP
+// receiver is wired with an unconditional dev sink (see
+// cmd/controller-manager/main.go, --dev-otlp-fallback-endpoint) that
+// fans every inbound payload to the TUI receiver regardless of EG
+// state. That way the TUI lights up even when no EgressGateway is
+// applied.
 type EgressGatewayOTLPForwardReconciler struct {
 	client.Client
 
 	// Registry is the per-EG forwarder map the receiver reads from.
 	Registry *otelforward.Registry
-
-	// FallbackEndpoint is the OTLP/HTTP URL used as the forward
-	// destination for EgressGateways whose spec.otlp.endpoint is
-	// empty. clrk dev sets this to its in-process TUI receiver
-	// (http://host.docker.internal:14318) so the otel-logs / traces /
-	// token-count panels light up without requiring per-EG endpoint
-	// configuration in example manifests. Empty in prod.
-	FallbackEndpoint string
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch
@@ -59,9 +58,6 @@ func (r *EgressGatewayOTLPForwardReconciler) Reconcile(ctx context.Context, req 
 	spec := clrkv1alpha1.OTLPLogsSinkSpec{}
 	if eg.Spec.OTLP != nil {
 		spec = *eg.Spec.OTLP
-	}
-	if spec.Endpoint == "" && r.FallbackEndpoint != "" {
-		spec.Endpoint = r.FallbackEndpoint
 	}
 	r.Registry.Apply(egRef, spec)
 	return ctrl.Result{}, nil

@@ -1,8 +1,6 @@
 package otelemit
 
 import (
-	"strconv"
-
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 
@@ -12,11 +10,12 @@ import (
 // AgentAttrs is the OTel-attribute counterpart of identityLogFields
 // in internal/worker/sandbox/log.go. Empty UID / Revision /
 // InvocationID are omitted so "absent" is distinguishable from "empty
-// string" at the query layer. Kind renders as the integer kind so log
-// and span joins line up with the slog rendering.
+// string" at the query layer. Kind renders as the CRD Kind name
+// ("TaskAgent" / "DaemonAgent") so downstream attribution (dev TUI,
+// ClickHouse views) can match the enum the rest of the system uses.
 func AgentAttrs(id proxyproto.AgentIdentity) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
-		attribute.String(AttrAgentKind, strconv.Itoa(int(id.Kind))),
+		attribute.String(AttrAgentKind, id.Kind.String()),
 		attribute.String(AttrAgentNamespace, id.Namespace),
 		attribute.String(AttrAgentName, id.Name),
 	}

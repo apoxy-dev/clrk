@@ -111,10 +111,11 @@ func main() {
 		otlpTTLDur         = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
 		otlpAdvertiseURI   = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
 		// devOTLPFallback wires `clrk dev`'s in-process TUI receiver
-		// as a default forward destination for EgressGateways that
-		// don't set spec.otlp.endpoint. Empty in prod (operators set
-		// per-EG endpoints to their real collectors).
-		devOTLPFallback = flag.String("dev-otlp-fallback-endpoint", "", "OTLP/HTTP URL used as the per-EG forward destination for EgressGateways whose spec.otlp.endpoint is empty. clrk dev sets this to its in-process TUI receiver; prod leaves it empty.")
+		// as an unconditional fan-out destination on the cm OTLP
+		// receiver. Every inbound payload is mirrored there regardless
+		// of clrk.egress_gateway attribution, so the TUI lights up
+		// even without an EgressGateway in the cluster. Empty in prod.
+		devOTLPFallback = flag.String("dev-otlp-fallback-endpoint", "", "OTLP/HTTP URL the cm receiver mirrors every inbound payload to. clrk dev sets this to its in-process TUI receiver; prod leaves it empty.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -479,16 +480,26 @@ func main() {
 			}
 		}()
 		forwards := otelforward.NewRegistry(ctx)
-		otelSrv, err := otelreceiver.Start(ctx, *otlpAddr, writer, forwards)
+		// devSink fans every inbound OTLP payload to the `clrk dev`
+		// TUI receiver regardless of clrk.egress_gateway attribution
+		// or EG-registry state. Empty in prod; set to the dev TUI
+		// endpoint by --dev-otlp-fallback-endpoint in `clrk dev`.
+		var devSink *otelforward.Forwarder
+		if *devOTLPFallback != "" {
+			devSink = otelforward.NewForwarder("_dev", clrkv1alpha1.OTLPLogsSinkSpec{Endpoint: *devOTLPFallback})
+			if devSink != nil {
+				go devSink.Run(ctx)
+			}
+		}
+		otelSrv, err := otelreceiver.Start(ctx, *otlpAddr, writer, forwards, devSink)
 		if err != nil {
 			log.Error(err, "Unable to start OTLP receiver", "addr", *otlpAddr)
 			os.Exit(1)
 		}
-		slog.Info("Serving OTLP receiver", "addr", otelSrv.Addr())
+		slog.Info("Serving OTLP receiver", "addr", otelSrv.Addr(), "dev_sink", *devOTLPFallback)
 		if err := (&controller.EgressGatewayOTLPForwardReconciler{
-			Client:           cm.GetClient(),
-			Registry:         forwards,
-			FallbackEndpoint: *devOTLPFallback,
+			Client:   cm.GetClient(),
+			Registry: forwards,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGatewayOTLPForward")
 			os.Exit(1)
@@ -497,6 +508,9 @@ func main() {
 			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			forwards.Shutdown(shutCtx)
+			if devSink != nil {
+				_ = devSink.Close(shutCtx)
+			}
 		}()
 	}
 
