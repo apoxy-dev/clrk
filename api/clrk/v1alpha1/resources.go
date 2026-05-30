@@ -19,6 +19,7 @@ var (
 	_ resource.ObjectWithStatusSubResource = &TaskAgent{}
 	_ rest.SingularNameProvider            = &TaskAgent{}
 	_ resource.StatusSubResource           = &TaskAgentStatus{}
+	_ resourcestrategy.Defaulter           = &TaskAgent{}
 	_ resourcestrategy.Validater           = &TaskAgent{}
 	_ resourcestrategy.ValidateUpdater     = &TaskAgent{}
 
@@ -27,6 +28,7 @@ var (
 	_ resource.ObjectWithStatusSubResource = &DaemonAgent{}
 	_ rest.SingularNameProvider            = &DaemonAgent{}
 	_ resource.StatusSubResource           = &DaemonAgentStatus{}
+	_ resourcestrategy.Defaulter           = &DaemonAgent{}
 	_ resourcestrategy.Validater           = &DaemonAgent{}
 	_ resourcestrategy.ValidateUpdater     = &DaemonAgent{}
 
@@ -35,6 +37,7 @@ var (
 	_ resource.ObjectWithStatusSubResource = &WorkerPool{}
 	_ rest.SingularNameProvider            = &WorkerPool{}
 	_ resource.StatusSubResource           = &WorkerPoolStatus{}
+	_ resourcestrategy.Defaulter           = &WorkerPool{}
 
 	_ runtime.Object                       = &AgentSandboxRevision{}
 	_ resource.Object                      = &AgentSandboxRevision{}
@@ -47,6 +50,7 @@ var (
 	_ resource.ObjectWithStatusSubResource = &EgressGateway{}
 	_ rest.SingularNameProvider            = &EgressGateway{}
 	_ resource.StatusSubResource           = &EgressGatewayStatus{}
+	_ resourcestrategy.Defaulter           = &EgressGateway{}
 
 	_ runtime.Object                       = &EgressL4Route{}
 	_ resource.Object                      = &EgressL4Route{}
@@ -66,21 +70,24 @@ var (
 	_ rest.SingularNameProvider            = &AIProviderRoute{}
 	_ resource.StatusSubResource           = &AIProviderRouteStatus{}
 
-	_ runtime.Object            = &CredentialInjectionPolicy{}
-	_ resource.Object           = &CredentialInjectionPolicy{}
-	_ rest.SingularNameProvider = &CredentialInjectionPolicy{}
+	_ runtime.Object             = &CredentialInjectionPolicy{}
+	_ resource.Object            = &CredentialInjectionPolicy{}
+	_ rest.SingularNameProvider  = &CredentialInjectionPolicy{}
+	_ resourcestrategy.Defaulter = &CredentialInjectionPolicy{}
 
-	_ runtime.Object            = &RateLimitPolicy{}
-	_ resource.Object           = &RateLimitPolicy{}
-	_ rest.SingularNameProvider = &RateLimitPolicy{}
+	_ runtime.Object             = &RateLimitPolicy{}
+	_ resource.Object            = &RateLimitPolicy{}
+	_ rest.SingularNameProvider  = &RateLimitPolicy{}
+	_ resourcestrategy.Defaulter = &RateLimitPolicy{}
 
 	_ runtime.Object            = &LoggingPolicy{}
 	_ resource.Object           = &LoggingPolicy{}
 	_ rest.SingularNameProvider = &LoggingPolicy{}
 
-	_ runtime.Object            = &EgressDenyPolicy{}
-	_ resource.Object           = &EgressDenyPolicy{}
-	_ rest.SingularNameProvider = &EgressDenyPolicy{}
+	_ runtime.Object             = &EgressDenyPolicy{}
+	_ resource.Object            = &EgressDenyPolicy{}
+	_ rest.SingularNameProvider  = &EgressDenyPolicy{}
+	_ resourcestrategy.Defaulter = &EgressDenyPolicy{}
 
 	_ runtime.Object            = &Invocation{}
 	_ resource.Object           = &Invocation{}

@@ -224,8 +224,8 @@ func (r *TaskAgentIngressReconciler) ensureGatewayClass(ctx context.Context) err
 	})
 }
 
-func dynamicBackendName(ta *clrkv1alpha1.TaskAgent) string    { return ta.Name + "-resolver" }
-func extProcPolicyName(ta *clrkv1alpha1.TaskAgent) string     { return ta.Name + "-ext-proc" }
+func dynamicBackendName(ta *clrkv1alpha1.TaskAgent) string      { return ta.Name + "-resolver" }
+func extProcPolicyName(ta *clrkv1alpha1.TaskAgent) string       { return ta.Name + "-ext-proc" }
 func taskAgentEnvoyProxyName(ta *clrkv1alpha1.TaskAgent) string { return "clrk-" + ta.Name }
 
 // desiredEnvoyProxy materializes the per-TaskAgent EnvoyProxy. The
@@ -436,6 +436,12 @@ func desiredGateway(ta *clrkv1alpha1.TaskAgent) *gwapiv1.Gateway {
 	}
 }
 
+// defaultTaskAgentRouteTimeout mirrors the +kubebuilder:default on
+// TaskAgent.Spec.Timeout ("100s"). It is the HTTPRoute timeout fallback
+// when a TaskAgent reaches reconcile with a nil Timeout (some write paths
+// don't apply CRD defaulting), keeping desiredHTTPRoute from panicking.
+const defaultTaskAgentRouteTimeout = "100s"
+
 func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 	pathPrefix := gwapiv1.PathMatchPathPrefix
 
@@ -453,9 +459,15 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 
 	// Peg the route timeout to spec.timeout so cold-start LLM agents
 	// (Claude Code, etc.) don't get cut off by Envoy's 15s HTTPRoute
-	// default. The API server defaults Timeout via the +kubebuilder
-	// tag, so it's always set by the time reconcile observes the object.
-	routeTimeout := gwapiv1.Duration(ta.Spec.Timeout.Duration.String())
+	// default. spec.timeout carries a +kubebuilder:default of "100s", but
+	// not every write path applies CRD defaulting (cron-created
+	// TaskAgents have been observed reaching reconcile with a nil
+	// Timeout), so fall back to that same default rather than nil-deref
+	// the reconcile into a crash loop.
+	routeTimeout := gwapiv1.Duration(defaultTaskAgentRouteTimeout)
+	if ta.Spec.Timeout != nil {
+		routeTimeout = gwapiv1.Duration(ta.Spec.Timeout.Duration.String())
+	}
 
 	return &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{

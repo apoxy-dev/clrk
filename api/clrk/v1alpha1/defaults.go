@@ -1,0 +1,98 @@
+package v1alpha1
+
+import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
+
+// These types are served through the apoxy-cli aggregated apiserver builder,
+// NOT kube-apiserver's CRD machinery, so the +kubebuilder:default markers on
+// their fields are never enforced on the serving path — they are documentation
+// only. To make the documented defaults real, each type below implements
+// resourcestrategy.Defaulter (the compile-time assertions live in resources.go
+// alongside the Validater assertions). The builder registers Default() as a
+// scheme defaulting func via resource.AddToScheme -> Scheme.AddTypeDefaultingFunc,
+// so it fires at decode time: on create/update the default is persisted, and on
+// read it is stamped so clients and controllers observe it. See APO-638 / APO-639.
+//
+// Only load-bearing defaults are stamped. Fields whose nil/zero value is already
+// identical to the default at every consumer (TaskAgent.Spec.WarmPoolSize nil==0,
+// AgentDelivery.Mode ""==Stdin) are intentionally left unstamped to avoid
+// server-side-apply field-ownership churn. Nested defaults are applied only when
+// their parent struct is already present — Default() never allocates an absent
+// optional parent just to stamp a default the user did not opt into.
+
+// DefaultTaskAgentTimeout mirrors the +kubebuilder:default on
+// TaskAgentSpec.Timeout. It is the maximum a single execution runs when the
+// agent author does not set spec.timeout.
+const DefaultTaskAgentTimeout = 100 * time.Second
+
+// defaultBodyCaptureMaxBytes mirrors the +kubebuilder:default on
+// BodyCaptureSpec.MaxBytes (64 KiB per direction).
+const defaultBodyCaptureMaxBytes int32 = 64 * 1024
+
+// Default sets spec.timeout to DefaultTaskAgentTimeout when unset. Without it a
+// timeout-less TaskAgent dereferenced a nil Spec.Timeout in the ingress
+// reconciler (APO-638); the consumer guards remain as defense-in-depth for
+// objects persisted before this defaulter shipped.
+func (r *TaskAgent) Default() {
+	if r.Spec.Timeout == nil {
+		r.Spec.Timeout = &metav1.Duration{Duration: DefaultTaskAgentTimeout}
+	}
+}
+
+// Default sets spec.replicas to 1 when unset.
+func (r *WorkerPool) Default() {
+	if r.Spec.Replicas == nil {
+		r.Spec.Replicas = ptr.To(int32(1))
+	}
+}
+
+// Default sets spec.restartPolicy to Always when unset, matching the
+// decideRestart consumer which already treats "" as Always.
+func (r *DaemonAgent) Default() {
+	if r.Spec.RestartPolicy == "" {
+		r.Spec.RestartPolicy = RestartPolicyAlways
+	}
+}
+
+// Default fills the EgressGateway's documented defaults. The defaultPolicy
+// default is security-load-bearing: an empty defaultPolicy previously routed
+// unmatched traffic as allow-all (fail open) in internal/egress; stamping
+// deny-all makes the gateway fail closed, matching the marker.
+func (r *EgressGateway) Default() {
+	if r.Spec.DefaultPolicy == "" {
+		r.Spec.DefaultPolicy = EgressPolicyDenyAll
+	}
+	if r.Spec.DNS != nil && r.Spec.DNS.LookupFamily == "" {
+		r.Spec.DNS.LookupFamily = EgressDNSLookupV4Preferred
+	}
+	if r.Spec.OTLP != nil && r.Spec.OTLP.CaptureBody != nil && r.Spec.OTLP.CaptureBody.MaxBytes == nil {
+		r.Spec.OTLP.CaptureBody.MaxBytes = ptr.To(defaultBodyCaptureMaxBytes)
+	}
+}
+
+// Default sets spec.secretKey to "token" when unset, matching the credential
+// injection consumer's own "" fallback.
+func (r *CredentialInjectionPolicy) Default() {
+	if r.Spec.SecretKey == "" {
+		r.Spec.SecretKey = "token"
+	}
+}
+
+// Default sets spec.scope to PerAgent when unset.
+func (r *RateLimitPolicy) Default() {
+	if r.Spec.Scope == "" {
+		r.Spec.Scope = RateLimitScopePerAgent
+	}
+}
+
+// Default sets the deny response status to 403 when a denyResponse block is
+// present without an explicit code. It does not allocate an absent denyResponse.
+func (r *EgressDenyPolicy) Default() {
+	if r.Spec.DenyResponse != nil && r.Spec.DenyResponse.StatusCode == 0 {
+		r.Spec.DenyResponse.StatusCode = 403
+	}
+}
