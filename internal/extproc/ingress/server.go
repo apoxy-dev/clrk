@@ -376,6 +376,13 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 // Synthesis means the trace exists end-to-end even when the caller
 // isn't OTel-aware — the egress ext_proc will continue this id on
 // outbound LLM/MCP calls regardless.
+//
+// The synthesized root is random, not derived from the invocation id:
+// the two are deliberately separate identity spaces (see the
+// invocationctx package doc for why). Seeding it from the invocation
+// UUID in this no-inbound-traceparent branch -- so the two ids match in
+// dev/CLI/cron -- is a deferred dev-ergonomics option tracked in
+// apoxy-cloud//docs/clrk-improvements.md.
 func resolveOrSynthesizeParent(hdrs map[string]string) trace.SpanContext {
 	if ctx := tracectx.Extract(context.Background(), hdrs); ctx != nil {
 		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {

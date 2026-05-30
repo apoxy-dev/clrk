@@ -17,6 +17,18 @@
 //     server sees a continuation of the inbound trace, even when the
 //     agent SDK isn't OTel-instrumented.
 //
+// invocation-id is NOT the trace id; they are correlated, not equal.
+// invocation-id is a clrk-minted UUID (unique per request -- also the
+// Invocation metadata.name, the ClickHouse invocation_id, and the PROXY
+// v2 0xE5 TLV), while the trace id is the W3C/OTel id that clrk extracts
+// from the caller's inbound traceparent when present, synthesizing a
+// random root only when absent. They stay separate because a
+// caller-supplied trace must be preserved, and one trace can fan out
+// across many invocations -- so the trace id is not a unique per-request
+// key the way invocation-id has to be. The two are joined on the
+// otel_traces span row (TraceId column + invocation.id attribute), not
+// made equal. See apoxy-cloud//docs/clrk-invocations.md.
+//
 // Storage is in-memory with a TTL reaper. Single controller-manager
 // replica today; restart loses in-flight contexts. An HA story (Redis
 // or similar) is a follow-up.

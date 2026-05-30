@@ -13,7 +13,7 @@ const (
 	TLVAgentName      byte = 0xE2 // UTF-8
 	TLVAgentUID       byte = 0xE3 // UTF-8 (k8s UID string)
 	TLVAgentRevision  byte = 0xE4 // UTF-8 (AgentSandboxRevision name)
-	TLVInvocationID   byte = 0xE5 // UTF-8 (TaskAgent UID; empty for DaemonAgent)
+	TLVInvocationID   byte = 0xE5 // UTF-8 (per-request invocation UUID minted at ingress; empty for DaemonAgent)
 	TLVDstName        byte = 0xE6 // UTF-8 (DNS-bound destination name; empty when nothing was bound)
 	TLVSandboxID      byte = 0xE7 // UTF-8 (worker's opaque SandboxID; demuxes the host-bound IMDS listener and per-sandbox MITM streams)
 )
