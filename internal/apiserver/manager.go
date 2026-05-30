@@ -13,11 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/ch-go"
 	"github.com/ClickHouse/ch-go/chpool"
 	"github.com/go-logr/logr"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserver "k8s.io/apiserver/pkg/server"
@@ -35,6 +37,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
+	"github.com/apoxy-dev/clrk/internal/invevent"
 )
 
 // Option configures the Manager.
@@ -59,6 +62,9 @@ type options struct {
 	clickHouseAddress  string
 	clickHouseDatabase string
 	clickHouseTTLDays  int
+
+	natsProvider              invocation.NATSProvider
+	allowInvocationTestWrites bool
 }
 
 // WithSQLitePath sets the SQLite file path. Use "file::memory:" for in-memory.
@@ -162,6 +168,23 @@ func WithClickHouseTTLDays(d int) Option {
 	return func(o *options) { o.clickHouseTTLDays = d }
 }
 
+// WithNATS supplies the embedded NATS/JetStream server the Invocation
+// pub/sub uses: the materializing consumer, the Watch ordered
+// consumers, and the test-write publisher. When nil (NATS disabled),
+// Invocation Watch degrades to an empty watch and the test-write door
+// stays 405.
+func WithNATS(p invocation.NATSProvider) Option {
+	return func(o *options) { o.natsProvider = p }
+}
+
+// WithAllowInvocationTestWrites opens the header-gated Create/Update
+// door on the top-level Invocation resource (still requires the
+// per-request X-Clrk-Invocation-Write header). Dev/CI only; leave off
+// in production so the system-written billing record can't be forged.
+func WithAllowInvocationTestWrites(allow bool) Option {
+	return func(o *options) { o.allowInvocationTestWrites = allow }
+}
+
 func defaultOptions() *options {
 	return &options{
 		sqliteConnArgs: map[string]string{
@@ -241,6 +264,16 @@ func New() *Manager {
 // ready.
 func (m *Manager) CtrlManager() manager.Manager {
 	return m.ctrlMgr
+}
+
+// InvocationPool returns the shared LazyPool backing the Invocation read
+// model, or nil if startAPIServer hasn't run yet. Callers (the TaskAgent
+// revision controller's active-execution counter) read through it after
+// ReadyCh fires; the pool itself resolves asynchronously as the embedded
+// ClickHouse comes up, and a Do before resolution blocks (bounded by the
+// caller's ctx) then returns "storage unavailable" if the dial failed.
+func (m *Manager) InvocationPool() *invocation.LazyPool {
+	return m.invPool
 }
 
 // Start starts the apiserver, waits for readyz, builds the ctrl.Manager, and
@@ -346,29 +379,27 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	// rest.Storage rather than the builder's kine-backed generic
 	// store.
 	//
-	// The CH dial happens in a goroutine: cmd/controller-manager
-	// starts the apiserver Manager before the embedded clickhouse
-	// supervisor binds 9000, so a synchronous dial would hold the
-	// /healthz bind and trip the pod's liveness probe. Storage's
-	// LazyPool Doer blocks individual Invocation requests until the
-	// pool resolves; everything else (Discovery, kine-backed
-	// resources, ctrl.Manager) is unaffected by CH availability.
+	// Both ClickHouse and the JetStream bus come up in a background
+	// goroutine: cmd/controller-manager starts the apiserver Manager
+	// before the embedded clickhouse supervisor binds 9000 and before
+	// the NATS server accepts connections, so synchronous setup would
+	// hold the /healthz bind and trip the pod's liveness probe. The
+	// LazyPool Doer blocks individual Invocation requests until CH
+	// resolves; the Bus leaves Watch as an empty watch and the
+	// test-write door at 405 until NATS resolves; everything else
+	// (Discovery, kine-backed resources, ctrl.Manager) is unaffected.
 	lazyPool := invocation.NewLazyPool()
 	m.invPool = lazyPool
-	go func() {
-		chPool, err := dialClickHouseWithRetry(ctx, o)
-		if err != nil {
-			lazyPool.Set(nil, err)
-			return
-		}
-		if err := invocation.EnsureTable(ctx, chPool, o.clickHouseTTLDays); err != nil {
-			chPool.Close()
-			lazyPool.Set(nil, err)
-			return
-		}
-		lazyPool.Set(chPool, nil)
-	}()
+	highWater := new(atomic.Uint64)
+	bus := invocation.NewBus()
+	go m.runInvocationBackend(ctx, lazyPool, bus, highWater)
 
+	deps := invocation.Deps{
+		Pool:            lazyPool,
+		HighWater:       highWater,
+		Bus:             bus,
+		AllowTestWrites: o.allowInvocationTestWrites,
+	}
 	invocationGR := schema.GroupResource{
 		Group:    clrkv1alpha1.GroupName,
 		Resource: "invocations",
@@ -384,7 +415,7 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	} {
 		srvBuilder = srvBuilder.WithStorage(
 			clrkv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
-			invocation.NewProvider(lazyPool, invocationGR, "invocation", sub.parentKind),
+			invocation.NewProvider(deps, invocationGR, "invocation", sub.parentKind),
 		)
 	}
 
@@ -430,6 +461,27 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			// FlowControl post-start hook LISTs FlowSchema / PriorityLevelConfiguration
 			// against CoreAPI, which we don't run. Nilling it prevents readyz from failing.
 			c.FlowControl = nil
+			// Test-write door: when enabled, an outermost middleware
+			// stamps the request context for requests carrying the
+			// X-Clrk-Invocation-Write header so the Invocation Storage
+			// permits Create/Update on the top-level resource. Off by
+			// default, so production never installs this middleware and
+			// the header is inert.
+			if o.allowInvocationTestWrites {
+				prev := c.BuildHandlerChainFunc
+				if prev == nil {
+					prev = apiserver.DefaultBuildHandlerChain
+				}
+				c.BuildHandlerChainFunc = func(apiHandler http.Handler, cfg *apiserver.Config) http.Handler {
+					chain := prev(apiHandler, cfg)
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Header.Get(invocation.TestWriteHeader) == invocation.TestWriteHeaderValue {
+							r = r.WithContext(invocation.WithTestWrite(r.Context()))
+						}
+						chain.ServeHTTP(w, r)
+					})
+				}
+			}
 			return c
 		}).
 		WithoutEtcd().
@@ -466,6 +518,58 @@ func newLoopbackConfig(hostPort string) *rest.Config {
 // LazyPool returns "storage unavailable" promptly and the rest of the
 // apiserver is unaffected.
 const dialDeadline = 30 * time.Second
+
+// runInvocationBackend brings up the Invocation read/write backend in
+// the background so apiserver startup never blocks on ClickHouse or
+// NATS. It dials CH, ensures the events table, and resolves the
+// LazyPool; then (when NATS is configured) connects in-process,
+// resolves the Bus with a JetStream handle + Publisher, and runs the
+// JetStream->ClickHouse materializer for ctx's lifetime. Failures are
+// logged and leave the storage degraded (Invocation reads/writes
+// unavailable) rather than crashing the control plane.
+func (m *Manager) runInvocationBackend(ctx context.Context, lazyPool *invocation.LazyPool, bus *invocation.Bus, highWater *atomic.Uint64) {
+	o := m.opts
+	chPool, err := dialClickHouseWithRetry(ctx, o)
+	if err != nil {
+		lazyPool.Set(nil, err)
+		return
+	}
+	if err := invocation.EnsureTable(ctx, chPool, o.clickHouseTTLDays); err != nil {
+		chPool.Close()
+		lazyPool.Set(nil, err)
+		return
+	}
+	lazyPool.Set(chPool, nil)
+
+	if o.natsProvider == nil {
+		// NATS disabled: Watch stays an empty watch and the test-write
+		// door stays 405. List/Get still work against ClickHouse.
+		return
+	}
+	if err := o.natsProvider.Ready(ctx); err != nil {
+		if ctx.Err() == nil {
+			slog.Error("Invocation backend: NATS not ready", "err", err)
+		}
+		return
+	}
+	nc, err := o.natsProvider.Connect("clrk-apiserver-invocations")
+	if err != nil {
+		slog.Error("Invocation backend: NATS connect", "err", err)
+		return
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		slog.Error("Invocation backend: jetstream", "err", err)
+		return
+	}
+	bus.Set(js, invevent.NewPublisher(js))
+
+	// Materialize JetStream -> ClickHouse for the process lifetime.
+	if err := invocation.NewConsumer(lazyPool, js, highWater).Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("Invocation materializer exited", "err", err)
+	}
+}
 
 // dialClickHouseWithRetry calls chpool.Dial until it succeeds, ctx is
 // cancelled, or dialDeadline elapses. Each attempt has a 5s timeout

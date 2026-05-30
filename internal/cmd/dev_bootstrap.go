@@ -136,7 +136,16 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							"--ingress-extproc-host=" + cmAccountName + "." + devClrkNamespace + ".svc.cluster.local",
 							"--egressgateway-controller=true",
 							"--grpc-advertise-uri=" + cmAccountName + "." + devClrkNamespace + ".svc.cluster.local:9443",
+							// Worker pods dial this for Invocation lifecycle
+							// publishing — the dev cm Service DNS + NATS port,
+							// not the default in-cluster controller-manager name.
+							fmt.Sprintf("--nats-advertise-addr=%s.%s.svc.cluster.local:%d", cmAccountName, devClrkNamespace, ports.NATSClientPort),
 							"--dev-otlp-fallback-endpoint=" + otelEndpoint,
+							// Dev/CI: open the header-gated Invocation
+							// test-write door so integration tests can seed
+							// invocations via the API without standing up the
+							// ext_proc/worker publishers.
+							"--enable-invocation-test-writes=true",
 						},
 						Env: []corev1.EnvVar{
 							// envoy-go and envoyproxy/go-control-plane both register
@@ -158,6 +167,10 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
 							{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
 							{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
+							// NATS/JetStream client port — worker pods dial it
+							// via this Service to publish Invocation lifecycle
+							// events to the cm's embedded server.
+							{Name: "nats", ContainerPort: ports.NATSClientPort, Protocol: corev1.ProtocolTCP},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "data", MountPath: "/var/lib/clrk"},
@@ -233,6 +246,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 				{Name: "health", Port: 8082, TargetPort: intstr.FromInt(8082), Protocol: corev1.ProtocolTCP},
 				{Name: "admin", Port: 8085, TargetPort: intstr.FromInt(8085), Protocol: corev1.ProtocolTCP},
 				{Name: "otlp", Port: 4318, TargetPort: intstr.FromInt(4318), Protocol: corev1.ProtocolTCP},
+				{Name: "nats", Port: ports.NATSClientPort, TargetPort: intstr.FromInt(int(ports.NATSClientPort)), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}

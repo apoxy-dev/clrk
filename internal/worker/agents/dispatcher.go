@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,6 +80,12 @@ type Dispatcher struct {
 	// retries on the next worker) while in-flight requests finish
 	// inside the cooperative srv.Shutdown grace.
 	draining atomic.Bool
+
+	// invPub publishes Running + terminal Invocation lifecycle events to
+	// the controller-manager's JetStream (APO-618). Nil when no cm NATS
+	// address is configured; emitInvocation is then a no-op so dispatch
+	// is unaffected. Its Run loop is started by RunInvocationPublisher.
+	invPub *invPublisher
 }
 
 // WarmAcquirer is the subset of *WarmPool the dispatcher uses on the
@@ -113,13 +120,19 @@ type DispatcherConfig struct {
 	Namespace   string
 	Active      *activeCounter
 	MetadataReg *metadata.Registry
+
+	// CMNATSAddr is the controller-manager's NATS/JetStream client
+	// address (host:port) the dispatcher publishes Invocation lifecycle
+	// events to. Empty disables publishing. Sourced from
+	// invevent.CMNATSAddrEnv, injected by the WorkerPool controller.
+	CMNATSAddr string
 }
 
 // NewDispatcher constructs a Dispatcher. Production callers pass a
 // real *sandbox.Manager (which satisfies SandboxRuntime) and a real
 // *egress.Router; tests pass fakes / nil where appropriate.
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
-	return &Dispatcher{
+	d := &Dispatcher{
 		client:     cfg.Client,
 		sandboxMgr: cfg.Runtime,
 		router:     cfg.Router,
@@ -128,6 +141,20 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		active:     cfg.Active,
 		metaReg:    cfg.MetadataReg,
 	}
+	if cfg.CMNATSAddr != "" {
+		d.invPub = newInvPublisher(cfg.CMNATSAddr, cfg.PodName)
+	}
+	return d
+}
+
+// RunInvocationPublisher drains and ships queued Invocation lifecycle
+// events until ctx is cancelled. The worker runtime starts it in a
+// goroutine. No-op (returns nil) when no cm NATS address was configured.
+func (d *Dispatcher) RunInvocationPublisher(ctx context.Context) error {
+	if d.invPub == nil {
+		return nil
+	}
+	return d.invPub.Run(ctx)
 }
 
 // SetWarmPool installs the warm-pool acquirer used by the dispatcher's
@@ -198,6 +225,15 @@ type reqCtx struct {
 	identity     proxyproto.AgentIdentity
 	invocationID string
 	release      func()
+
+	// trigger and created stamp the Invocation lifecycle snapshots the
+	// dispatcher publishes (APO-618). created is captured once at
+	// request receipt and reused for every emitted phase so the
+	// read-side argMax (which takes the latest event's whole object)
+	// reports a stable creationTimestamp instead of drifting forward by
+	// the execution duration on the terminal event.
+	trigger clrkv1alpha1.InvocationTriggerType
+	created metav1.Time
 }
 
 // deliveryState holds the per-request transport plumbing decided by
@@ -229,6 +265,17 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer rc.release()
 	defer d.active.dec(rc.key)
 
+	// Guarantee exactly one terminal lifecycle event per admitted
+	// invocation. We've committed to running it (id resolved, semaphore
+	// held), so it must not linger non-terminal and inflate
+	// ActiveExecutions if setup fails before the agent runs. Default to
+	// Failed; the happy path upgrades `terminal` to the real outcome
+	// after drainResponse. Registered before the sandbox/delivery defers
+	// so it runs after them but before rc.cancel (LIFO) — terminalPhase
+	// still observes the live deadline state.
+	terminal := clrkv1alpha1.InvocationPhaseFailed
+	defer func() { d.emitInvocation(rc, terminal) }()
+
 	sb, sandboxID, bundle, ok := d.acquireSandbox(w, rc)
 	if !ok {
 		return
@@ -240,6 +287,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Sandbox is running — emit Running before we block on the agent.
+	d.emitInvocation(rc, clrkv1alpha1.InvocationPhaseRunning)
 	if ds.mdUnregister != nil {
 		defer ds.mdUnregister()
 	}
@@ -252,7 +301,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ds.mdEntry.CancelIfPending()
 	}
 
-	d.drainResponse(w, rc, ds, exitCode, waitErr)
+	delivered := d.drainResponse(w, rc, ds, exitCode, waitErr)
+	terminal = terminalPhase(rc, exitCode, waitErr, delivered)
 }
 
 // acceptRequest parses headers, looks up the TaskAgent + revision,
@@ -353,6 +403,8 @@ func (d *Dispatcher) acceptRequest(w http.ResponseWriter, r *http.Request) (*req
 		identity:     identity,
 		invocationID: invocationID,
 		release:      release,
+		trigger:      triggerTypeFromHeader(r.Header.Get(ports.HeaderTrigger)),
+		created:      metav1.Now(),
 	}, true
 }
 
@@ -543,8 +595,11 @@ func (d *Dispatcher) startAndSetupDelivery(w http.ResponseWriter, r *http.Reques
 // the appropriate HTTP error. Headers may already be flushed when
 // this runs (streaming Stdin mode), in which case errors are folded
 // into the (best-effort) HeaderExitCode trailer rather than a fresh
-// http.Error.
-func (d *Dispatcher) drainResponse(w http.ResponseWriter, rc *reqCtx, ds *deliveryState, exitCode int, waitErr error) {
+// http.Error. It returns whether any response bytes reached the wire;
+// the caller uses that to classify the terminal phase, since a
+// delivered response means the client saw a 2xx even if the
+// post-delivery runsc wait raced.
+func (d *Dispatcher) drainResponse(w http.ResponseWriter, rc *reqCtx, ds *deliveryState, exitCode int, waitErr error) bool {
 	success := waitErr == nil && exitCode == 0
 	wroteAnyBytes := false
 
@@ -616,6 +671,7 @@ func (d *Dispatcher) drainResponse(w http.ResponseWriter, rc *reqCtx, ds *delive
 		// always POST.
 		http.Error(w, "agent did not post a response", http.StatusBadGateway)
 	}
+	return wroteAnyBytes
 }
 
 // resolveInvocationID returns the per-request invocation id used as
@@ -629,6 +685,72 @@ func resolveInvocationID(h http.Header) string {
 		return v
 	}
 	return cloudevents.ResolveID(cloudevents.HTTPHeader(h))
+}
+
+// triggerTypeFromHeader maps the inbound X-Clrk-Trigger value (set to
+// "http" by the ingress HTTPRoute filter and "cron" by the cron HTTP
+// invoker) onto the Invocation trigger enum. Unknown/empty defaults to
+// HTTP — the overwhelmingly common worker path is ingress-routed HTTP.
+func triggerTypeFromHeader(v string) clrkv1alpha1.InvocationTriggerType {
+	switch strings.ToLower(v) {
+	case "cron":
+		return clrkv1alpha1.InvocationTriggerCron
+	case "cli":
+		return clrkv1alpha1.InvocationTriggerCLI
+	default:
+		return clrkv1alpha1.InvocationTriggerHTTP
+	}
+}
+
+// terminalPhase classifies a completed execution into its terminal
+// Invocation phase, mirroring the client-visible outcome drainResponse
+// produced. A deadline-exceeded context is Timeout (checked first, since
+// it can coincide with a nonzero exit). A wait error means runsc could
+// not read the exit status — typical for an agent that exits faster than
+// the wait can observe it (`runsc wait: exit status 128: ... exit status
+// is unavailable`); if the response still reached the client (delivered)
+// that is a success, otherwise Failed. A reliably-captured nonzero exit
+// is Failed; a clean zero exit is Succeeded.
+func terminalPhase(rc *reqCtx, exitCode int, waitErr error, delivered bool) clrkv1alpha1.InvocationPhase {
+	switch {
+	case rc.ctx.Err() == context.DeadlineExceeded:
+		return clrkv1alpha1.InvocationPhaseTimeout
+	case waitErr != nil:
+		if delivered {
+			return clrkv1alpha1.InvocationPhaseSucceeded
+		}
+		return clrkv1alpha1.InvocationPhaseFailed
+	case exitCode != 0:
+		return clrkv1alpha1.InvocationPhaseFailed
+	default:
+		return clrkv1alpha1.InvocationPhaseSucceeded
+	}
+}
+
+// emitInvocation publishes a complete Invocation snapshot for the given
+// lifecycle phase. The snapshot reproduces the spec the ingress birth
+// event set (parentRef + trigger) so the read-side argMax, which adopts
+// the latest event's whole object, doesn't flip those fields on the
+// worker's later events. No-op when no cm NATS address is configured.
+func (d *Dispatcher) emitInvocation(rc *reqCtx, phase clrkv1alpha1.InvocationPhase) {
+	if d.invPub == nil {
+		return
+	}
+	d.invPub.enqueue(&clrkv1alpha1.Invocation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              rc.invocationID,
+			Namespace:         rc.ns,
+			CreationTimestamp: rc.created,
+		},
+		Spec: clrkv1alpha1.InvocationSpec{
+			ParentRef: clrkv1alpha1.InvocationParentRef{
+				Kind: clrkv1alpha1.InvocationParentTaskAgent,
+				Name: rc.name,
+			},
+			Trigger: clrkv1alpha1.InvocationTrigger{Type: rc.trigger},
+		},
+		Status: clrkv1alpha1.InvocationStatus{Phase: phase},
+	})
 }
 
 // readBodyBounded reads up to limit bytes from r and returns them.

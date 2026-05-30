@@ -26,6 +26,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/admin"
 	"github.com/apoxy-dev/clrk/internal/apiserver"
+	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/chwriter"
 	"github.com/apoxy-dev/clrk/internal/clickhouse"
@@ -38,6 +39,7 @@ import (
 	ingressextproc "github.com/apoxy-dev/clrk/internal/extproc/ingress"
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
+	clrknats "github.com/apoxy-dev/clrk/internal/nats"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/otelforward"
 	"github.com/apoxy-dev/clrk/internal/otelreceiver"
@@ -107,15 +109,36 @@ func main() {
 		// inbound signal is persisted to the embedded ClickHouse via
 		// internal/chwriter and best-effort re-exported to a per-EG
 		// customer endpoint via internal/otelforward.
-		otlpAddr           = flag.String("otlp-addr", ":4318", "Bind address for the OTLP/HTTP receiver that captures producer signals into ClickHouse and re-exports to customer endpoints. Empty disables the receiver.")
-		otlpTTLDur         = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
-		otlpAdvertiseURI   = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
+		otlpAddr         = flag.String("otlp-addr", ":4318", "Bind address for the OTLP/HTTP receiver that captures producer signals into ClickHouse and re-exports to customer endpoints. Empty disables the receiver.")
+		otlpTTLDur       = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
+		otlpAdvertiseURI = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
 		// devOTLPFallback wires `clrk dev`'s in-process TUI receiver
 		// as an unconditional fan-out destination on the cm OTLP
 		// receiver. Every inbound payload is mirrored there regardless
 		// of clrk.egress_gateway attribution, so the TUI lights up
 		// even without an EgressGateway in the cluster. Empty in prod.
 		devOTLPFallback = flag.String("dev-otlp-fallback-endpoint", "", "OTLP/HTTP URL the cm receiver mirrors every inbound payload to. clrk dev sets this to its in-process TUI receiver; prod leaves it empty.")
+		// Embedded NATS/JetStream: the cm process runs an in-process
+		// nats-server with JetStream as the transport for Invocation
+		// lifecycle events. Worker pods publish to it over the cm
+		// Service (so the client port binds a wildcard host, not
+		// loopback); cm-local clients (the JetStream->ClickHouse
+		// consumer, ingress ext_proc publisher, and Invocation Watch)
+		// connect over an in-process pipe. Empty addr disables it.
+		natsAddr     = flag.String("embedded-nats-addr", fmt.Sprintf("0.0.0.0:%d", clrknats.DefaultPort), "Bind address for the embedded NATS/JetStream client port. Worker pods dial this via the cm Service; cm-local clients use in-process connections. Empty disables the server.")
+		natsStoreDir = flag.String("nats-store-dir", clrknats.DefaultStoreDir, "On-disk JetStream store for the embedded NATS server. PVC-backed in the cm pod so the durable INVOCATIONS stream survives restarts.")
+		natsMaxAge   = flag.Duration("nats-stream-max-age", 72*time.Hour, "Retention window for the INVOCATIONS JetStream stream. Bounds how far back a Watch can resume; ClickHouse (separate TTL) is the long-term store.")
+		// natsAdvertiseAddr is the cm NATS client address (host:port)
+		// stamped onto worker pods as CLRK_CM_NATS_ADDR. Workers dial it
+		// over the cm Service to publish Running + terminal Invocation
+		// lifecycle events. Defaults to the in-cluster cm Service DNS;
+		// `clrk dev` overrides it with the dev Service name.
+		natsAdvertiseAddr = flag.String("nats-advertise-addr", fmt.Sprintf("controller-manager.%s.svc.cluster.local:%d", runtimeNS, clrknats.DefaultPort), "NATS client address stamped onto worker pods as CLRK_CM_NATS_ADDR for Invocation lifecycle publishing. Empty disables worker-side publishing.")
+		// Test-write door for the top-level Invocation resource. Off by
+		// default so the system-written billing record can't be forged;
+		// dev/CI sets it true to seed invocations via the API (still
+		// requires the per-request X-Clrk-Invocation-Write header).
+		enableInvTestWrites = flag.Bool("enable-invocation-test-writes", false, "Open the header-gated Create/Update door on the top-level Invocation resource. Dev/CI only.")
 	)
 	// Read KUBECONFIG from env rather than a flag — sigs.k8s.io/controller-runtime
 	// already registers a --kubeconfig flag via init() and we'd collide with it.
@@ -136,10 +159,45 @@ func main() {
 	mgr := apiserver.New()
 	ctx := ctrl.SetupSignalHandler()
 
+	// Embedded NATS/JetStream — the transport for the Invocation write
+	// path. Created before the apiserver Manager starts so it can be
+	// handed to the Invocation storage (Watch + test-write publisher)
+	// via WithNATS; the apiserver's background goroutine connects to it
+	// in-process once it's ready. Workers publish to it over the cm
+	// Service; empty --embedded-nats-addr disables it (cm still boots,
+	// Invocation lifecycle recording simply unavailable).
+	natsErrCh := make(chan error, 1)
+	var natsSrv *clrknats.Server
+	if *natsAddr != "" {
+		host, port, err := splitListenAddr(*natsAddr, clrknats.DefaultPort, "0.0.0.0")
+		if err != nil {
+			log.Error(err, "Invalid --embedded-nats-addr", "addr", *natsAddr)
+			os.Exit(1)
+		}
+		natsSrv, err = clrknats.New(
+			clrknats.WithListen(host, port),
+			clrknats.WithStoreDir(*natsStoreDir),
+			clrknats.WithStreamMaxAge(*natsMaxAge),
+		)
+		if err != nil {
+			log.Error(err, "Unable to construct embedded NATS server")
+			os.Exit(1)
+		}
+		go func() {
+			if err := natsSrv.Run(ctx); err != nil {
+				natsErrCh <- err
+			}
+		}()
+	}
+
 	opts := []apiserver.Option{
 		apiserver.WithSQLitePath(*dbPath),
 		apiserver.WithBindAddress(*bindAddr),
 		apiserver.WithBindPort(*bindPort),
+		apiserver.WithAllowInvocationTestWrites(*enableInvTestWrites),
+	}
+	if natsSrv != nil {
+		opts = append(opts, apiserver.WithNATS(natsSrv))
 	}
 	if *insecureAllowPub {
 		opts = append(opts, apiserver.WithInsecureAllowPublic())
@@ -235,9 +293,18 @@ func main() {
 		log.Error(err, "Unable to register controller", "controller", "WorkerPoolStatus")
 		os.Exit(1)
 	}
+	// ActiveExecutions counter sourced from the Invocation read model
+	// (APO-620). Shares the apiserver's LazyPool — resolves as the
+	// embedded ClickHouse comes up. Left nil (reconciler falls back to the
+	// per-worker WorkerStatus sum) when the pool isn't wired.
+	var invActiveCounter controller.InvocationActiveCounter
+	if pool := mgr.InvocationPool(); pool != nil {
+		invActiveCounter = invocation.NewActiveCounter(pool, 2*time.Second)
+	}
 	if err := (&controller.TaskAgentRevisionReconciler{
-		Client: cm.GetClient(),
-		Scheme: cm.GetScheme(),
+		Client:     cm.GetClient(),
+		Scheme:     cm.GetScheme(),
+		ActiveExec: invActiveCounter,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "TaskAgentRevision")
 		os.Exit(1)
@@ -315,10 +382,23 @@ func main() {
 	// WorkerPool → Deployment/Service. Runs in every mode; the legacy
 	// dev-only skip (workers as docker containers) is retired now that
 	// `clrk dev` runs workers as Pods.
+	//
+	// Only advertise the cm NATS address to workers when the embedded
+	// server is actually running. --nats-advertise-addr defaults to a
+	// non-empty Service DNS, so without this guard a cm started with an
+	// empty --embedded-nats-addr (NATS disabled) would still stamp
+	// CLRK_CM_NATS_ADDR onto every worker, which would then dial a port
+	// that never binds and silently drop lifecycle events into a full
+	// outbox.
+	cmNATSAddr := ""
+	if natsSrv != nil {
+		cmNATSAddr = *natsAdvertiseAddr
+	}
 	if err := (&controller.WorkerPoolDeploymentReconciler{
 		Client:         cm.GetClient(),
 		Scheme:         cm.GetScheme(),
 		CMOTLPEndpoint: *otlpAdvertiseURI,
+		CMNATSAddr:     cmNATSAddr,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
 		os.Exit(1)
@@ -416,6 +496,13 @@ func main() {
 		}
 	}()
 	defer ingressGRPC.GracefulStop()
+	// Publish Dispatched/Rejected Invocation lifecycle events from the
+	// ingress admission path to the embedded JetStream stream (APO-617).
+	// Connects in-process once NATS is ready; guarded so a typed-nil
+	// provider never reaches the publisher. No-op when NATS is disabled.
+	if natsSrv != nil {
+		go ingressSrv.RunInvocationPublisher(ctx, natsSrv)
+	}
 
 	egErrCh := make(chan error, 1)
 	if clusterCfg != nil && (*ingressController || *egController) {
@@ -547,6 +634,11 @@ func main() {
 			log.Error(err, "OTLP chwriter exited; tearing down")
 			os.Exit(1)
 		}
+	case err := <-natsErrCh:
+		if err != nil {
+			log.Error(err, "Embedded NATS server exited; tearing down")
+			os.Exit(1)
+		}
 	}
 }
 
@@ -562,6 +654,30 @@ func parseCRDMode(s string) (crds.Mode, error) {
 	default:
 		return 0, fmt.Errorf("unknown crd-install-mode %q (want always|if-missing|skip)", s)
 	}
+}
+
+// splitListenAddr parses a "host:port" or ":port" listen spec, applying
+// defaultHost when the host is empty and defaultPort when the port is
+// missing/invalid. Unlike splitGRPCAddr it preserves a wildcard host
+// (0.0.0.0) so the listener is reachable off-box — the embedded NATS
+// client port must accept connections from worker pods.
+func splitListenAddr(addr string, defaultPort int, defaultHost string) (string, int, error) {
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, fmt.Errorf("parse %q: %w", addr, err)
+	}
+	if h == "" {
+		h = defaultHost
+	}
+	port := defaultPort
+	if p != "" {
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			return "", 0, fmt.Errorf("parse port in %q: %w", addr, err)
+		}
+		port = v
+	}
+	return h, port, nil
 }
 
 // splitGRPCAddr splits a "host:port" or ":port" listener spec into a

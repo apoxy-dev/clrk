@@ -131,7 +131,17 @@ func (r *Runtime) Start(ctx context.Context) error {
 		Namespace:   r.Namespace,
 		Active:      active,
 		MetadataReg: metaReg,
+		CMNATSAddr:  r.CMNATSAddr,
 	})
+	// Ship Running + terminal Invocation lifecycle events to the cm's
+	// JetStream (APO-618). No-op when CMNATSAddr is empty; the in-memory
+	// outbox + nats.go reconnect keep terminal events durable across a cm
+	// bounce while this worker stays up.
+	go func() {
+		if err := disp.RunInvocationPublisher(ctx); err != nil {
+			log.Error(err, "Invocation publisher exited")
+		}
+	}()
 
 	// Warm pool shares the activeCounter's notifier so warm
 	// fills/evictions push deltas to the WorkerStatusService stream

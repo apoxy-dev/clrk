@@ -34,6 +34,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
+	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
@@ -72,6 +73,15 @@ type Server struct {
 	// — New seeds it with the caller-supplied emitter (or
 	// otelemit.Noop() if nil) so Process can Load unconditionally.
 	emitter atomic.Pointer[emitterCell]
+
+	// invPub publishes Invocation lifecycle birth events (Dispatched /
+	// Rejected) to the JetStream INVOCATIONS stream. Nil until the
+	// controller-manager wires it via RunInvocationPublisher once the
+	// embedded NATS server is ready; nil-safe so dispatch works
+	// unchanged when NATS is disabled or still starting. See
+	// invpublish.go.
+	invPub   atomic.Pointer[invevent.Publisher]
+	invQueue chan *clrkv1alpha1.Invocation
 }
 
 // New constructs an ingress ext_proc server. A nil Emitter falls back
@@ -84,6 +94,7 @@ func New(c client.Client, picker Picker, invocations *invocationctx.Store, em ot
 		client:      c,
 		picker:      picker,
 		invocations: invocations,
+		invQueue:    make(chan *clrkv1alpha1.Invocation, invQueueSize),
 	}
 	s.emitter.Store(&emitterCell{em: em})
 	return s
@@ -211,9 +222,23 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		return immediateResponse(typev3.StatusCode_InternalServerError, "clrk: TaskAgent lookup failed")
 	}
 
+	// Mint the per-invocation id as soon as the parent TaskAgent is
+	// resolved, so the Dispatched (accept) and Rejected (capacity /
+	// readiness denial) lifecycle events below all carry the same id. A
+	// fresh UUID, decoupled from any caller-set idempotency key: this is
+	// what flows through PROXY v2 TLVs to the egress ext_proc as
+	// invocation.id, the lookup key for the invocationctx store, and (on
+	// accept) the X-Clrk-Invocation-Id the dispatcher pins into the
+	// sandbox before Start. Denials reachable before this point (bad
+	// header, TaskAgent not found, lookup error) have no resolvable
+	// parent agent, so they record no Invocation.
+	invocationID := uuid.NewString()
+	span.SetAttributes(attribute.String(otelemit.AttrInvocationID, invocationID))
+
 	if ta.Status.LatestReadyRevisionName == "" {
 		slog.Warn("ingress ext_proc: TaskAgent has no ready revision", "ns", ns, "name", name)
 		stampOutcome(span, otelemit.IngressOutcomeNoReadyRevision, 503)
+		s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: TaskAgent has no ready revision")
 	}
 
@@ -241,10 +266,12 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		if pick.AlreadyAtCap {
 			slog.Warn("ingress ext_proc: TaskAgent at MaxConcurrent", "ns", ns, "name", name)
 			stampOutcome(span, otelemit.IngressOutcomeAtMaxConcurrent, 429)
+			s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
 			return immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: TaskAgent at MaxConcurrent across the cluster")
 		}
 		slog.Warn("ingress ext_proc: no ready worker", "ns", ns, "name", name, "pool", pool, "revision", ta.Status.LatestReadyRevisionName)
 		stampOutcome(span, otelemit.IngressOutcomeNoReadyWorker, 503)
+		s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: no ready worker for TaskAgent")
 	}
 
@@ -274,13 +301,10 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		},
 	}
 
-	// Per-invocation id: a fresh UUID, decoupled from any caller-set
-	// idempotency key. This is what flows through PROXY v2 TLVs to the
-	// egress ext_proc as invocation.id and is the lookup key for the
-	// invocationctx store. The dispatcher reads HeaderInvocationID and
-	// pins it into the sandbox's IdentityDialer before Start.
-	invocationID := uuid.NewString()
-	span.SetAttributes(attribute.String(otelemit.AttrInvocationID, invocationID))
+	// Stamp the per-invocation id (minted above when the parent
+	// resolved) onto the request: the dispatcher reads HeaderInvocationID
+	// and pins it into the sandbox's IdentityDialer before Start, and it
+	// flows through PROXY v2 TLVs to the egress ext_proc as invocation.id.
 	setHeaders = append(setHeaders, &corev3.HeaderValueOption{
 		Header: &corev3.HeaderValue{
 			Key:      ports.HeaderInvocationID,
@@ -334,6 +358,7 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 	mutation := &extprocv3.HeaderMutation{SetHeaders: setHeaders}
 
 	stampOutcome(span, otelemit.IngressOutcomeOK, 200)
+	s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseDispatched)
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{

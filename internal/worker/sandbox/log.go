@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -101,12 +102,37 @@ func (w *sandboxLineWriter) emit(line string) {
 	}
 }
 
-func openAgentLogFile(rootDir, namespace, name string) (*os.File, error) {
+// openAgentLogFile opens the file the worker tees a sandbox's stdio to.
+// With an invocation id (TaskAgent dispatch) it opens a per-invocation
+// file and best-effort relinks the per-agent path to it so `clrk agents
+// logs <name>` follows the latest run while `<name>/<id>` can tail a
+// specific one. Without an id (DaemonAgent) it keeps the per-agent file
+// directly.
+func openAgentLogFile(rootDir, namespace, name, invocationID string) (*os.File, error) {
 	if rootDir == "" {
 		return nil, fmt.Errorf("logs dir not configured")
 	}
-	return os.OpenFile(workerlog.AgentPath(rootDir, namespace, name),
-		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if invocationID == "" {
+		return os.OpenFile(workerlog.AgentPath(rootDir, namespace, name),
+			os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	}
+	path := workerlog.InvocationPath(rootDir, namespace, name, invocationID)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	// Point the per-agent path at this (latest) invocation's file.
+	// Concurrent invocations of the same agent race here; last-writer
+	// wins and each invocation's own file stays intact, so a stale or
+	// transiently-missing symlink only affects `logs <name>`, never the
+	// per-invocation logs. Relative target keeps the link valid
+	// regardless of how the dir is mounted.
+	agentPath := workerlog.AgentPath(rootDir, namespace, name)
+	_ = os.Remove(agentPath)
+	if err := os.Symlink(filepath.Base(path), agentPath); err != nil {
+		slog.Warn("Linking per-agent log to latest invocation", "agent", name, "namespace", namespace, "err", err)
+	}
+	return f, nil
 }
 
 // identityLogFields returns slog key/value args for the populated

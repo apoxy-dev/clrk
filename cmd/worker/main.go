@@ -13,6 +13,7 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/config"
+	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/worker"
 )
 
@@ -71,11 +72,12 @@ func main() {
 	namespace := os.Getenv("POD_NAMESPACE")
 
 	if err := mgr.Add(&worker.Runtime{
-		Client:    mgr.GetClient(),
-		Manager:   mgr,
-		PoolName:  poolName,
-		PodName:   podName,
-		Namespace: namespace,
+		Client:     mgr.GetClient(),
+		Manager:    mgr,
+		PoolName:   poolName,
+		PodName:    podName,
+		Namespace:  namespace,
+		CMNATSAddr: os.Getenv(invevent.CMNATSAddrEnv),
 	}); err != nil {
 		log.Error(err, "Unable to add worker runtime")
 		os.Exit(1)

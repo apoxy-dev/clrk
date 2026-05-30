@@ -46,6 +46,14 @@ const WorkerIMDSPort int32 = 8092
 // like they always have.
 const WorkerEgressPort int32 = 8093
 
+// NATSClientPort is the client port the controller-manager's embedded
+// NATS/JetStream server listens on. Worker pods dial it via the cm
+// Service to publish Invocation lifecycle events; cm-local clients use
+// in-process connections instead. Lives here (a leaf package) so both
+// the cm wiring and the dev bootstrap can reference it without pulling
+// the heavy nats-server dependency into the standalone clrk CLI.
+const NATSClientPort int32 = 4222
+
 // IngressExtProcBackendName is the name of the per-namespace EG
 // Backend that the per-TaskAgent EnvoyExtensionPolicy points its
 // extProc.backendRefs at. The Backend's FQDN/IP+port is filled in

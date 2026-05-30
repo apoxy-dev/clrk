@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
@@ -32,6 +33,14 @@ type WorkerPoolDeploymentReconciler struct {
 	// to ship signals. Empty disables injection — the worker emitter
 	// falls back to noop.
 	CMOTLPEndpoint string
+
+	// CMNATSAddr is the controller-manager's NATS/JetStream client
+	// address (host:port). The reconciler stamps it on every worker
+	// container as CLRK_CM_NATS_ADDR so the dispatcher's invocation
+	// publisher can dial the cm's embedded JetStream over TCP. Empty
+	// disables injection — the worker simply doesn't publish lifecycle
+	// events.
+	CMNATSAddr string
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
@@ -165,6 +174,15 @@ func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.Work
 			c.Env = append(c.Env, corev1.EnvVar{
 				Name:  otelemit.CMOTLPEndpointEnv,
 				Value: r.CMOTLPEndpoint,
+			})
+		}
+		// CLRK_CM_NATS_ADDR points the worker's invocation publisher at
+		// the cm's embedded JetStream. Empty in single-binary / no-NATS
+		// deployments; the worker then skips lifecycle publishing.
+		if r.CMNATSAddr != "" && !hasEnv(c.Env, invevent.CMNATSAddrEnv) {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name:  invevent.CMNATSAddrEnv,
+				Value: r.CMNATSAddr,
 			})
 		}
 	}

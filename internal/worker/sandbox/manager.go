@@ -331,7 +331,7 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 		[]any{slog.String("sandbox.id", string(id))},
 		identityLogFields(sb.Identity)...,
 	)...)
-	logFile, err := openAgentLogFile(m.logsDir, sb.Identity.Namespace, sb.Identity.Name)
+	logFile, err := openAgentLogFile(m.logsDir, sb.Identity.Namespace, sb.Identity.Name, sb.Identity.InvocationID)
 	if err != nil {
 		log.Error(err, "Opening agent log file (continuing without file tee)")
 	}

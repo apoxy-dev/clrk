@@ -8,7 +8,28 @@ package workerlog
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 )
+
+// safeToken folds any byte that is not an unreserved filename character
+// to '_', so a caller-influenced token cannot inject a path separator or
+// ".." and escape Dir. This matters for the invocation id: on the
+// direct-to-dispatcher path (cron / in-cluster, bypassing the ingress
+// edge that mints a fresh UUID) it can be an arbitrary
+// X-Clrk-Execution-ID header value. UUIDs and DNS-label object names
+// pass through unchanged; both the worker writer and the `clrk agents
+// logs` reader go through these helpers, so the on-disk name stays
+// consistent.
+func safeToken(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, s)
+}
 
 // Dir is the path inside a worker container where per-agent stdio is
 // teed for `clrk agents logs` to `tail -F` via docker exec / kubectl
@@ -24,5 +45,21 @@ func AgentPath(rootDir, namespace, name string) string {
 	if namespace == "" {
 		namespace = "default"
 	}
-	return filepath.Join(rootDir, fmt.Sprintf("%s__%s.log", namespace, name))
+	return filepath.Join(rootDir, fmt.Sprintf("%s__%s.log", safeToken(namespace), safeToken(name)))
+}
+
+// InvocationPath returns the on-disk file the worker tees a single
+// invocation's stdio to — per (namespace, agent, invocation id) so each
+// run of a TaskAgent gets its own log that `clrk agents logs
+// <name>/<id>` can tail without interleaving with concurrent runs. The
+// worker keeps AgentPath as a symlink to the most recent invocation's
+// file, so `clrk agents logs <name>` still resolves to the latest run.
+// Every component is run through safeToken so a caller-supplied
+// invocation id cannot inject a path separator or "..".
+func InvocationPath(rootDir, namespace, name, invocationID string) string {
+	if namespace == "" {
+		namespace = "default"
+	}
+	return filepath.Join(rootDir, fmt.Sprintf("%s__%s__%s.log",
+		safeToken(namespace), safeToken(name), safeToken(invocationID)))
 }

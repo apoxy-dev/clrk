@@ -19,12 +19,51 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
 
+// InvocationActiveCounter reports the number of non-terminal invocations
+// for a parent agent from the invocation read model. Injected by the
+// controller-manager (backed by invocation.ActiveCounter). Defined here
+// so the controller package needn't import the apiserver/ClickHouse
+// stack; nil in tests / no-ClickHouse builds, where the reconciler falls
+// back to the per-worker WorkerStatus sum.
+type InvocationActiveCounter interface {
+	CountActive(ctx context.Context, namespace string, kind clrkv1alpha1.InvocationParentKind, name string) (int32, error)
+}
+
 // TaskAgentRevisionReconciler manages AgentSandboxRevision snapshots for a
 // TaskAgent. Gateway / HTTPRoute live in TaskAgentIngressReconciler so they
 // can be skipped where gateway-api isn't installed.
 type TaskAgentRevisionReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// ActiveExec counts non-terminal invocations for the source of
+	// TaskAgent.Status.ActiveExecutions (APO-620). Nil falls back to the
+	// legacy per-worker sum off AgentSandboxRevision.Status.Workers — kept
+	// for the embedded-ClickHouse binary-layering rollout window, after
+	// which the fallback can be dropped.
+	ActiveExec InvocationActiveCounter
+}
+
+// workerActiveSum is the legacy ActiveExecutions source: the per-worker
+// in-flight counts the WorkerStatusService stream writes onto the
+// latest-ready revision's Status.Workers. Only the latest-ready slice is
+// summed because executions against older revisions drain quickly
+// (one-shot) and summing every revision would double-count during a
+// rollover. Used as the fallback when the invocation read model is
+// unavailable.
+func (r *TaskAgentRevisionReconciler) workerActiveSum(ctx context.Context, namespace, revName string) (int32, error) {
+	var rev clrkv1alpha1.AgentSandboxRevision
+	if err := r.Get(ctx, types.NamespacedName{Name: revName, Namespace: namespace}, &rev); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var sum int32
+	for _, ws := range rev.Status.Workers {
+		sum += ws.ActiveExecutions
+	}
+	return sum, nil
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch;update;patch
@@ -146,21 +185,29 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
 
-	// Aggregate ActiveExecutions across workers for the latest-ready
-	// revision. We only count the latest-ready slice because executions
-	// against older revisions drain quickly (one-shot semantics) and
-	// summing every revision would double-count during a rollover.
+	// ActiveExecutions: count non-terminal invocations from the read
+	// model (APO-620). When the read model is unavailable (ClickHouse
+	// binary-layering rollout in progress, or no counter wired) fall back
+	// to the legacy per-worker sum off the latest-ready revision's
+	// WorkerStatus stream so the field stays live in the interim.
 	if ta.Status.LatestReadyRevisionName != "" {
-		var activeRev clrkv1alpha1.AgentSandboxRevision
-		activeKey := types.NamespacedName{Name: ta.Status.LatestReadyRevisionName, Namespace: ta.Namespace}
-		if err := r.Get(ctx, activeKey, &activeRev); err == nil {
-			var sum int32
-			for _, ws := range activeRev.Status.Workers {
-				sum += ws.ActiveExecutions
+		if r.ActiveExec != nil {
+			if n, err := r.ActiveExec.CountActive(ctx, ta.Namespace, clrkv1alpha1.InvocationParentTaskAgent, ta.Name); err == nil {
+				ta.Status.ActiveExecutions = n
+			} else {
+				logger.V(1).Info("Invocation count unavailable, falling back to worker sum", "err", err)
+				sum, serr := r.workerActiveSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
+				if serr != nil {
+					return ctrl.Result{}, fmt.Errorf("active executions fallback: %w", serr)
+				}
+				ta.Status.ActiveExecutions = sum
+			}
+		} else {
+			sum, err := r.workerActiveSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("active executions: %w", err)
 			}
 			ta.Status.ActiveExecutions = sum
-		} else if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("getting active revision for ActiveExecutions sum: %w", err)
 		}
 	} else {
 		ta.Status.ActiveExecutions = 0
