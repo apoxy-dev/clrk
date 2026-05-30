@@ -2622,7 +2622,7 @@ func schema_clrk_api_clrk_v1alpha1_Invocation(ref common.ReferenceCallback) comm
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "Invocation records one execution of a TaskAgent or DaemonAgent. Parent identity lives on spec.parentRef; the Create strategy synthesises a matching metadata.ownerReferences entry (controller=true, blockOwnerDeletion=false) so Kubernetes GC nukes Invocations when the parent is deleted. Invocations are system-written and immutable from clients: the stub backend returns 405 on POST; the eventual JetStream-backed storage will accept POST only from the ingress service principal.",
+				Description: "Invocation is the durable lifecycle record of one request to a TaskAgent or DaemonAgent — the logical unit a customer trigger maps to, tracked from admission through a terminal phase (see InvocationPhase). It is deliberately distinct from an \"execution\", the act of running the agent in a worker sandbox, and the two are not 1:1: a Rejected invocation never executes, a Pending or Dispatched one has not started yet, and a retried request could execute more than once under a single invocation. The ActiveExecutions counters on TaskAgent, WorkerPool, and AgentSandboxRevision status are derived from this type and count a parent's non-terminal invocations (Pending, Dispatched, Running) — its in-flight executions — not all requests ever made. This Invocation/ActiveExecutions split mirrors AWS Lambda's Invocations vs. ConcurrentExecutions metrics.\n\nParent identity lives on spec.parentRef; the Create strategy synthesises a matching metadata.ownerReferences entry (controller=true, blockOwnerDeletion=false) so Kubernetes GC nukes Invocations when the parent is deleted. Invocations are system-written and immutable from clients: the stub backend returns 405 on POST; the eventual JetStream-backed storage will accept POST only from the ingress service principal.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -3972,7 +3972,7 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentStatus(ref common.ReferenceCallback)
 					},
 					"activeExecutions": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ActiveExecutions is the number of currently running executions.",
+							Description: "ActiveExecutions is the count of this agent's in-flight Invocations — those in a non-terminal phase (Pending, Dispatched, or Running). It is sourced from the invocation read model (APO-620), falling back to the per-worker WorkerStatus sum when that model is unavailable. \"Execution\" here means an in-flight invocation, not a separate resource; see Invocation.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -4432,7 +4432,7 @@ func schema_clrk_api_clrk_v1alpha1_WorkerPoolStatus(ref common.ReferenceCallback
 					},
 					"activeExecutions": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ActiveExecutions is the total number of running executions across all workers.",
+							Description: "ActiveExecutions is the total number of in-flight (non-terminal) Invocations across all workers in the pool. See Invocation.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -4491,7 +4491,7 @@ func schema_clrk_api_clrk_v1alpha1_WorkerSandboxStatus(ref common.ReferenceCallb
 					},
 					"activeExecutions": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ActiveExecutions is the number of in-flight TaskAgent executions dispatched to this worker for the parent agent of the revision. Aggregated across workers by the TaskAgent revision controller into TaskAgent.Status.ActiveExecutions.",
+							Description: "ActiveExecutions is the number of in-flight (non-terminal) Invocations dispatched to this worker for the parent agent of the revision. This per-worker count is the legacy source the TaskAgent revision controller sums as a fallback when the invocation read model is unavailable (see TaskAgent.Status.ActiveExecutions and Invocation).",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

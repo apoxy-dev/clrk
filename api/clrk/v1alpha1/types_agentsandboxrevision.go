@@ -49,10 +49,12 @@ type WorkerSandboxStatus struct {
 	// WarmCount is the number of warm sandbox instances on this worker.
 	// +optional
 	WarmCount int32 `json:"warmCount,omitempty"`
-	// ActiveExecutions is the number of in-flight TaskAgent executions
-	// dispatched to this worker for the parent agent of the revision.
-	// Aggregated across workers by the TaskAgent revision controller into
-	// TaskAgent.Status.ActiveExecutions.
+	// ActiveExecutions is the number of in-flight (non-terminal)
+	// Invocations dispatched to this worker for the parent agent of the
+	// revision. This per-worker count is the legacy source the TaskAgent
+	// revision controller sums as a fallback when the invocation read
+	// model is unavailable (see TaskAgent.Status.ActiveExecutions and
+	// Invocation).
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions,omitempty"`
 	// LastHeartbeat is the last time this worker reported status.

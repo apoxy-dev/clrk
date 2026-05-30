@@ -133,7 +133,12 @@ type TaskAgentStatus struct {
 	// Conditions represent the latest available observations of the TaskAgent's state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// ActiveExecutions is the number of currently running executions.
+	// ActiveExecutions is the count of this agent's in-flight Invocations
+	// — those in a non-terminal phase (Pending, Dispatched, or Running).
+	// It is sourced from the invocation read model (APO-620), falling back
+	// to the per-worker WorkerStatus sum when that model is unavailable.
+	// "Execution" here means an in-flight invocation, not a separate
+	// resource; see Invocation.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions,omitempty"`
 	// LatestCreatedRevisionName is the name of the last created AgentSandboxRevision.

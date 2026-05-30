@@ -102,7 +102,20 @@ type InvocationStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// Invocation records one execution of a TaskAgent or DaemonAgent.
+// Invocation is the durable lifecycle record of one request to a
+// TaskAgent or DaemonAgent — the logical unit a customer trigger maps
+// to, tracked from admission through a terminal phase (see
+// InvocationPhase). It is deliberately distinct from an "execution",
+// the act of running the agent in a worker sandbox, and the two are not
+// 1:1: a Rejected invocation never executes, a Pending or Dispatched
+// one has not started yet, and a retried request could execute more
+// than once under a single invocation. The ActiveExecutions counters on
+// TaskAgent, WorkerPool, and AgentSandboxRevision status are derived
+// from this type and count a parent's non-terminal invocations
+// (Pending, Dispatched, Running) — its in-flight executions — not all
+// requests ever made. This Invocation/ActiveExecutions split mirrors AWS
+// Lambda's Invocations vs. ConcurrentExecutions metrics.
+//
 // Parent identity lives on spec.parentRef; the Create strategy
 // synthesises a matching metadata.ownerReferences entry
 // (controller=true, blockOwnerDeletion=false) so Kubernetes GC nukes

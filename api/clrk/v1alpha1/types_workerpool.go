@@ -62,7 +62,8 @@ type WorkerPoolStatus struct {
 	// Capacity is the aggregate capacity across all ready workers.
 	// +optional
 	Capacity WorkerPoolCapacity `json:"capacity,omitempty"`
-	// ActiveExecutions is the total number of running executions across all workers.
+	// ActiveExecutions is the total number of in-flight (non-terminal)
+	// Invocations across all workers in the pool. See Invocation.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions,omitempty"`
 	// Conditions represent the latest available observations of the WorkerPool's state.
