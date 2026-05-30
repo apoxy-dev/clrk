@@ -16,6 +16,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/clickhouse"
 	"github.com/apoxy-dev/clrk/internal/drivers"
+	clrknats "github.com/apoxy-dev/clrk/internal/nats"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/ports"
 )
@@ -34,6 +35,16 @@ const cmAccountName = "clrk-controller-manager"
 // loopback. Workers send Invocation records to cm over the existing
 // gRPC surface.
 const chPVCName = "clickhouse-data"
+
+// natsPVCName backs the cm pod's embedded JetStream store
+// (clrknats.DefaultStoreDir). PVC-backed so the durable INVOCATIONS
+// stream — and any worker-side terminal events not yet materialized into
+// ClickHouse — survives a cm bounce; on an EmptyDir the stream would be
+// wiped on every restart, defeating the at-least-once durability the
+// worker outbox relies on. RWO is fine for the same single-replica +
+// Recreate reason as chPVCName. The cm's kine db (data.db on the separate
+// EmptyDir `data` volume) is intentionally left ephemeral.
+const natsPVCName = "nats-data"
 
 // cmLabels are the selector labels stamped on the cm Deployment's pod
 // template and matched by its Service. Stable across reloads so a
@@ -180,6 +191,13 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							// PVC-backed so Invocation records survive
 							// pod restarts.
 							{Name: chPVCName, MountPath: clickhouse.DefaultDataDir},
+							// Embedded JetStream store. Mounts at the cm's
+							// default --nats-store-dir so the durable
+							// INVOCATIONS stream survives a cm bounce.
+							// Nested under the `data` mount (/var/lib/clrk),
+							// which is fine — kubelet orders mounts by path
+							// depth.
+							{Name: natsPVCName, MountPath: clrknats.DefaultStoreDir},
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
@@ -220,6 +238,14 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							VolumeSource: corev1.VolumeSource{
 								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 									ClaimName: chPVCName,
+								},
+							},
+						},
+						{
+							Name: natsPVCName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: natsPVCName,
 								},
 							},
 						},
@@ -270,6 +296,28 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 		},
 	}
 
+	// Embedded JetStream store PVC. Small: the INVOCATIONS stream holds
+	// bounded-retention (--nats-stream-max-age 72h) JSON event snapshots,
+	// and ClickHouse is the long-term store — JetStream is just the
+	// durable transport + Watch tail. Like chPVC, no Service: the server
+	// listens for cm-local in-process clients and worker pods over the
+	// existing cm NATS Service port.
+	natsPVC := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      natsPVCName,
+			Namespace: devClrkNamespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+
 	// EG's data-plane bootstrap dials `envoy-gateway.<ns>.svc:18000` for
 	// xDS. The cm hosts that xDS listener internally (it supervises an
 	// envoy-gateway child); we point a second ClusterIP Service at the
@@ -307,7 +355,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 		},
 	}
 
-	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc, chPVC); err != nil {
+	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc, chPVC, natsPVC); err != nil {
 		return err
 	}
 	// The cm Deployment goes through ApplyAndVerify so a silent SSA
