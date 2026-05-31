@@ -30,6 +30,9 @@ import (
 // Signals (all required):
 //   - k3s apiserver answers discovery
 //   - clrk.apoxy.dev/v1alpha1 APIService is Available
+//   - the ClickHouse-backed Invocation store answers a List (the cm's
+//     async CH pool resolved and the invocation_events table exists),
+//     so a test that reads invocations immediately doesn't race the dial
 //   - Gateway API CRDs are installed (the in-process EG control plane
 //     would crash-loop without them)
 //   - <clrk-ns>/envoy-gateway Secret exists (certgen ran; EG xDS
@@ -129,6 +132,18 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 				}
 			}
 			return errors.New("APIService Available condition not yet set")
+		}},
+		{"ClickHouse-backed Invocation store responsive", func(c context.Context) error {
+			// List the cluster-wide Invocation resource: a 200 means the
+			// aggregated apiserver resolved its async ClickHouse pool and
+			// the invocation_events table exists. The read path returns an
+			// error until both hold, so this gates callers (integration
+			// tests) that read invocations right after wait-ready returns.
+			_, err := core.Discovery().RESTClient().Get().
+				AbsPath("/apis/clrk.apoxy.dev/v1alpha1/invocations").
+				Param("limit", "1").
+				DoRaw(c)
+			return err
 		}},
 		{"Gateway API CRDs installed", func(c context.Context) error {
 			_, err := apiext.CustomResourceDefinitions().Get(c, "gateways.gateway.networking.k8s.io", metav1.GetOptions{})

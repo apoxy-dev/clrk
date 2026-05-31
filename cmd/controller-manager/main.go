@@ -128,6 +128,7 @@ func main() {
 		natsAddr     = flag.String("embedded-nats-addr", fmt.Sprintf("0.0.0.0:%d", clrknats.DefaultPort), "Bind address for the embedded NATS/JetStream client port. Worker pods dial this via the cm Service; cm-local clients use in-process connections. Empty disables the server.")
 		natsStoreDir = flag.String("nats-store-dir", clrknats.DefaultStoreDir, "On-disk JetStream store for the embedded NATS server. PVC-backed in the cm pod so the durable INVOCATIONS stream survives restarts.")
 		natsMaxAge   = flag.Duration("nats-stream-max-age", 72*time.Hour, "Retention window for the INVOCATIONS JetStream stream. Bounds how far back a Watch can resume; ClickHouse (separate TTL) is the long-term store.")
+		natsMaxBytes = flag.Int64("nats-stream-max-bytes", 0, "Hard cap on the INVOCATIONS JetStream store size in bytes (0 = unbounded, retained only by --nats-stream-max-age). Bounds the store-dir PVC under high invocation volume; oldest events are evicted first.")
 		// natsAdvertiseAddr is the cm NATS client address (host:port)
 		// stamped onto worker pods as CLRK_CM_NATS_ADDR. Workers dial it
 		// over the cm Service to publish Running + terminal Invocation
@@ -178,6 +179,7 @@ func main() {
 			clrknats.WithListen(host, port),
 			clrknats.WithStoreDir(*natsStoreDir),
 			clrknats.WithStreamMaxAge(*natsMaxAge),
+			clrknats.WithStreamMaxBytes(*natsMaxBytes),
 		)
 		if err != nil {
 			log.Error(err, "Unable to construct embedded NATS server")
