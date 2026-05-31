@@ -222,23 +222,43 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		return immediateResponse(typev3.StatusCode_InternalServerError, "clrk: TaskAgent lookup failed")
 	}
 
-	// Mint the per-invocation id as soon as the parent TaskAgent is
+	// Resolve the per-invocation id as soon as the parent TaskAgent is
 	// resolved, so the Dispatched (accept) and Rejected (capacity /
-	// readiness denial) lifecycle events below all carry the same id. A
-	// fresh UUID, decoupled from any caller-set idempotency key: this is
-	// what flows through PROXY v2 TLVs to the egress ext_proc as
+	// readiness denial) lifecycle events below all carry the same id.
+	// This is what flows through PROXY v2 TLVs to the egress ext_proc as
 	// invocation.id, the lookup key for the invocationctx store, and (on
 	// accept) the X-Clrk-Invocation-Id the dispatcher pins into the
 	// sandbox before Start. Denials reachable before this point (bad
 	// header, TaskAgent not found, lookup error) have no resolvable
 	// parent agent, so they record no Invocation.
-	invocationID := uuid.NewString()
+	//
+	// Honor a caller-supplied X-Clrk-Invocation-ID when it is a canonical
+	// UUID -- the run-task CLI mints one and sends it so it can follow its
+	// own run to a terminal phase and derive an exit code without the id
+	// ever being echoed back. The id becomes the Invocation's
+	// metadata.name verbatim (invpublish.go), so only the canonical form
+	// uuid.NewString emits is honored; any other shape (non-UUID, braces,
+	// uppercase) falls back to a freshly minted id rather than being
+	// rejected, so a malformed header can never deny an otherwise valid
+	// request.
+	invocationID := canonicalInvocationID(hdrs[strings.ToLower(ports.HeaderInvocationID)])
+	if invocationID == "" {
+		invocationID = uuid.NewString()
+	}
 	span.SetAttributes(attribute.String(otelemit.AttrInvocationID, invocationID))
+
+	// Classify the trigger from the inbound header so the Dispatched and
+	// Rejected events ingress emits carry the right source (the run-task
+	// CLI sets X-Clrk-Trigger: cli; the cron invoker sets cron). Without
+	// this a Rejected CLI/cron invocation -- which produces no later
+	// worker events to overwrite it in the argMax read model -- would be
+	// mislabeled HTTP. Defaults to HTTP for ordinary ingress traffic.
+	trigger := clrkv1alpha1.TriggerTypeFromHeaderValue(hdrs[strings.ToLower(ports.HeaderTrigger)])
 
 	if ta.Status.LatestReadyRevisionName == "" {
 		slog.Warn("ingress ext_proc: TaskAgent has no ready revision", "ns", ns, "name", name)
 		stampOutcome(span, otelemit.IngressOutcomeNoReadyRevision, 503)
-		s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
+		s.emitInvocation(ns, name, invocationID, trigger, clrkv1alpha1.InvocationPhaseRejected)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: TaskAgent has no ready revision")
 	}
 
@@ -266,12 +286,12 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		if pick.AlreadyAtCap {
 			slog.Warn("ingress ext_proc: TaskAgent at MaxConcurrent", "ns", ns, "name", name)
 			stampOutcome(span, otelemit.IngressOutcomeAtMaxConcurrent, 429)
-			s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
+			s.emitInvocation(ns, name, invocationID, trigger, clrkv1alpha1.InvocationPhaseRejected)
 			return immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: TaskAgent at MaxConcurrent across the cluster")
 		}
 		slog.Warn("ingress ext_proc: no ready worker", "ns", ns, "name", name, "pool", pool, "revision", ta.Status.LatestReadyRevisionName)
 		stampOutcome(span, otelemit.IngressOutcomeNoReadyWorker, 503)
-		s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseRejected)
+		s.emitInvocation(ns, name, invocationID, trigger, clrkv1alpha1.InvocationPhaseRejected)
 		return immediateResponse(typev3.StatusCode_ServiceUnavailable, "clrk: no ready worker for TaskAgent")
 	}
 
@@ -358,7 +378,7 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 	mutation := &extprocv3.HeaderMutation{SetHeaders: setHeaders}
 
 	stampOutcome(span, otelemit.IngressOutcomeOK, 200)
-	s.emitInvocation(ns, name, invocationID, clrkv1alpha1.InvocationPhaseDispatched)
+	s.emitInvocation(ns, name, invocationID, trigger, clrkv1alpha1.InvocationPhaseDispatched)
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -399,6 +419,24 @@ func resolveOrSynthesizeParent(hdrs map[string]string) trace.SpanContext {
 		TraceFlags: trace.FlagsSampled,
 		Remote:     true,
 	})
+}
+
+// canonicalInvocationID returns s when it is a canonical RFC 4122 UUID
+// in the lowercase 8-4-4-4-12 hyphenated form -- exactly what
+// uuid.NewString mints and a valid Kubernetes object name -- else "".
+// uuid.Parse accepts several lenient encodings (urn:uuid:, braces,
+// uppercase, raw hex); requiring u.String() == s rejects all of them so
+// a caller-supplied id is only honored when it is safe to use verbatim
+// as the Invocation's metadata.name.
+func canonicalInvocationID(s string) string {
+	if s == "" {
+		return ""
+	}
+	u, err := uuid.Parse(s)
+	if err != nil || u.String() != s {
+		return ""
+	}
+	return s
 }
 
 func continueResponse() *extprocv3.ProcessingResponse {

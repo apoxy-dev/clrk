@@ -54,7 +54,7 @@ const (
 // No-op until the controller-manager wires a publisher via
 // RunInvocationPublisher (NATS disabled, or before it is ready), so
 // tests and the pre-ready window never panic.
-func (s *Server) emitInvocation(namespace, agent, id string, phase clrkv1alpha1.InvocationPhase) {
+func (s *Server) emitInvocation(namespace, agent, id string, trigger clrkv1alpha1.InvocationTriggerType, phase clrkv1alpha1.InvocationPhase) {
 	if s.invPub.Load() == nil {
 		return
 	}
@@ -70,7 +70,7 @@ func (s *Server) emitInvocation(namespace, agent, id string, phase clrkv1alpha1.
 				Name: agent,
 			},
 			Trigger: clrkv1alpha1.InvocationTrigger{
-				Type: clrkv1alpha1.InvocationTriggerHTTP,
+				Type: trigger,
 			},
 		},
 		Status: clrkv1alpha1.InvocationStatus{Phase: phase},

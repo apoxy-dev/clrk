@@ -687,19 +687,11 @@ func resolveInvocationID(h http.Header) string {
 	return cloudevents.ResolveID(cloudevents.HTTPHeader(h))
 }
 
-// triggerTypeFromHeader maps the inbound X-Clrk-Trigger value (set to
-// "http" by the ingress HTTPRoute filter and "cron" by the cron HTTP
-// invoker) onto the Invocation trigger enum. Unknown/empty defaults to
-// HTTP — the overwhelmingly common worker path is ingress-routed HTTP.
+// triggerTypeFromHeader maps the inbound X-Clrk-Trigger value onto the
+// Invocation trigger enum. It delegates to the shared API helper so the
+// worker and the ingress publisher classify triggers identically.
 func triggerTypeFromHeader(v string) clrkv1alpha1.InvocationTriggerType {
-	switch strings.ToLower(v) {
-	case "cron":
-		return clrkv1alpha1.InvocationTriggerCron
-	case "cli":
-		return clrkv1alpha1.InvocationTriggerCLI
-	default:
-		return clrkv1alpha1.InvocationTriggerHTTP
-	}
+	return clrkv1alpha1.TriggerTypeFromHeaderValue(v)
 }
 
 // terminalPhase classifies a completed execution into its terminal

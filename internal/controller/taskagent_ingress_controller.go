@@ -503,15 +503,19 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 					Filters: []gwapiv1.HTTPRouteFilter{
 						{
 							Type: gwapiv1.HTTPRouteFilterRequestHeaderModifier,
+							// Stamp the routing header authoritatively. We deliberately
+							// do NOT set X-Clrk-Trigger here: the worker defaults an
+							// absent value to HTTP, so ordinary ingress traffic still
+							// records as HTTP, while a trusted caller-set trigger (the
+							// run-task invoke Connecter sends "cli") survives to the
+							// worker instead of being clobbered. The ingress ext_proc
+							// reads the trigger before this filter, so its
+							// Dispatched/Rejected events already classify it correctly.
 							RequestHeaderModifier: &gwapiv1.HTTPHeaderFilter{
 								Set: []gwapiv1.HTTPHeader{
 									{
 										Name:  ports.HeaderTaskAgent,
 										Value: ta.Namespace + "/" + ta.Name,
-									},
-									{
-										Name:  ports.HeaderTrigger,
-										Value: "http",
 									},
 								},
 							},

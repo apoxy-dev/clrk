@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -37,6 +38,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
+	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 )
 
@@ -418,6 +420,30 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			invocation.NewProvider(deps, invocationGR, "invocation", sub.parentKind),
 		)
 	}
+
+	// taskagents/{name}/invoke: the run-task write-side connect
+	// subresource. Pure transport -- it reverse-proxies to the per-TA
+	// ingress Envoy, which admits the request and publishes the lifecycle
+	// -- so it shares no state with the read-model Storage above. The kube
+	// client is resolved lazily: m.ctrlMgr is created after
+	// startAPIServer, but Connect only runs once the control plane is up.
+	// EG provisions every TaskAgent's data-plane Service in the
+	// controller-manager's own namespace (ENVOY_GATEWAY_NAMESPACE), so the
+	// Connecter resolves clrk-<ta> there, not in the TaskAgent's namespace.
+	systemNS := os.Getenv("POD_NAMESPACE")
+	if systemNS == "" {
+		systemNS = "clrk"
+	}
+	srvBuilder = srvBuilder.WithStorage(
+		clrkv1alpha1.SchemeGroupVersion.WithResource("taskagents/invoke"),
+		invoke.NewProvider("invoke", systemNS, func() client.Client {
+			mgr := m.CtrlManager()
+			if mgr == nil {
+				return nil
+			}
+			return mgr.GetClient()
+		}),
+	)
 
 	if o.disableAuth {
 		srvBuilder = srvBuilder.DisableAuthorization()

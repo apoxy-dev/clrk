@@ -1,6 +1,10 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // InvocationPhase enumerates the observable lifecycle states of an
 // Invocation. Transitions are monotonic: Pending -> Dispatched ->
@@ -29,6 +33,24 @@ const (
 	InvocationTriggerCron InvocationTriggerType = "Cron"
 	InvocationTriggerCLI  InvocationTriggerType = "CLI"
 )
+
+// TriggerTypeFromHeaderValue maps an X-Clrk-Trigger header value onto
+// the Invocation trigger enum. The match is case-insensitive (the wire
+// value is lowercase: "http" from the ingress HTTPRoute filter, "cron"
+// from the cron invoker, "cli" from the run-task CLI). An unknown or
+// empty value defaults to HTTP, the overwhelmingly common path. Shared
+// by the ingress publisher and the worker dispatcher so the two never
+// drift.
+func TriggerTypeFromHeaderValue(v string) InvocationTriggerType {
+	switch strings.ToLower(v) {
+	case "cron":
+		return InvocationTriggerCron
+	case "cli":
+		return InvocationTriggerCLI
+	default:
+		return InvocationTriggerHTTP
+	}
+}
 
 // InvocationTrigger describes the source that initiated this
 // invocation. Source is a free-form descriptor: for HTTP the gateway
