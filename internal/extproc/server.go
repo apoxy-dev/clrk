@@ -431,7 +431,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				// OpenAI-shaped requests, the latter only when a host
 				// falls under an MCPRoute.
 				if mcpCandidate(mcpRoutes, host, rec.RequestHeaders["content-type"]) {
-					res := mcpRoutes.evaluate(host, rec.RequestBody, rec.RequestTruncated)
+					res := mcpRoutes.evaluate(host, parsers.Input{
+						ReqBody:      rec.RequestBody,
+						ReqTruncated: rec.RequestTruncated,
+						ReqHeaders:   rec.RequestHeaders,
+					})
 					stampMCPResult(&rec, res)
 					if res.decision == mcpDecisionDeny {
 						if err := stream.Send(immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)); err != nil {
@@ -495,6 +499,22 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 // Called once per stream, just before sink.Emit, so partial-capture
 // records (truncated bodies) still attempt parsing.
 func enrichRecord(rec *Record, routes *routeTable) *routeRule {
+	// Augment the MCP record with response-envelope facts (the JSON-RPC
+	// error code) now that the response body is buffered. rec.MCP is set
+	// only when the request parsed as a single JSON-RPC call under an
+	// attached MCPRoute; deny and budget short-circuits leave no response
+	// body, so ParseResponse returns nil and this is a no-op there.
+	if rec.MCP != nil {
+		if res := parsers.ParseResponse(parsers.Input{
+			RespBody:      rec.ResponseBody,
+			RespTruncated: rec.ResponseTruncated,
+			RespHeaders:   rec.ResponseHeaders,
+		}); res != nil && res.IsError {
+			rec.MCP.IsError = true
+			rec.MCP.ErrorCode = res.ErrorCode
+		}
+	}
+
 	host, _ := splitHostPort(rec.RequestHeaders[":authority"])
 	if parser := parsers.For(host); parser != nil {
 		rec.Provider = parser.Parse(parsers.Input{
@@ -618,7 +638,6 @@ func immediateResponse(code typev3.StatusCode, detail string) *extprocv3.Process
 		},
 	}
 }
-
 
 // jsonString quotes s as a JSON string. Tiny helper so we don't pull
 // encoding/json in just to format an error body.

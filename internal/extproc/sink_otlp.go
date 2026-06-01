@@ -360,15 +360,17 @@ func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 }
 
 // mcpAttrs returns the mcp.* + clrk.mcproute.* attribute slice for
-// this record. Empty when the request wasn't parsed as MCP and no
-// MCPRoute matched. Both sub-groups can be present independently: a
-// request that parsed as MCP but didn't match any rule emits mcp.*
-// without clrk.mcproute.*; a matched route emits both.
+// this record. Empty when the request wasn't parsed as MCP, no MCPRoute
+// matched, and no ToolPolicy decision was reached. The sub-groups can be
+// present independently: a request that parsed as MCP but didn't match
+// any rule emits mcp.* without clrk.mcproute.*; a matched route emits
+// both; a batch fail-closed deny emits only the decision (no parsed
+// envelope, so mcp.method is absent).
 func mcpAttrs(r Record) []attribute.KeyValue {
-	if r.MCP == nil && r.MatchedMCPRouteName == "" {
+	if r.MCP == nil && r.MatchedMCPRouteName == "" && r.MCPToolPolicyDecision == "" {
 		return nil
 	}
-	out := make([]attribute.KeyValue, 0, 7)
+	out := make([]attribute.KeyValue, 0, 9)
 	if r.MCP != nil {
 		out = append(out, attribute.String(otelemit.AttrMCPMethod, r.MCP.Method))
 		if r.MCP.ToolName != "" {
@@ -376,6 +378,12 @@ func mcpAttrs(r Record) []attribute.KeyValue {
 		}
 		if r.MCP.ResourceURI != "" {
 			out = append(out, attribute.String(otelemit.AttrMCPResourceURI, r.MCP.ResourceURI))
+		}
+		if r.MCP.ID != "" {
+			out = append(out, attribute.String(otelemit.AttrMCPRequestID, r.MCP.ID))
+		}
+		if r.MCP.IsError {
+			out = append(out, attribute.Int(otelemit.AttrMCPErrorCode, r.MCP.ErrorCode))
 		}
 	}
 	if r.MatchedMCPRouteName != "" {
@@ -522,6 +530,9 @@ func summaryLine(r Record, d derived) string {
 		base += fmt.Sprintf(" mcp_method=%s", r.MCP.Method)
 		if r.MCP.ToolName != "" {
 			base += fmt.Sprintf(" mcp_tool=%s", r.MCP.ToolName)
+		}
+		if r.MCP.IsError {
+			base += fmt.Sprintf(" mcp_error_code=%d", r.MCP.ErrorCode)
 		}
 	}
 	if r.MatchedMCPRouteName != "" {

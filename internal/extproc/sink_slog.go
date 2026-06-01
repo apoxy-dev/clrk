@@ -60,6 +60,12 @@ func (slogSink) Emit(r Record) {
 		if r.MCP.ResourceURI != "" {
 			attrs = append(attrs, "mcp.resource.uri", r.MCP.ResourceURI)
 		}
+		if r.MCP.ID != "" {
+			attrs = append(attrs, "mcp.request.id", r.MCP.ID)
+		}
+		if r.MCP.IsError {
+			attrs = append(attrs, "mcp.error.code", r.MCP.ErrorCode)
+		}
 	}
 	if r.MatchedMCPRouteName != "" {
 		attrs = append(attrs,

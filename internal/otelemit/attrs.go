@@ -42,6 +42,8 @@ const (
 	AttrMCPMethod             = "mcp.method"
 	AttrMCPToolName           = "mcp.tool.name"
 	AttrMCPResourceURI        = "mcp.resource.uri"
+	AttrMCPRequestID          = "mcp.request.id"
+	AttrMCPErrorCode          = "mcp.error.code"
 	AttrMCPRouteMatched       = "clrk.mcproute.matched"
 	AttrMCPRouteName          = "clrk.mcproute.name"
 	AttrMCPRouteNamespace     = "clrk.mcproute.namespace"

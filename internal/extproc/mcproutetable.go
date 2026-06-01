@@ -276,10 +276,10 @@ func mcpCandidate(t *mcpRouteTable, host, contentType string) bool {
 // ToolPolicy decision (if any). All fields are independently
 // nil/empty so callers can stamp partial state on the Record.
 type mcpEvalResult struct {
-	info          *parsers.MCPInfo
-	matchedRoute  *mcpRouteRule
-	decision      mcpDecision
-	denyDetail    string
+	info         *parsers.MCPInfo
+	matchedRoute *mcpRouteRule
+	decision     mcpDecision
+	denyDetail   string
 }
 
 // evaluate runs the parse → match → ToolPolicy chain for one buffered
@@ -288,9 +288,23 @@ type mcpEvalResult struct {
 // result with all fields nil/empty when the body wasn't a valid
 // single JSON-RPC request — caller should fall through to the
 // continue path in that case.
-func (t *mcpRouteTable) evaluate(host string, body []byte, truncated bool) mcpEvalResult {
-	info := parsers.ParseRequest(body, truncated)
+func (t *mcpRouteTable) evaluate(host string, in parsers.Input) mcpEvalResult {
+	info := parsers.ParseRequest(in)
 	if info == nil {
+		// ParseRequest returns nil for batches, truncated, and malformed
+		// bodies. A JSON-RPC batch under a ToolPolicy is a bypass vector:
+		// the parser is single-request only, so we cannot authorize the
+		// tools/call entries a batch may smuggle. Fail closed — deny the
+		// whole batch whenever any rule scoped to this host carries a
+		// ToolPolicy. (Non-batch truncated/malformed bodies are allowed;
+		// failing closed there would reject large legitimate calls — that
+		// gap is tracked as a separate product decision.)
+		if parsers.IsBatch(in.ReqBody) && t.hostHasToolPolicy(host) {
+			return mcpEvalResult{
+				decision:   mcpDecisionDeny,
+				denyDetail: "JSON-RPC batch requests are not permitted under an MCPRoute ToolPolicy",
+			}
+		}
 		return mcpEvalResult{}
 	}
 	rr := t.match(host, info)
@@ -309,11 +323,15 @@ func (t *mcpRouteTable) evaluate(host string, body []byte, truncated bool) mcpEv
 // stampMCPResult writes the evaluation outcome onto the Record.
 // Split out so server.go's Process() loop stays a sequence of guard
 // clauses rather than a five-deep if-cascade.
+//
+// The three sub-results are stamped independently: a normal request
+// stamps info (+ route + decision); a batch fail-closed deny stamps only
+// the decision (info and matchedRoute stay nil, mirroring how a budget
+// deny stamps the route without a parsed provider).
 func stampMCPResult(rec *Record, res mcpEvalResult) {
-	if res.info == nil {
-		return
+	if res.info != nil {
+		rec.MCP = res.info
 	}
-	rec.MCP = res.info
 	if res.matchedRoute != nil {
 		rec.MatchedMCPRouteNamespace = res.matchedRoute.routeNamespace
 		rec.MatchedMCPRouteName = res.matchedRoute.routeName
@@ -321,6 +339,22 @@ func stampMCPResult(rec *Record, res mcpEvalResult) {
 	if res.decision != "" {
 		rec.MCPToolPolicyDecision = string(res.decision)
 	}
+}
+
+// hostHasToolPolicy reports whether any flattened rule whose parent
+// route accepts host carries a ToolPolicy filter. The batch fail-closed
+// gate uses it: a batch can't be authorized per-call, so any tool policy
+// on the host forces a deny. Intentionally ignores server/method/tool
+// scoping — a batch may contain any method, so the conservative choice
+// is to deny whenever the host falls under any tool policy at all.
+func (t *mcpRouteTable) hostHasToolPolicy(host string) bool {
+	h := strings.ToLower(host)
+	for i := range t.rules {
+		if t.rules[i].acceptsHost(h) && t.rules[i].toolPolicy != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptsHost reports whether host falls under this rule's parent
