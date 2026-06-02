@@ -136,13 +136,9 @@ func (w *Writer) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial clickhouse %s: %w", w.address, err)
 	}
-	if err := ddlClient.Do(ctx, ch.Query{Body: renderCreateLogsTable(w.ttlDays)}); err != nil {
+	if err := ensureSchema(ctx, ddlClient, w.ttlDays); err != nil {
 		_ = ddlClient.Close()
-		return fmt.Errorf("create %s: %w", LogsTable, err)
-	}
-	if err := ddlClient.Do(ctx, ch.Query{Body: renderCreateTracesTable(w.ttlDays)}); err != nil {
-		_ = ddlClient.Close()
-		return fmt.Errorf("create %s: %w", TracesTable, err)
+		return err
 	}
 	_ = ddlClient.Close()
 
@@ -184,18 +180,25 @@ func (w *Writer) Run(ctx context.Context) error {
 }
 
 // logsBlock holds the column set for one in-flight otel_logs batch.
-// Fields mirror the schema in schema.go column-for-column.
+// Fields mirror the schema in schema.go column-for-column. MATERIALIZED
+// columns (Component/InvocationId/Agent/IoStream) are computed by
+// ClickHouse from the maps and never appear here.
 type logsBlock struct {
 	timestamp          *proto.ColDateTime64
 	egRef              *proto.ColLowCardinality[string]
 	traceID            *proto.ColStr
 	spanID             *proto.ColStr
+	traceFlags         *proto.ColUInt8
 	severityText       *proto.ColLowCardinality[string]
 	severityNumber     *proto.ColUInt8
 	serviceName        *proto.ColLowCardinality[string]
 	body               *proto.ColStr
-	scopeName          *proto.ColLowCardinality[string]
+	resourceSchemaURL  *proto.ColLowCardinality[string]
 	resourceAttributes *proto.ColMap[string, string]
+	scopeSchemaURL     *proto.ColLowCardinality[string]
+	scopeName          *proto.ColLowCardinality[string]
+	scopeVersion       *proto.ColLowCardinality[string]
+	scopeAttributes    *proto.ColMap[string, string]
 	logAttributes      *proto.ColMap[string, string]
 	rows               int
 	bytes              int
@@ -207,12 +210,17 @@ func newLogsBlock() *logsBlock {
 		egRef:              new(proto.ColStr).LowCardinality(),
 		traceID:            new(proto.ColStr),
 		spanID:             new(proto.ColStr),
+		traceFlags:         new(proto.ColUInt8),
 		severityText:       new(proto.ColStr).LowCardinality(),
 		severityNumber:     new(proto.ColUInt8),
 		serviceName:        new(proto.ColStr).LowCardinality(),
 		body:               new(proto.ColStr),
-		scopeName:          new(proto.ColStr).LowCardinality(),
+		resourceSchemaURL:  new(proto.ColStr).LowCardinality(),
 		resourceAttributes: proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)),
+		scopeSchemaURL:     new(proto.ColStr).LowCardinality(),
+		scopeName:          new(proto.ColStr).LowCardinality(),
+		scopeVersion:       new(proto.ColStr).LowCardinality(),
+		scopeAttributes:    proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)),
 		logAttributes:      proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)),
 	}
 }
@@ -223,34 +231,55 @@ func (b *logsBlock) input() proto.Input {
 		{Name: "EGRef", Data: b.egRef},
 		{Name: "TraceId", Data: b.traceID},
 		{Name: "SpanId", Data: b.spanID},
+		{Name: "TraceFlags", Data: b.traceFlags},
 		{Name: "SeverityText", Data: b.severityText},
 		{Name: "SeverityNumber", Data: b.severityNumber},
 		{Name: "ServiceName", Data: b.serviceName},
 		{Name: "Body", Data: b.body},
-		{Name: "ScopeName", Data: b.scopeName},
+		{Name: "ResourceSchemaUrl", Data: b.resourceSchemaURL},
 		{Name: "ResourceAttributes", Data: b.resourceAttributes},
+		{Name: "ScopeSchemaUrl", Data: b.scopeSchemaURL},
+		{Name: "ScopeName", Data: b.scopeName},
+		{Name: "ScopeVersion", Data: b.scopeVersion},
+		{Name: "ScopeAttributes", Data: b.scopeAttributes},
 		{Name: "LogAttributes", Data: b.logAttributes},
 	}
 }
 
 // tracesBlock holds the column set for one in-flight otel_traces batch.
+// Field order mirrors the schema in schema.go column-for-column. The
+// trailing array columns back the Events / Links Nested columns; they
+// are inserted via dotted names (Events.Timestamp, Links.TraceId, ...)
+// in input(). MATERIALIZED columns (Component/InvocationId/Agent) are
+// computed by ClickHouse from the maps and never appear here.
 type tracesBlock struct {
 	timestamp          *proto.ColDateTime64
 	egRef              *proto.ColLowCardinality[string]
 	traceID            *proto.ColStr
 	spanID             *proto.ColStr
 	parentSpanID       *proto.ColStr
+	traceState         *proto.ColStr
 	spanName           *proto.ColLowCardinality[string]
 	spanKind           *proto.ColLowCardinality[string]
 	serviceName        *proto.ColLowCardinality[string]
+	scopeName          *proto.ColLowCardinality[string]
+	scopeVersion       *proto.ColLowCardinality[string]
 	duration           *proto.ColUInt64
 	statusCode         *proto.ColLowCardinality[string]
 	statusMessage      *proto.ColStr
-	scopeName          *proto.ColLowCardinality[string]
 	resourceAttributes *proto.ColMap[string, string]
 	spanAttributes     *proto.ColMap[string, string]
-	rows               int
-	bytes              int
+
+	eventsTimestamp  *proto.ColArr[time.Time]
+	eventsName       *proto.ColArr[string]
+	eventsAttributes *proto.ColArr[map[string]string]
+	linksTraceID     *proto.ColArr[string]
+	linksSpanID      *proto.ColArr[string]
+	linksTraceState  *proto.ColArr[string]
+	linksAttributes  *proto.ColArr[map[string]string]
+
+	rows  int
+	bytes int
 }
 
 func newTracesBlock() *tracesBlock {
@@ -260,15 +289,26 @@ func newTracesBlock() *tracesBlock {
 		traceID:            new(proto.ColStr),
 		spanID:             new(proto.ColStr),
 		parentSpanID:       new(proto.ColStr),
+		traceState:         new(proto.ColStr),
 		spanName:           new(proto.ColStr).LowCardinality(),
 		spanKind:           new(proto.ColStr).LowCardinality(),
 		serviceName:        new(proto.ColStr).LowCardinality(),
+		scopeName:          new(proto.ColStr).LowCardinality(),
+		scopeVersion:       new(proto.ColStr).LowCardinality(),
 		duration:           new(proto.ColUInt64),
 		statusCode:         new(proto.ColStr).LowCardinality(),
 		statusMessage:      new(proto.ColStr),
-		scopeName:          new(proto.ColStr).LowCardinality(),
 		resourceAttributes: proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)),
 		spanAttributes:     proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)),
+		// DateTime64 precision must be set BEFORE .Array(); the inner
+		// column panics on append otherwise.
+		eventsTimestamp:  new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano).Array(),
+		eventsName:       new(proto.ColStr).LowCardinality().Array(),
+		eventsAttributes: proto.NewArray[map[string]string](proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr))),
+		linksTraceID:     new(proto.ColStr).Array(),
+		linksSpanID:      new(proto.ColStr).Array(),
+		linksTraceState:  new(proto.ColStr).Array(),
+		linksAttributes:  proto.NewArray[map[string]string](proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr))),
 	}
 }
 
@@ -279,15 +319,24 @@ func (b *tracesBlock) input() proto.Input {
 		{Name: "TraceId", Data: b.traceID},
 		{Name: "SpanId", Data: b.spanID},
 		{Name: "ParentSpanId", Data: b.parentSpanID},
+		{Name: "TraceState", Data: b.traceState},
 		{Name: "SpanName", Data: b.spanName},
 		{Name: "SpanKind", Data: b.spanKind},
 		{Name: "ServiceName", Data: b.serviceName},
+		{Name: "ScopeName", Data: b.scopeName},
+		{Name: "ScopeVersion", Data: b.scopeVersion},
 		{Name: "Duration", Data: b.duration},
 		{Name: "StatusCode", Data: b.statusCode},
 		{Name: "StatusMessage", Data: b.statusMessage},
-		{Name: "ScopeName", Data: b.scopeName},
 		{Name: "ResourceAttributes", Data: b.resourceAttributes},
 		{Name: "SpanAttributes", Data: b.spanAttributes},
+		{Name: "Events.Timestamp", Data: b.eventsTimestamp},
+		{Name: "Events.Name", Data: b.eventsName},
+		{Name: "Events.Attributes", Data: b.eventsAttributes},
+		{Name: "Links.TraceId", Data: b.linksTraceID},
+		{Name: "Links.SpanId", Data: b.linksSpanID},
+		{Name: "Links.TraceState", Data: b.linksTraceState},
+		{Name: "Links.Attributes", Data: b.linksAttributes},
 	}
 }
 
@@ -369,8 +418,12 @@ func (w *Writer) appendLogs(block *logsBlock, rls []*logspb.ResourceLogs) {
 		resAttrs := otelemit.FlattenAttrs(rl.GetResource().GetAttributes())
 		egRef := resAttrs[otelemit.AttrEgressGateway]
 		serviceName := resAttrs[string(semconv.ServiceNameKey)]
+		resourceSchemaURL := rl.GetSchemaUrl()
 		for _, sl := range rl.GetScopeLogs() {
+			scopeSchemaURL := sl.GetSchemaUrl()
 			scopeName := sl.GetScope().GetName()
+			scopeVersion := sl.GetScope().GetVersion()
+			scopeAttrs := otelemit.FlattenAttrs(sl.GetScope().GetAttributes())
 			for _, lr := range sl.GetLogRecords() {
 				logAttrs := otelemit.FlattenAttrs(lr.GetAttributes())
 				body := ""
@@ -387,12 +440,17 @@ func (w *Writer) appendLogs(block *logsBlock, rls []*logspb.ResourceLogs) {
 				block.egRef.Append(egRef)
 				block.traceID.Append(hexOrEmpty(lr.GetTraceId()))
 				block.spanID.Append(hexOrEmpty(lr.GetSpanId()))
+				block.traceFlags.Append(uint8(lr.GetFlags()))
 				block.severityText.Append(lr.GetSeverityText())
 				block.severityNumber.Append(uint8(lr.GetSeverityNumber()))
 				block.serviceName.Append(serviceName)
 				block.body.Append(body)
-				block.scopeName.Append(scopeName)
+				block.resourceSchemaURL.Append(resourceSchemaURL)
 				block.resourceAttributes.Append(resAttrs)
+				block.scopeSchemaURL.Append(scopeSchemaURL)
+				block.scopeName.Append(scopeName)
+				block.scopeVersion.Append(scopeVersion)
+				block.scopeAttributes.Append(scopeAttrs)
 				block.logAttributes.Append(logAttrs)
 				block.rows++
 				block.bytes += approxLogBytes(body, logAttrs, resAttrs)
@@ -401,7 +459,10 @@ func (w *Writer) appendLogs(block *logsBlock, rls []*logspb.ResourceLogs) {
 	}
 }
 
-// appendTraces projects each Span in rss into block's columns.
+// appendTraces projects each Span in rss into block's columns. Span
+// Events (the egress sink's request/response header+body captures) are
+// persisted into the Events Nested column as parallel arrays; Links are
+// written as empty arrays since no producer emits them today.
 func (w *Writer) appendTraces(block *tracesBlock, rss []*tracepb.ResourceSpans) {
 	for _, rs := range rss {
 		resAttrs := otelemit.FlattenAttrs(rs.GetResource().GetAttributes())
@@ -409,6 +470,7 @@ func (w *Writer) appendTraces(block *tracesBlock, rss []*tracepb.ResourceSpans) 
 		serviceName := resAttrs[string(semconv.ServiceNameKey)]
 		for _, ss := range rs.GetScopeSpans() {
 			scopeName := ss.GetScope().GetName()
+			scopeVersion := ss.GetScope().GetVersion()
 			for _, sp := range ss.GetSpans() {
 				spanAttrs := otelemit.FlattenAttrs(sp.GetAttributes())
 				var start time.Time
@@ -421,30 +483,92 @@ func (w *Writer) appendTraces(block *tracesBlock, rss []*tracepb.ResourceSpans) 
 				if end := sp.GetEndTimeUnixNano(); end > sp.GetStartTimeUnixNano() {
 					duration = end - sp.GetStartTimeUnixNano()
 				}
-				statusCode := ""
-				statusMsg := ""
-				if st := sp.GetStatus(); st != nil {
-					statusCode = st.GetCode().String()
-					statusMsg = st.GetMessage()
+
+				// Events: one parallel slice element per event on this span;
+				// all three sub-arrays share the same length (driven by the
+				// same sp.GetEvents() loop), satisfying the Nested invariant.
+				evTimes := make([]time.Time, 0, len(sp.GetEvents()))
+				evNames := make([]string, 0, len(sp.GetEvents()))
+				evAttrs := make([]map[string]string, 0, len(sp.GetEvents()))
+				for _, ev := range sp.GetEvents() {
+					evTimes = append(evTimes, time.Unix(0, int64(ev.GetTimeUnixNano())))
+					evNames = append(evNames, ev.GetName())
+					evAttrs = append(evAttrs, otelemit.FlattenAttrs(ev.GetAttributes()))
 				}
+
 				block.timestamp.Append(start)
 				block.egRef.Append(egRef)
 				block.traceID.Append(hexOrEmpty(sp.GetTraceId()))
 				block.spanID.Append(hexOrEmpty(sp.GetSpanId()))
 				block.parentSpanID.Append(hexOrEmpty(sp.GetParentSpanId()))
+				block.traceState.Append(sp.GetTraceState())
 				block.spanName.Append(sp.GetName())
-				block.spanKind.Append(sp.GetKind().String())
+				block.spanKind.Append(spanKindStr(sp.GetKind()))
 				block.serviceName.Append(serviceName)
-				block.duration.Append(duration)
-				block.statusCode.Append(statusCode)
-				block.statusMessage.Append(statusMsg)
 				block.scopeName.Append(scopeName)
+				block.scopeVersion.Append(scopeVersion)
+				block.duration.Append(duration)
+				block.statusCode.Append(statusCodeStr(sp.GetStatus().GetCode()))
+				block.statusMessage.Append(sp.GetStatus().GetMessage())
 				block.resourceAttributes.Append(resAttrs)
 				block.spanAttributes.Append(spanAttrs)
+				block.eventsTimestamp.Append(evTimes)
+				block.eventsName.Append(evNames)
+				block.eventsAttributes.Append(evAttrs)
+				// Links are never emitted today; one empty array element per
+				// row keeps the Nested sub-arrays aligned and the rows
+				// round-trippable. A future link populator must hexOrEmpty()
+				// the link's []byte trace/span ids before appending.
+				block.linksTraceID.Append(nil)
+				block.linksSpanID.Append(nil)
+				block.linksTraceState.Append(nil)
+				block.linksAttributes.Append(nil)
 				block.rows++
 				block.bytes += approxSpanBytes(sp.GetName(), spanAttrs, resAttrs)
+				// Account for event bytes too: the body events carry base64
+				// request/response payloads that can dwarf the span itself,
+				// so they must gate the byte-based flush. Reuse the flattened
+				// maps to avoid a second AnyValueString pass.
+				for i := range evAttrs {
+					block.bytes += len(evNames[i]) + 16 + attrsBytes(evAttrs[i])
+				}
 			}
 		}
+	}
+}
+
+// spanKindStr maps an OTLP span kind to the otel-collector-contrib
+// stored form ("Client", "Server", ...) so off-the-shelf dashboards'
+// SpanKind filters match. The read API reverses this mapping when
+// reconstructing trace.proto.
+func spanKindStr(k tracepb.Span_SpanKind) string {
+	switch k {
+	case tracepb.Span_SPAN_KIND_INTERNAL:
+		return "Internal"
+	case tracepb.Span_SPAN_KIND_SERVER:
+		return "Server"
+	case tracepb.Span_SPAN_KIND_CLIENT:
+		return "Client"
+	case tracepb.Span_SPAN_KIND_PRODUCER:
+		return "Producer"
+	case tracepb.Span_SPAN_KIND_CONSUMER:
+		return "Consumer"
+	default:
+		return "Unspecified"
+	}
+}
+
+// statusCodeStr maps an OTLP status code to the otel-collector-contrib
+// stored form ("Unset", "Ok", "Error"). A nil span status decodes to
+// STATUS_CODE_UNSET via the proto getter, yielding "Unset".
+func statusCodeStr(c tracepb.Status_StatusCode) string {
+	switch c {
+	case tracepb.Status_STATUS_CODE_OK:
+		return "Ok"
+	case tracepb.Status_STATUS_CODE_ERROR:
+		return "Error"
+	default:
+		return "Unset"
 	}
 }
 

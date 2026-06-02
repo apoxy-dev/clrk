@@ -233,9 +233,9 @@ func renderSpansPane(spans []devagents.SpanEvent) string {
 
 func statusStyleForSpan(s string) lipgloss.Style {
 	switch s {
-	case "STATUS_CODE_OK", "OK":
+	case "STATUS_CODE_OK", "OK", "Ok":
 		return statusReadyStyle
-	case "STATUS_CODE_ERROR", "ERROR":
+	case "STATUS_CODE_ERROR", "ERROR", "Error":
 		return statusErrorStyle
 	default:
 		return mutedStyle
