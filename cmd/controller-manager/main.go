@@ -334,7 +334,7 @@ func main() {
 	if natsSrv != nil {
 		statusNATS = natsSrv
 	}
-	healthChecker := healthcheck.NewWorkerHealthChecker(cm.GetClient(), statusNATS)
+	healthChecker := healthcheck.NewWorkerHealthChecker(cm.GetClient(), cm.GetCache(), statusNATS)
 	if err := cm.Add(healthChecker); err != nil {
 		log.Error(err, "Unable to add worker health checker")
 		os.Exit(1)

@@ -37,7 +37,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -47,11 +49,14 @@ import (
 	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1"
 )
 
-// healthcheckerSyncInterval is how often the top-level loop reconciles the
-// live set of WorkerPools and their EndpointSlices (the routable-IP +
-// readiness half). It also prunes KV entries whose worker is long gone.
-// The cached controller-runtime client makes the List cheap.
-const healthcheckerSyncInterval = 5 * time.Second
+// healthcheckerResyncFallback is the slow safety-net interval for the
+// endpoint reconcile. Real WorkerPool/EndpointSlice changes drive the
+// reconcile event-driven via the manager cache's informers; this fallback
+// only guards against a missed informer event and gives the KV-eviction
+// sweep a periodic tick on an otherwise-idle cluster. It is deliberately
+// far longer than the old 5s poll — the reconcile no longer paces routing
+// freshness, the informer does.
+const healthcheckerResyncFallback = 30 * time.Second
 
 // healthcheckerDeadAfter marks a worker dead when no KV update (real Put or
 // floor heartbeat) has arrived in this window. Three times the worker-side
@@ -92,7 +97,13 @@ type NATSProvider interface {
 // bucket independently (native NATS fan-out, no dedup).
 type WorkerHealthChecker struct {
 	client client.Client
+	cache  cache.Cache  // source of WorkerPool/EndpointSlice informers for event-driven reconcile
 	nats   NATSProvider // nil => worker status disabled (NATS off); Pick finds no candidates
+
+	// resync coalesces informer events into endpoint reconciles. Buffered
+	// to depth 1 with a non-blocking send: a burst of EndpointSlice updates
+	// during a rollout collapses into a single follow-up reconcile.
+	resync chan struct{}
 
 	mu    sync.RWMutex
 	pools map[types.NamespacedName]map[string]*endpoint // pool -> podName -> endpoint
@@ -112,14 +123,18 @@ type kvEntry struct {
 	lastSeen time.Time
 }
 
-// NewWorkerHealthChecker constructs a WorkerHealthChecker. nats may be a
-// true nil interface when the embedded NATS server is disabled; the caller
-// must pass nil (not a typed nil *nats.Server) so the disabled branch is
-// taken cleanly.
-func NewWorkerHealthChecker(c client.Client, nats NATSProvider) *WorkerHealthChecker {
+// NewWorkerHealthChecker constructs a WorkerHealthChecker. c is the cached
+// controller-runtime client used for the (cheap, local) endpoint Lists; ca
+// is the manager cache the endpoint reconcile subscribes to for change
+// events (pass cm.GetCache()). nats may be a true nil interface when the
+// embedded NATS server is disabled; the caller must pass nil (not a typed
+// nil *nats.Server) so the disabled branch is taken cleanly.
+func NewWorkerHealthChecker(c client.Client, ca cache.Cache, nats NATSProvider) *WorkerHealthChecker {
 	return &WorkerHealthChecker{
 		client: c,
+		cache:  ca,
 		nats:   nats,
+		resync: make(chan struct{}, 1),
 		pools:  make(map[types.NamespacedName]map[string]*endpoint),
 		kv:     make(map[string]*kvEntry),
 	}
@@ -130,8 +145,9 @@ func NewWorkerHealthChecker(c client.Client, nats NATSProvider) *WorkerHealthChe
 // route incoming requests.
 func (h *WorkerHealthChecker) NeedLeaderElection() bool { return false }
 
-// Start runs the EndpointSlice sync loop, and (when NATS is enabled) a KV
-// watch goroutine, until ctx is cancelled.
+// Start runs the endpoint reconcile (event-driven off the manager cache's
+// WorkerPool/EndpointSlice informers, plus a slow fallback tick), and (when
+// NATS is enabled) a KV watch goroutine, until ctx is cancelled.
 func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 	log := ctrl.LoggerFrom(ctx).WithName("worker-healthchecker")
 	log.Info("Starting worker health checker")
@@ -142,20 +158,70 @@ func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 		log.Info("WARNING: Worker status routing disabled: embedded NATS is off; ingress will 503")
 	}
 
-	ticker := time.NewTicker(healthcheckerSyncInterval)
+	// Subscribe to WorkerPool + EndpointSlice changes so an endpoint going
+	// Ready/NotReady, a pod rolling, or a pool appearing reconciles routing
+	// immediately instead of on the next poll tick. Registering a handler on
+	// an already-synced informer also replays the current objects as adds,
+	// so this primes the first reconcile too.
+	if err := h.subscribeEndpoints(ctx, log); err != nil {
+		return err
+	}
+
+	// Slow fallback: guards against a missed informer event and ticks the
+	// KV-eviction sweep on an otherwise-idle cluster. Real changes drive
+	// h.resync.
+	ticker := time.NewTicker(healthcheckerResyncFallback)
 	defer ticker.Stop()
 
-	// Run one sync immediately so first-request routing doesn't have to
-	// wait a full interval after process start.
+	// Run one reconcile immediately so first-request routing doesn't have to
+	// wait for the informers' add-replay or a fallback tick after start.
 	h.syncOnce(ctx, log)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-h.resync:
+			h.syncOnce(ctx, log)
 		case <-ticker.C:
 			h.syncOnce(ctx, log)
 		}
+	}
+}
+
+// subscribeEndpoints registers a coalescing event handler on the manager
+// cache's WorkerPool and EndpointSlice informers. Every add/update/delete
+// nudges h.resync; the Start loop reconciles at most once per pending nudge.
+func (h *WorkerHealthChecker) subscribeEndpoints(ctx context.Context, log logr.Logger) error {
+	handler := toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { h.triggerResync() },
+		UpdateFunc: func(_, _ any) { h.triggerResync() },
+		DeleteFunc: func(any) { h.triggerResync() },
+	}
+	for _, obj := range []client.Object{
+		&clrkv1alpha1.WorkerPool{},
+		&discoveryv1.EndpointSlice{},
+	} {
+		inf, err := h.cache.GetInformer(ctx, obj)
+		if err != nil {
+			return fmt.Errorf("get informer for %T: %w", obj, err)
+		}
+		if _, err := inf.AddEventHandler(handler); err != nil {
+			return fmt.Errorf("add event handler for %T: %w", obj, err)
+		}
+	}
+	log.V(1).Info("Subscribed to WorkerPool + EndpointSlice changes")
+	return nil
+}
+
+// triggerResync requests a reconcile without blocking the informer
+// goroutine. The depth-1 buffer coalesces bursts: if a reconcile is already
+// pending the nudge is dropped, since the next syncOnce reads the latest
+// cache state anyway.
+func (h *WorkerHealthChecker) triggerResync() {
+	select {
+	case h.resync <- struct{}{}:
+	default:
 	}
 }
 
