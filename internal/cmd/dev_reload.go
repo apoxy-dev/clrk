@@ -259,13 +259,28 @@ func newDevReloadCmd() *cobra.Command {
 const rolloutTimeout = 3 * time.Minute
 
 // deploymentFor maps a `clrk dev` component name to the namespace/name of
-// the Deployment that runs it.
+// the Deployment that runs it. This is the rollout-wait target for both
+// components — even worker, whose rollout is *triggered* via its WorkerPool
+// (see workerPoolFor) but still converges on this Deployment.
 func deploymentFor(comp string) (ns, name string, ok bool) {
 	switch comp {
 	case "controller-manager":
 		return devClrkNamespace, cmAccountName, true
 	case "worker":
 		return "default", "default-workers", true
+	}
+	return "", "", false
+}
+
+// workerPoolFor maps a `clrk dev` component name to the namespace/name of the
+// WorkerPool CR whose controller owns its Deployment. Only `worker` has one;
+// controller-manager runs as a Deployment `clrk dev` applies directly, so it
+// has no WorkerPool and is rolled in place. A component with a WorkerPool must
+// have its rollout triggered on the CR, not the Deployment — see
+// reloadAndWait and ClusterDriver.RolloutWorkerPool.
+func workerPoolFor(comp string) (ns, name string, ok bool) {
+	if comp == "worker" {
+		return "default", "default", true
 	}
 	return "", "", false
 }
@@ -283,10 +298,37 @@ func reloadAndWait(ctx context.Context, sess *devSession, comp string, wantDiges
 		return fmt.Errorf("component must be worker or controller-manager, got %q", comp)
 	}
 	cluster := drivers.NewClusterDriver(sess.DataDir, "", 0)
-	slog.Info("Rolling out Deployment", "component", comp, "namespace", ns, "name", name)
-	if err := cluster.Rollout(ctx, ns, name); err != nil {
-		return fmt.Errorf("rolling %s Deployment: %w", comp, err)
+	// Trigger the rollout on the WorkerPool when the component has one: its
+	// Deployment is controller-owned and a restart annotation patched onto
+	// the Deployment directly is reverted by WorkerPoolDeploymentReconciler
+	// on its next pass (which scales the new ReplicaSet back to zero, leaving
+	// the stale image running). Patching the WorkerPool lets the controller
+	// propagate the restart into the Deployment template itself, then we wait
+	// on the WorkerPool's status — observedGeneration + Available/Progressing.
+	// Waiting on the WorkerPool rather than the Deployment is what makes this
+	// race-free: the Deployment's status lags the WorkerPool spec patch, so a
+	// direct Deployment poll can observe the still-converged pre-reconcile
+	// state and return before the roll even starts. The controller-manager has
+	// no WorkerPool, so it's rolled and waited on in place.
+	if wpNS, wpName, pooled := workerPoolFor(comp); pooled {
+		slog.Info("Rolling out via WorkerPool", "component", comp, "namespace", wpNS, "name", wpName)
+		gen, err := cluster.RolloutWorkerPool(ctx, wpNS, wpName)
+		if err != nil {
+			return fmt.Errorf("rolling %s WorkerPool: %w", comp, err)
+		}
+		if err := cluster.WaitWorkerPoolConverged(ctx, wpNS, wpName, gen, rolloutTimeout); err != nil {
+			return err
+		}
+	} else {
+		slog.Info("Rolling out Deployment", "component", comp, "namespace", ns, "name", name)
+		if err := cluster.Rollout(ctx, ns, name); err != nil {
+			return fmt.Errorf("rolling %s Deployment: %w", comp, err)
+		}
 	}
+	// Confirm the Deployment is rolled and (for push-image) its pods report the
+	// just-pushed digest. For a pooled component this runs only after the
+	// WorkerPool reports converged, so it can't race the controller; for the
+	// controller-manager it's the sole convergence + digest gate.
 	if err := cluster.WaitRolloutComplete(ctx, ns, name, rolloutTimeout, wantDigests...); err != nil {
 		return err
 	}

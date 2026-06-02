@@ -83,6 +83,7 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 	readyReplicas := deploy.Status.ReadyReplicas
 	wp.Status.ReadyReplicas = readyReplicas
+	wp.Status.ObservedGeneration = wp.Generation
 
 	now := metav1.Now()
 
@@ -106,8 +107,20 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		ObservedGeneration: wp.Generation,
 		LastTransitionTime: now,
 	}
-	if deploy.Status.UpdatedReplicas < replicas ||
-		deploy.Status.AvailableReplicas < replicas {
+	// A rollout is in progress until the Deployment's own controller has
+	// observed the latest template (ObservedGeneration caught up to
+	// Generation) AND every replica is updated, available, and none are
+	// unavailable. The ObservedGeneration check is what closes the
+	// propagation race: when a spec change (e.g. a `restartedAt` bump from
+	// `clrk dev reload`) lands, we patch the Deployment's template, which
+	// bumps deploy.Generation immediately — but deploy.Status still reflects
+	// the previous, fully-converged ReplicaSet for a beat. Without this check
+	// the condition would briefly report DeploymentComplete mid-roll, and a
+	// client waiting on it (or the new RS) would act on a stale pod set.
+	if deploy.Status.ObservedGeneration < deploy.Generation ||
+		deploy.Status.UpdatedReplicas < replicas ||
+		deploy.Status.AvailableReplicas < replicas ||
+		deploy.Status.UnavailableReplicas > 0 {
 		progressing.Status = metav1.ConditionTrue
 		progressing.Reason = "DeploymentRollingOut"
 		progressing.Message = "deployment is rolling out"

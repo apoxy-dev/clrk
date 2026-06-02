@@ -21,6 +21,7 @@ import (
 	k3dutil "github.com/k3d-io/k3d/v5/pkg/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -573,13 +574,97 @@ func (d *ClusterDriver) Rollout(ctx context.Context, ns, name string) error {
 	if err != nil {
 		return err
 	}
-	body := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"clrk.apoxy.dev/restartedAt":%q}}}}}`,
-		time.Now().UTC().Format(time.RFC3339))
+	body := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`,
+		clrkv1alpha1.RestartedAtAnnotation, time.Now().UTC().Format(time.RFC3339))
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	if err := c.Patch(ctx, dep, client.RawPatch(types.StrategicMergePatchType, []byte(body))); err != nil {
 		return fmt.Errorf("patching %s/%s: %w", ns, name, err)
 	}
 	return nil
+}
+
+// RolloutWorkerPool triggers a rolling restart of a WorkerPool's worker
+// Deployment by bumping RestartedAtAnnotation on the WorkerPool's
+// spec.podTemplate — NOT on the Deployment. The Deployment is a
+// controller-owned child: WorkerPoolDeploymentReconciler rebuilds its pod
+// template from wp.spec.podTemplate on every reconcile, so an annotation
+// patched straight onto the Deployment is wiped on the next pass and the
+// freshly-created ReplicaSet is scaled back to zero (the rollout silently
+// no-ops). Patching the WorkerPool makes the controller propagate the
+// annotation into the Deployment template itself — it can't revert a change
+// it's the source of. Uses a JSON merge patch: no Get+Update, so it can't
+// lose the rollout to a 409, and on an annotations map its merge semantics
+// match strategic merge anyway.
+//
+// Returns the WorkerPool's post-patch metadata.generation so the caller can
+// wait for status.observedGeneration to catch up (see WaitWorkerPoolConverged)
+// — the race-free signal that the rollout this patch triggered has completed.
+func (d *ClusterDriver) RolloutWorkerPool(ctx context.Context, ns, name string) (int64, error) {
+	c, err := d.kubeClientFor(ctx)
+	if err != nil {
+		return 0, err
+	}
+	body := fmt.Sprintf(`{"spec":{"podTemplate":{"metadata":{"annotations":{%q:%q}}}}}`,
+		clrkv1alpha1.RestartedAtAnnotation, time.Now().UTC().Format(time.RFC3339))
+	wp := &clrkv1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	if err := c.Patch(ctx, wp, client.RawPatch(types.MergePatchType, []byte(body))); err != nil {
+		return 0, fmt.Errorf("patching WorkerPool %s/%s: %w", ns, name, err)
+	}
+	// The patch response carries the bumped generation.
+	return wp.Generation, nil
+}
+
+// WaitWorkerPoolConverged blocks until the WorkerPool has reconciled at least
+// wantGeneration and reports its workers rolled out and ready — Available=True
+// and Progressing=False. This is the race-free counterpart to triggering a
+// rollout via the WorkerPool: the WorkerPool's status is what the controller
+// derives from the Deployment, so waiting on it (rather than polling the
+// Deployment directly) can't observe the pre-reconcile converged state. The
+// observedGeneration floor ensures we're reading the controller's verdict on
+// THIS rollout, not a stale status from before the trigger.
+func (d *ClusterDriver) WaitWorkerPoolConverged(ctx context.Context, ns, name string, wantGeneration int64, timeout time.Duration) error {
+	c, err := d.kubeClientFor(ctx)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	pollErr := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var wp clrkv1alpha1.WorkerPool
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &wp); err != nil {
+			lastErr = err
+			return false, nil
+		}
+		if wp.Status.ObservedGeneration < wantGeneration {
+			lastErr = fmt.Errorf("WorkerPool %s/%s not yet observed (observedGeneration=%d, want >=%d)",
+				ns, name, wp.Status.ObservedGeneration, wantGeneration)
+			return false, nil
+		}
+		avail := meta.FindStatusCondition(wp.Status.Conditions, "Available")
+		prog := meta.FindStatusCondition(wp.Status.Conditions, "Progressing")
+		if avail == nil || avail.Status != metav1.ConditionTrue ||
+			prog == nil || prog.Status != metav1.ConditionFalse {
+			lastErr = fmt.Errorf("WorkerPool %s/%s rolling out (available=%s, progressing=%s)",
+				ns, name, conditionStatus(avail), conditionStatus(prog))
+			return false, nil
+		}
+		return true, nil
+	})
+	if wait.Interrupted(pollErr) {
+		if lastErr != nil {
+			return fmt.Errorf("WorkerPool %s/%s not converged within %s: %w", ns, name, timeout, lastErr)
+		}
+		return fmt.Errorf("WorkerPool %s/%s not converged within %s", ns, name, timeout)
+	}
+	return pollErr
+}
+
+// conditionStatus renders a possibly-absent condition's status for error
+// messages: "Unknown" when the condition isn't set yet.
+func conditionStatus(c *metav1.Condition) string {
+	if c == nil {
+		return string(metav1.ConditionUnknown)
+	}
+	return string(c.Status)
 }
 
 // imageIDMatches reports whether a container's reported imageID embeds any

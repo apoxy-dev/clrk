@@ -4714,6 +4714,13 @@ func schema_clrk_api_clrk_v1alpha1_WorkerPoolStatus(ref common.ReferenceCallback
 			SchemaProps: spec.SchemaProps{
 				Type: []string{"object"},
 				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the most recent metadata.generation the controller has reconciled. Clients compare it against metadata.generation to tell whether the controller has acted on the latest spec; together with the Available/Progressing conditions it gives a race-free rollout signal. `clrk dev reload worker` waits on this rather than polling the controller-owned Deployment, whose status lags this resource (polling the Deployment can observe the pre-reconcile converged state and report \"rolled out\" before the roll has even started).",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
 					"readyReplicas": {
 						SchemaProps: spec.SchemaProps{
 							Description: "ReadyReplicas is the number of worker pods that are ready.",

@@ -30,6 +30,21 @@ const (
 	LabelExposePort = "clrk.apoxy.dev/expose-port"
 )
 
+// Annotations bumped to trigger pod rollouts (the same mechanism as
+// `kubectl rollout restart`).
+const (
+	// RestartedAtAnnotation is stamped with an RFC3339 timestamp on a pod
+	// template's annotations to force a rolling restart. For a controller-
+	// owned Deployment (a WorkerPool's), it must be set on
+	// WorkerPool.spec.podTemplate, not the Deployment: the
+	// WorkerPoolDeploymentReconciler rebuilds the Deployment's pod template
+	// from the WorkerPool on every reconcile, so an annotation patched onto
+	// the Deployment is wiped on the next pass and the new ReplicaSet is
+	// scaled back to zero. Set on the WorkerPool, the controller propagates
+	// it into the Deployment template itself.
+	RestartedAtAnnotation = "clrk.apoxy.dev/restartedAt"
+)
+
 // AgentKind values written into LabelAgentKind. Workers branch on this to
 // pick the right sandbox lifecycle (TaskAgent: per-trigger, DaemonAgent:
 // long-lived with restart policy).

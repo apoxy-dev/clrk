@@ -56,6 +56,16 @@ type ImageCacheConfig struct {
 }
 
 type WorkerPoolStatus struct {
+	// ObservedGeneration is the most recent metadata.generation the controller
+	// has reconciled. Clients compare it against metadata.generation to tell
+	// whether the controller has acted on the latest spec; together with the
+	// Available/Progressing conditions it gives a race-free rollout signal.
+	// `clrk dev reload worker` waits on this rather than polling the
+	// controller-owned Deployment, whose status lags this resource (polling the
+	// Deployment can observe the pre-reconcile converged state and report
+	// "rolled out" before the roll has even started).
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ReadyReplicas is the number of worker pods that are ready.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
