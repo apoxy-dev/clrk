@@ -76,6 +76,13 @@ const kvEvictAfter = 30 * time.Second
 // before the bucket is created on a fresh store).
 const kvWatchBackoff = 2 * time.Second
 
+// informerSubscribeBackoff paces retrying the endpoint informer
+// subscription at startup, when the WorkerPool API (served by the embedded
+// apiserver) may not yet be available. Short so the event-driven reconcile
+// attaches promptly once the API comes up; until then the immediate
+// syncOnce + fallback tick keep routing alive.
+const informerSubscribeBackoff = 1 * time.Second
+
 // NATSProvider is the subset of the embedded NATS server the healthchecker
 // needs to watch the WORKER_STATUS KV bucket: wait for readiness, then open
 // a connection. *internal/nats.Server satisfies it (in-process). Declared
@@ -160,16 +167,19 @@ func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 
 	// Subscribe to WorkerPool + EndpointSlice changes so an endpoint going
 	// Ready/NotReady, a pod rolling, or a pool appearing reconciles routing
-	// immediately instead of on the next poll tick. Registering a handler on
-	// an already-synced informer also replays the current objects as adds,
-	// so this primes the first reconcile too.
-	if err := h.subscribeEndpoints(ctx, log); err != nil {
-		return err
-	}
+	// immediately instead of on the next fallback tick. Done in the
+	// background with retry: at startup the WorkerPool API (served by the
+	// embedded apiserver) may not be ready, and GetInformer would fail; a
+	// fatal return here would take the whole manager down. The immediate
+	// syncOnce below plus the fallback tick keep routing working until the
+	// subscription attaches, and registering a handler on the (by then)
+	// synced informer replays the current objects as adds, priming a
+	// reconcile as soon as it lands.
+	go h.subscribeEndpoints(ctx, log)
 
-	// Slow fallback: guards against a missed informer event and ticks the
-	// KV-eviction sweep on an otherwise-idle cluster. Real changes drive
-	// h.resync.
+	// Slow fallback: guards against a missed informer event (or a not-yet-
+	// attached subscription) and ticks the KV-eviction sweep on an
+	// otherwise-idle cluster. Real changes drive h.resync.
 	ticker := time.NewTicker(healthcheckerResyncFallback)
 	defer ticker.Stop()
 
@@ -192,7 +202,9 @@ func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 // subscribeEndpoints registers a coalescing event handler on the manager
 // cache's WorkerPool and EndpointSlice informers. Every add/update/delete
 // nudges h.resync; the Start loop reconciles at most once per pending nudge.
-func (h *WorkerHealthChecker) subscribeEndpoints(ctx context.Context, log logr.Logger) error {
+// Each GetInformer is retried with backoff until it succeeds or ctx is
+// cancelled, tolerating the API not being served yet at process start.
+func (h *WorkerHealthChecker) subscribeEndpoints(ctx context.Context, log logr.Logger) {
 	handler := toolscache.ResourceEventHandlerFuncs{
 		AddFunc:    func(any) { h.triggerResync() },
 		UpdateFunc: func(_, _ any) { h.triggerResync() },
@@ -202,16 +214,30 @@ func (h *WorkerHealthChecker) subscribeEndpoints(ctx context.Context, log logr.L
 		&clrkv1alpha1.WorkerPool{},
 		&discoveryv1.EndpointSlice{},
 	} {
-		inf, err := h.cache.GetInformer(ctx, obj)
-		if err != nil {
-			return fmt.Errorf("get informer for %T: %w", obj, err)
-		}
-		if _, err := inf.AddEventHandler(handler); err != nil {
-			return fmt.Errorf("add event handler for %T: %w", obj, err)
+		if !h.addInformerHandler(ctx, obj, handler, log) {
+			return // ctx cancelled
 		}
 	}
 	log.V(1).Info("Subscribed to WorkerPool + EndpointSlice changes")
-	return nil
+}
+
+// addInformerHandler attaches handler to obj's informer, retrying with
+// backoff until it succeeds. Returns false only if ctx is cancelled first.
+func (h *WorkerHealthChecker) addInformerHandler(ctx context.Context, obj client.Object, handler toolscache.ResourceEventHandler, log logr.Logger) bool {
+	for {
+		inf, err := h.cache.GetInformer(ctx, obj)
+		if err == nil {
+			if _, err = inf.AddEventHandler(handler); err == nil {
+				return true
+			}
+		}
+		log.V(1).Info("Informer subscription not ready; retrying", "type", fmt.Sprintf("%T", obj), "err", err, "after", informerSubscribeBackoff)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(informerSubscribeBackoff):
+		}
+	}
 }
 
 // triggerResync requests a reconcile without blocking the informer
