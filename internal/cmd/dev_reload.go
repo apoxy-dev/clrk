@@ -218,8 +218,9 @@ func newDevReloadCmd() *cobra.Command {
 		Use:   "reload <component>",
 		Short: "Roll out the named clrk dev Deployment to pick up a freshly-pushed image",
 		Long: "Triggers a `kubectl rollout restart`-equivalent on the matching " +
-			"Deployment. Component is `worker` (default WorkerPool's Deployment) " +
-			"or `controller-manager`.",
+			"Deployment and blocks until the new pod has actually rolled out " +
+			"(observed, available, and Ready). Component is `worker` (default " +
+			"WorkerPool's Deployment) or `controller-manager`.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dataDir == "" {
@@ -252,26 +253,55 @@ func newDevReloadCmd() *cobra.Command {
 	return cmd
 }
 
-// reloadWorker bumps the default-workers Deployment's restartedAt
-// annotation, triggering a rolling restart.
-func reloadWorker(ctx context.Context, sess *devSession) error {
-	cluster := drivers.NewClusterDriver(sess.DataDir, "", 0)
-	slog.Info("Rolling out default-workers Deployment")
-	if err := cluster.Rollout(ctx, "default", "default-workers"); err != nil {
-		return fmt.Errorf("rolling worker Deployment: %w", err)
+// rolloutTimeout bounds how long a reload waits for the new pods to come
+// up healthy on the freshly-pushed image. Matches the cm-Available budget
+// in bringUp so a reload can't outlive a fresh launch.
+const rolloutTimeout = 3 * time.Minute
+
+// deploymentFor maps a `clrk dev` component name to the namespace/name of
+// the Deployment that runs it.
+func deploymentFor(comp string) (ns, name string, ok bool) {
+	switch comp {
+	case "controller-manager":
+		return devClrkNamespace, cmAccountName, true
+	case "worker":
+		return "default", "default-workers", true
 	}
-	slog.Info("default-workers rollout triggered")
+	return "", "", false
+}
+
+// reloadAndWait triggers a rolling restart of comp's Deployment and blocks
+// until the rollout converges with the live pods reporting wantDigests
+// (pass none to wait for rollout completion only). This is what makes
+// `--reload` trustworthy: rather than returning the instant the rollout is
+// *triggered*, it returns only once the new pod is actually running — and,
+// when a digest is supplied, fails loudly if the node served a cached
+// `:dev` tag instead of the image just pushed.
+func reloadAndWait(ctx context.Context, sess *devSession, comp string, wantDigests ...string) error {
+	ns, name, ok := deploymentFor(comp)
+	if !ok {
+		return fmt.Errorf("component must be worker or controller-manager, got %q", comp)
+	}
+	cluster := drivers.NewClusterDriver(sess.DataDir, "", 0)
+	slog.Info("Rolling out Deployment", "component", comp, "namespace", ns, "name", name)
+	if err := cluster.Rollout(ctx, ns, name); err != nil {
+		return fmt.Errorf("rolling %s Deployment: %w", comp, err)
+	}
+	if err := cluster.WaitRolloutComplete(ctx, ns, name, rolloutTimeout, wantDigests...); err != nil {
+		return err
+	}
+	slog.Info("Rollout complete", "component", comp)
 	return nil
 }
 
-// reloadControllerManager bumps the cm Deployment's restartedAt
-// annotation, triggering a rolling restart.
+// reloadWorker rolls the default-workers Deployment and waits for it to
+// converge.
+func reloadWorker(ctx context.Context, sess *devSession) error {
+	return reloadAndWait(ctx, sess, "worker")
+}
+
+// reloadControllerManager rolls the cm Deployment and waits for it to
+// converge.
 func reloadControllerManager(ctx context.Context, sess *devSession) error {
-	cluster := drivers.NewClusterDriver(sess.DataDir, "", 0)
-	slog.Info("Rolling out controller-manager Deployment")
-	if err := cluster.Rollout(ctx, devClrkNamespace, cmAccountName); err != nil {
-		return fmt.Errorf("rolling controller-manager Deployment: %w", err)
-	}
-	slog.Info("controller-manager rollout triggered")
-	return nil
+	return reloadAndWait(ctx, sess, "controller-manager")
 }

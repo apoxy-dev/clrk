@@ -230,6 +230,12 @@ func runDevPlain(ctx context.Context, o *devOpts, receiver *devotel.Receiver) er
 	slog.Info("Starting clrk dev", "data_dir", o.dataDir, "workers", o.workers)
 	state, err := bringUp(ctx, o, nil)
 	if err != nil {
+		if errors.Is(err, errKeepClusterForDebug) {
+			slog.Error("Bring-up failed; leaving the cluster up for inspection because a --registry-image override is in play. "+
+				"Tail the cm logs, fix the image, then `docker push ... && clrk dev reload controller-manager`. "+
+				"Run `clrk dev stop` to tear it down.", "err", err)
+			return err
+		}
 		state.teardown()
 		return err
 	}
@@ -366,12 +372,20 @@ func runDevTUI(ctx context.Context, o *devOpts, receiver *devotel.Receiver) erro
 
 	orchestrateCancel()
 	state := <-stateCh
-	state.teardown()
 	orchErr := <-orchErrCh
+	keepForDebug := errors.Is(orchErr, errKeepClusterForDebug)
+	if !keepForDebug {
+		state.teardown()
+	}
 
 	// Restore stderr-bound slog before printing the summary so it lands in the
 	// terminal scrollback rather than the now-torn-down TUI.
 	slog.SetDefault(prevSlog)
+	if keepForDebug {
+		slog.Error("Bring-up failed; leaving the cluster up for inspection because a --registry-image override is in play. "+
+			"Tail the cm logs, fix the image, then `docker push ... && clrk dev reload controller-manager`. "+
+			"Run `clrk dev stop` to tear it down.", "err", orchErr)
+	}
 	if orchErr != nil && !errors.Is(orchErr, context.Canceled) {
 		return orchErr
 	}
@@ -416,6 +430,13 @@ const (
 func workerComponent(i int) string {
 	return fmt.Sprintf("worker-%d", i)
 }
+
+// errKeepClusterForDebug marks a bring-up failure that must NOT tear the
+// cluster down. Set when a --registry-image override is in play so a
+// crash-looping locally-built image can be inspected (`kubectl logs`) and
+// `clrk dev reload`-ed in place, instead of forcing a full cluster rebuild
+// on every bad push.
+var errKeepClusterForDebug = errors.New("bring-up failed; cluster left up for inspection")
 
 // bringUp drives the linear startup sequence: cluster → namespace →
 // controller-manager Deployment → APIService discoverable → default
@@ -464,7 +485,14 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		}
 		slog.Info("Controller-manager Deployment applied; waiting Available")
 		if err := state.cluster.WaitDeploymentAvailable(ctx, devClrkNamespace, cmAccountName, 3*time.Minute); err != nil {
-			return fmt.Errorf("controller-manager never became available: %w", err)
+			err = fmt.Errorf("controller-manager never became available: %w", err)
+			// With a local-image override, a crash-looping cm is almost
+			// certainly the image under test. Keep the cluster up so it can
+			// be inspected and reloaded rather than rebuilt from scratch.
+			if len(o.registryImages) > 0 {
+				return fmt.Errorf("%w: %w", errKeepClusterForDebug, err)
+			}
+			return err
 		}
 		return nil
 	}); err != nil {

@@ -59,7 +59,7 @@ func newDevPushImageCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Host path of the running session's data dir (defaults to --clrk-dir).")
 	cmd.Flags().StringVar(&tarPath, "tar", "", "Path to a docker-archive OCI tarball.")
-	cmd.Flags().BoolVar(&reload, "reload", false, "Trigger `clrk dev reload <component>` after a successful push.")
+	cmd.Flags().BoolVar(&reload, "reload", false, "After the push, roll the matching Deployment and block until the new pod is running the just-pushed image (fails loudly if the node served a cached :dev tag instead of re-pulling).")
 	return cmd
 }
 
@@ -103,20 +103,24 @@ func pushImageToDevRegistry(ctx context.Context, sess *devSession, comp, tarPath
 	if err := remote.Write(ref, img, remote.WithContext(ctx)); err != nil {
 		return fmt.Errorf("pushing %s: %w", refStr, err)
 	}
-	if digest, derr := img.Digest(); derr == nil {
-		slog.Info("Push complete", "digest", digest.String())
+	// Capture the pushed image's digests so a subsequent --reload can
+	// assert the live pod actually came up on THIS image rather than a
+	// cached `:dev` tag. Container runtimes surface either the manifest
+	// digest or the image-config digest as the pod's imageID, so collect
+	// both and let the wait match on either.
+	var wantDigests []string
+	if d, derr := img.Digest(); derr == nil {
+		slog.Info("Push complete", "digest", d.String())
+		wantDigests = append(wantDigests, d.String())
 	} else {
 		slog.Info("Push complete")
+	}
+	if d, derr := img.ConfigName(); derr == nil {
+		wantDigests = append(wantDigests, d.String())
 	}
 
 	if !reload {
 		return nil
 	}
-	switch comp {
-	case "controller-manager":
-		return reloadControllerManager(ctx, sess)
-	case "worker":
-		return reloadWorker(ctx, sess)
-	}
-	return nil
+	return reloadAndWait(ctx, sess, comp, wantDigests...)
 }

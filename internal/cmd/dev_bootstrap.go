@@ -42,9 +42,18 @@ const chPVCName = "clickhouse-data"
 // ClickHouse — survives a cm bounce; on an EmptyDir the stream would be
 // wiped on every restart, defeating the at-least-once durability the
 // worker outbox relies on. RWO is fine for the same single-replica +
-// Recreate reason as chPVCName. The cm's kine db (data.db on the separate
-// EmptyDir `data` volume) is intentionally left ephemeral.
+// Recreate reason as chPVCName.
 const natsPVCName = "nats-data"
+
+// kinePVCName backs the cm pod's `data` volume, which holds kine's data.db
+// — the SQLite file the embedded apiserver stores every clrk CR
+// (WorkerPool/TaskAgent/DaemonAgent/EgressGateway/...) in. PVC-backed so a
+// `clrk dev reload controller-manager` (a pod Recreate) no longer wipes the
+// CRs: the inner build/push/reload loop keeps its fixtures instead of
+// recreating them each iteration. A full `clrk dev` stop/start still starts
+// fresh — the k3d node, and with it the local-path PV, is recreated. RWO is
+// fine for the same single-replica + Recreate reason as chPVCName.
+const kinePVCName = "kine-data"
 
 // cmLabels are the selector labels stamped on the cm Deployment's pod
 // template and matched by its Service. Stable across reloads so a
@@ -230,8 +239,14 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 					}},
 					Volumes: []corev1.Volume{
 						{
-							Name:         "data",
-							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+							// Holds kine's data.db; PVC-backed so a cm reload
+							// doesn't wipe the apiserver's CRs. See kinePVCName.
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: kinePVCName,
+								},
+							},
 						},
 						{
 							Name: chPVCName,
@@ -318,6 +333,25 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 		},
 	}
 
+	// kine SQLite PVC. Backs the cm pod's `data` volume so the embedded
+	// apiserver's CRs survive a `clrk dev reload`. Tiny: dev clusters hold
+	// a handful of CRs. Like chPVC/natsPVC, no Service.
+	kinePVC := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kinePVCName,
+			Namespace: devClrkNamespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+
 	// EG's data-plane bootstrap dials `envoy-gateway.<ns>.svc:18000` for
 	// xDS. The cm hosts that xDS listener internally (it supervises an
 	// envoy-gateway child); we point a second ClusterIP Service at the
@@ -355,7 +389,7 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 		},
 	}
 
-	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc, chPVC, natsPVC); err != nil {
+	if err := cluster.ApplyObjects(ctx, sa, crb, svc, egSvc, apiSvc, chPVC, natsPVC, kinePVC); err != nil {
 		return err
 	}
 	// The cm Deployment goes through ApplyAndVerify so a silent SSA

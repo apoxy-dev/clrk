@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -579,4 +580,108 @@ func (d *ClusterDriver) Rollout(ctx context.Context, ns, name string) error {
 		return fmt.Errorf("patching %s/%s: %w", ns, name, err)
 	}
 	return nil
+}
+
+// imageIDMatches reports whether a container's reported imageID embeds any
+// of wantDigests. A node that served a cached `:dev` tag instead of the
+// freshly-pushed image reports the OLD digest here, so this is what
+// distinguishes a real reload from a no-op rollout. Empty wantDigests means
+// "don't check the digest" (the caller only wants rollout completion). Both
+// the manifest digest and the image-config digest are accepted because
+// container runtimes differ in which one they surface as imageID.
+func imageIDMatches(imageID string, wantDigests []string) bool {
+	if len(wantDigests) == 0 {
+		return true
+	}
+	for _, w := range wantDigests {
+		if w != "" && strings.Contains(imageID, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// WaitRolloutComplete blocks until ns/name has fully rolled out — observed
+// generation caught up, every replica updated and available, none
+// unavailable — and at least one running, Ready pod reports one of
+// wantDigests as a container image. This turns the fire-and-forget Rollout
+// into a trustworthy gate: instead of returning the instant a rollout is
+// triggered, it returns only once the new pod is actually serving, and
+// (when digests are supplied) fails loudly rather than silently testing
+// stale code when the node served a cached `:dev` tag. Pass no wantDigests
+// to wait for rollout completion only — e.g. `clrk dev reload`, which has no
+// pushed digest to assert against.
+func (d *ClusterDriver) WaitRolloutComplete(ctx context.Context, ns, name string, timeout time.Duration, wantDigests ...string) error {
+	c, err := d.kubeClientFor(ctx)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	pollErr := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var dep appsv1.Deployment
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &dep); err != nil {
+			lastErr = err
+			return false, nil
+		}
+		desired := int32(1)
+		if dep.Spec.Replicas != nil {
+			desired = *dep.Spec.Replicas
+		}
+		// The rollout must be observed by the controller and fully
+		// converged before we trust the pod set. With the cm's Recreate
+		// strategy this also guarantees the old pod (and its digest) is
+		// gone, so a digest check below can't pass on a lingering old pod.
+		if dep.Status.ObservedGeneration < dep.Generation ||
+			dep.Status.UpdatedReplicas < desired ||
+			dep.Status.AvailableReplicas < desired ||
+			dep.Status.UnavailableReplicas > 0 {
+			lastErr = fmt.Errorf("rollout in progress (observed=%d/%d updated=%d available=%d unavailable=%d desired=%d)",
+				dep.Status.ObservedGeneration, dep.Generation,
+				dep.Status.UpdatedReplicas, dep.Status.AvailableReplicas,
+				dep.Status.UnavailableReplicas, desired)
+			return false, nil
+		}
+		sel, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+		if err != nil {
+			return false, fmt.Errorf("parsing selector for %s/%s: %w", ns, name, err)
+		}
+		var pods corev1.PodList
+		if err := c.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+			lastErr = err
+			return false, nil
+		}
+		matched := 0
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			for _, cs := range p.Status.ContainerStatuses {
+				if !imageIDMatches(cs.ImageID, wantDigests) {
+					continue
+				}
+				if !cs.Ready {
+					lastErr = fmt.Errorf("pod %s container %s is on the target image but not Ready yet", p.Name, cs.Name)
+					return false, nil
+				}
+				matched++
+			}
+		}
+		if matched == 0 {
+			if len(wantDigests) == 0 {
+				lastErr = fmt.Errorf("no running pod for %s/%s yet", ns, name)
+			} else {
+				lastErr = fmt.Errorf("no running pod for %s/%s reports digest %v yet (node may be serving a cached :dev tag)", ns, name, wantDigests)
+			}
+			return false, nil
+		}
+		return true, nil
+	})
+	if wait.Interrupted(pollErr) {
+		if lastErr != nil {
+			return fmt.Errorf("rollout of %s/%s did not converge within %s: %w", ns, name, timeout, lastErr)
+		}
+		return fmt.Errorf("rollout of %s/%s did not converge within %s", ns, name, timeout)
+	}
+	return pollErr
 }
