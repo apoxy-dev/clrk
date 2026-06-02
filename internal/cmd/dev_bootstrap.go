@@ -160,6 +160,15 @@ func bootstrapControllerManager(ctx context.Context, cluster *drivers.ClusterDri
 							// publishing — the dev cm Service DNS + NATS port,
 							// not the default in-cluster controller-manager name.
 							fmt.Sprintf("--nats-advertise-addr=%s.%s.svc.cluster.local:%d", cmAccountName, devClrkNamespace, ports.NATSClientPort),
+							// Worker pods dial this OTLP endpoint (stamped onto
+							// them as CLRK_CM_OTLP_ENDPOINT) to ship traces + logs,
+							// including agent stdio (APO-718). Like the gRPC/NATS
+							// URIs above it must be the dev cm Service DNS
+							// (clrk-controller-manager.<ns>.svc) — the default
+							// in-cluster "controller-manager" name does not resolve
+							// from the worker namespace, so the export "no such
+							// host"s and worker logs never reach ClickHouse.
+							"--otlp-advertise-uri=http://" + cmAccountName + "." + devClrkNamespace + ".svc.cluster.local:4318",
 							"--dev-otlp-fallback-endpoint=" + otelEndpoint,
 							// Dev/CI: open the header-gated Invocation
 							// test-write door so integration tests can seed
