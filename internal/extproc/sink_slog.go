@@ -54,6 +54,9 @@ func (slogSink) Emit(r Record) {
 	}
 	if r.MCP != nil {
 		attrs = append(attrs, "mcp.method", r.MCP.Method)
+		if r.MCP.ProtocolVersion != "" {
+			attrs = append(attrs, "mcp.protocol.version", r.MCP.ProtocolVersion)
+		}
 		if r.MCP.ToolName != "" {
 			attrs = append(attrs, "mcp.tool.name", r.MCP.ToolName)
 		}

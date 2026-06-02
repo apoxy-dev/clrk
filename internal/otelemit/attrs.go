@@ -48,6 +48,7 @@ const (
 	AttrBackendSchema     = "clrk.backend.schema"
 
 	AttrMCPMethod             = "mcp.method"
+	AttrMCPProtocolVersion    = "mcp.protocol.version"
 	AttrMCPToolName           = "mcp.tool.name"
 	AttrMCPResourceURI        = "mcp.resource.uri"
 	AttrMCPRequestID          = "mcp.request.id"

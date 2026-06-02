@@ -15,10 +15,17 @@ const (
 	MCPMethodResourcesRead = "resources/read"
 )
 
+// headerMCPProtocolVersion is the request header an MCP client sends on
+// every HTTP request after the initialize handshake (MCP spec
+// 2025-06-18+) to carry the negotiated protocol version. Lower-cased
+// because Input.ReqHeaders keys are pre-lowered by ext_proc's
+// headersToMap.
+const headerMCPProtocolVersion = "mcp-protocol-version"
+
 // MCPInfo is the parsed view of one MCP JSON-RPC 2.0 exchange. The
-// request-envelope fields (Method, ToolName, ResourceURI, ID) are filled
-// by ParseRequest; the response fields (IsError, ErrorCode) are merged
-// in at emit time from ParseResponse, keyed to the same HTTP
+// request-side fields (Method, ToolName, ResourceURI, ID, ProtocolVersion)
+// are filled by ParseRequest; the response fields (IsError, ErrorCode) are
+// merged in at emit time from ParseResponse, keyed to the same HTTP
 // transaction. All fields are best-effort: when the captured request
 // body is not a single JSON-RPC request (batch array, truncated,
 // malformed) ParseRequest returns nil rather than a partial MCPInfo.
@@ -40,6 +47,13 @@ type MCPInfo struct {
 	// Kept for log fidelity so operators can correlate denies with the
 	// caller's view. Empty for notifications (no id field).
 	ID string
+
+	// ProtocolVersion is the negotiated MCP protocol version, read from
+	// the MCP-Protocol-Version request header (e.g. "2025-06-18"). Clients
+	// send it on every request after the initialize handshake; empty for
+	// the initialize request itself and for pre-2025-06-18 clients that
+	// predate the header. Attribution only — it does not affect parsing.
+	ProtocolVersion string
 
 	// IsError is true when the MCP JSON-RPC response envelope carried a
 	// top-level "error" object. Set by ParseResponse during emit-time
@@ -95,12 +109,14 @@ type mcpResponseEnvelope struct {
 //   - in.ReqTruncated is set (we won't gate policy on a partial read of
 //     params.name).
 //
-// The four fields read here (method, params.name, params.uri, id) are
-// stable across all MCP spec versions, so no per-version adapter is
-// needed today. in.ReqHeaders is carried on the Input so a future
-// version adapter can dispatch on the negotiated MCP-Protocol-Version
-// header (result content blocks, _meta, tool annotations, streamable
-// transport framing) without another signature change.
+// The four envelope fields read here (method, params.name, params.uri,
+// id) are stable across all MCP spec versions, so no per-version adapter
+// is needed to parse them. The negotiated protocol version is read from
+// the MCP-Protocol-Version request header and surfaced as
+// ProtocolVersion for attribution; dispatching the parse itself on that
+// version — result content blocks, _meta, tool annotations, streamable
+// transport framing — remains a future adapter the Input seam already
+// accommodates without another signature change.
 func ParseRequest(in Input) *MCPInfo {
 	body := in.ReqBody
 	if in.ReqTruncated || len(body) == 0 {
@@ -131,6 +147,12 @@ func ParseRequest(in Input) *MCPInfo {
 	}
 	if len(env.ID) > 0 {
 		info.ID = unquoteJSONScalar(string(env.ID))
+	}
+	// The negotiated protocol version rides on a request header, not the
+	// JSON-RPC body. Absent on the initialize request and on clients that
+	// predate the header (MCP spec 2024-11-05); left empty in both cases.
+	if v := in.ReqHeaders[headerMCPProtocolVersion]; v != "" {
+		info.ProtocolVersion = v
 	}
 	return info
 }

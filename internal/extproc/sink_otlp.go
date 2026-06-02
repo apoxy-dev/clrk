@@ -392,9 +392,12 @@ func mcpAttrs(r Record) []attribute.KeyValue {
 	if r.MCP == nil && r.MatchedMCPRouteName == "" && r.MCPToolPolicyDecision == "" {
 		return nil
 	}
-	out := make([]attribute.KeyValue, 0, 9)
+	out := make([]attribute.KeyValue, 0, 10)
 	if r.MCP != nil {
 		out = append(out, attribute.String(otelemit.AttrMCPMethod, r.MCP.Method))
+		if r.MCP.ProtocolVersion != "" {
+			out = append(out, attribute.String(otelemit.AttrMCPProtocolVersion, r.MCP.ProtocolVersion))
+		}
 		if r.MCP.ToolName != "" {
 			out = append(out, attribute.String(otelemit.AttrMCPToolName, r.MCP.ToolName))
 		}
@@ -550,6 +553,9 @@ func summaryLine(r Record, d derived) string {
 	}
 	if r.MCP != nil {
 		base += fmt.Sprintf(" mcp_method=%s", r.MCP.Method)
+		if r.MCP.ProtocolVersion != "" {
+			base += fmt.Sprintf(" mcp_proto=%s", r.MCP.ProtocolVersion)
+		}
 		if r.MCP.ToolName != "" {
 			base += fmt.Sprintf(" mcp_tool=%s", r.MCP.ToolName)
 		}
