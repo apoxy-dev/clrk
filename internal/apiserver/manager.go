@@ -39,6 +39,7 @@ import (
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
+	"github.com/apoxy-dev/clrk/internal/apiserver/telemetry"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 )
 
@@ -444,6 +445,29 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			return mgr.GetClient()
 		}),
 	)
+
+	// taskagents/{name}/{logs,traces} + daemonagents/{name}/{logs,traces}:
+	// the OTel read API. Each Connecter reads the embedded ClickHouse
+	// otel_logs / otel_traces tables (the same LazyPool the Invocation
+	// read model dials) and reconstructs OTLP/JSON scoped to the agent
+	// named in the path. agent.kind pins the parent kind so a TaskAgent
+	// and a DaemonAgent sharing a name can't read each other's telemetry.
+	telemetryDeps := telemetry.Deps{Pool: lazyPool}
+	for _, sub := range []struct {
+		resource  string
+		signal    telemetry.Signal
+		agentKind string
+	}{
+		{"taskagents/logs", telemetry.SignalLogs, clrkv1alpha1.AgentKindTask},
+		{"taskagents/traces", telemetry.SignalTraces, clrkv1alpha1.AgentKindTask},
+		{"daemonagents/logs", telemetry.SignalLogs, clrkv1alpha1.AgentKindDaemon},
+		{"daemonagents/traces", telemetry.SignalTraces, clrkv1alpha1.AgentKindDaemon},
+	} {
+		srvBuilder = srvBuilder.WithStorage(
+			clrkv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
+			telemetry.NewProvider(telemetryDeps, sub.signal, string(sub.signal), sub.agentKind),
+		)
+	}
 
 	if o.disableAuth {
 		srvBuilder = srvBuilder.DisableAuthorization()

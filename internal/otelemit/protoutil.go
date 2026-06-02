@@ -2,6 +2,7 @@ package otelemit
 
 import (
 	"encoding/hex"
+	"sort"
 	"strconv"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -17,6 +18,34 @@ func FlattenAttrs(in []*commonpb.KeyValue) map[string]string {
 	out := make(map[string]string, len(in))
 	for _, kv := range in {
 		out[kv.GetKey()] = AnyValueString(kv.GetValue())
+	}
+	return out
+}
+
+// AttrsToKV is the inverse of FlattenAttrs: it rebuilds an OTLP
+// KeyValue slice from a flat string map, every value as a string
+// AnyValue. The typing loss is inherent to the round trip — the
+// chwriter schema flattened all attribute values to strings via
+// AnyValueString, so reconstruction cannot recover the original
+// int/bool/double/bytes AnyValue kinds. Keys are emitted in sorted
+// order so the reconstructed signal (and its protojson form) is
+// deterministic. Returns nil for empty input, mirroring FlattenAttrs so
+// an absent map round-trips to an absent attribute slice.
+func AttrsToKV(m map[string]string) []*commonpb.KeyValue {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]*commonpb.KeyValue, 0, len(m))
+	for _, k := range keys {
+		out = append(out, &commonpb.KeyValue{
+			Key:   k,
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: m[k]}},
+		})
 	}
 	return out
 }
