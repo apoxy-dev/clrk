@@ -136,9 +136,15 @@ func runTask(ctx context.Context, out io.Writer, cfg *rest.Config, ns, name stri
 	invID := uuid.NewString()
 	header.Set(ports.HeaderInvocationID, invID)
 
-	// taskagents/<name>/invoke -- the write-side connect subresource.
-	path := fmt.Sprintf("/apis/clrk.apoxy.dev/v1alpha1/namespaces/%s/taskagents/%s/invoke", ns, name)
-	req := rc.Post().AbsPath(path).Body(body)
+	// taskagents/<name>/invoke -- the write-side connect subresource. The
+	// request builder assembles the group/version/namespace/resource path,
+	// so the only literal is the subresource name.
+	req := rc.Post().
+		Namespace(ns).
+		Resource(taskAgentGVR.Resource).
+		Name(name).
+		SubResource("invoke").
+		Body(body)
 	for k, vals := range header {
 		req.SetHeader(k, vals...)
 	}
@@ -289,11 +295,15 @@ func readFullRequest(spec string, header http.Header) ([]byte, http.Header, erro
 // ("", false, nil) on deadline/cancel, or ("", false, err) on a
 // permanent error.
 func followInvocation(ctx context.Context, rc rest.Interface, ns, id string, timeout time.Duration) (string, bool, error) {
-	path := fmt.Sprintf("/apis/clrk.apoxy.dev/v1alpha1/namespaces/%s/invocations/%s", ns, id)
 	deadline := time.Now().Add(timeout)
 	backoff := 100 * time.Millisecond
 	for {
-		raw, err := rc.Get().AbsPath(path).DoRaw(ctx)
+		// invocations/<id> -- the top-level namespace-scoped read model.
+		raw, err := rc.Get().
+			Namespace(ns).
+			Resource("invocations").
+			Name(id).
+			DoRaw(ctx)
 		switch {
 		case err == nil:
 			var inv unstructured.Unstructured

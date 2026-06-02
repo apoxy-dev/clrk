@@ -58,9 +58,15 @@ func listInvocations(ctx context.Context, out io.Writer, cfg *rest.Config, ns, n
 	if err != nil {
 		return err
 	}
-	// taskagents/<name>/invocations — the per-parent read subresource.
-	path := fmt.Sprintf("/apis/clrk.apoxy.dev/v1alpha1/namespaces/%s/taskagents/%s/invocations", ns, name)
-	raw, err := rc.Get().AbsPath(path).DoRaw(ctx)
+	// taskagents/<name>/invocations — the per-parent read subresource. The
+	// request builder assembles the group/version/namespace/resource path,
+	// so the only literal is the subresource name.
+	raw, err := rc.Get().
+		Namespace(ns).
+		Resource(taskAgentGVR.Resource).
+		Name(name).
+		SubResource("invocations").
+		DoRaw(ctx)
 	if err != nil {
 		return fmt.Errorf("listing invocations for %s/%s: %w", ns, name, err)
 	}
