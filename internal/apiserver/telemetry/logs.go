@@ -61,6 +61,7 @@ func scanLogRows(ctx context.Context, pool Doer, body string) ([]logRow, error) 
 		scAttr  = proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr))
 		logAttr = proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr))
 	)
+	var rows []logRow
 	if err := pool.Do(ctx, ch.Query{
 		Body: body,
 		Result: proto.Results{
@@ -79,28 +80,39 @@ func scanLogRows(ctx context.Context, pool Doer, body string) ([]logRow, error) 
 			{Name: "ScopeAttributes", Data: scAttr},
 			{Name: "LogAttributes", Data: logAttr},
 		},
+		// OnResult drains every received block. ClickHouse splits a
+		// result into multiple blocks when the SELECT reads many parts
+		// at once -- which is the steady state here, since chwriter's
+		// concurrent inserts leave a stream of unmerged parts. Without an
+		// OnResult, ch-go's default handler accepts only the first block
+		// and fails the second with "no OnResult provided" (an
+		// intermittent 500 that tracks insert/merge pressure). The Result
+		// columns are reset per block, so each callback sees just that
+		// block's rows; copy them out before the next block overwrites.
+		OnResult: func(context.Context, proto.Block) error {
+			n := ts.Rows()
+			for i := 0; i < n; i++ {
+				rows = append(rows, logRow{
+					timestamp:         ts.Row(i),
+					traceID:           traceID.Row(i),
+					spanID:            spanID.Row(i),
+					traceFlags:        tflags.Row(i),
+					severityText:      sevText.Row(i),
+					severityNumber:    sevNum.Row(i),
+					body:              body0.Row(i),
+					resourceSchemaURL: resURL.Row(i),
+					resourceAttrs:     resAttr.Row(i),
+					scopeSchemaURL:    scURL.Row(i),
+					scopeName:         scName.Row(i),
+					scopeVersion:      scVer.Row(i),
+					scopeAttrs:        scAttr.Row(i),
+					logAttrs:          logAttr.Row(i),
+				})
+			}
+			return nil
+		},
 	}); err != nil {
 		return nil, err
-	}
-	n := ts.Rows()
-	rows := make([]logRow, 0, n)
-	for i := 0; i < n; i++ {
-		rows = append(rows, logRow{
-			timestamp:         ts.Row(i),
-			traceID:           traceID.Row(i),
-			spanID:            spanID.Row(i),
-			traceFlags:        tflags.Row(i),
-			severityText:      sevText.Row(i),
-			severityNumber:    sevNum.Row(i),
-			body:              body0.Row(i),
-			resourceSchemaURL: resURL.Row(i),
-			resourceAttrs:     resAttr.Row(i),
-			scopeSchemaURL:    scURL.Row(i),
-			scopeName:         scName.Row(i),
-			scopeVersion:      scVer.Row(i),
-			scopeAttrs:        scAttr.Row(i),
-			logAttrs:          logAttr.Row(i),
-		})
 	}
 	return rows, nil
 }

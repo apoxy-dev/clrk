@@ -77,6 +77,7 @@ func scanTraceRows(ctx context.Context, pool Doer, body string) ([]traceRow, err
 		lnState     = new(proto.ColStr).Array()
 		lnAttr      = proto.NewArray[map[string]string](proto.NewMap[string, string](new(proto.ColStr).LowCardinality(), new(proto.ColStr)))
 	)
+	var rows []traceRow
 	if err := pool.Do(ctx, ch.Query{
 		Body: body,
 		Result: proto.Results{
@@ -102,35 +103,46 @@ func scanTraceRows(ctx context.Context, pool Doer, body string) ([]traceRow, err
 			{Name: "Links.TraceState", Data: lnState},
 			{Name: "Links.Attributes", Data: lnAttr},
 		},
+		// OnResult drains every received block. ClickHouse splits a
+		// result into multiple blocks when the SELECT reads many parts
+		// at once -- the steady state here, since chwriter's concurrent
+		// inserts leave a stream of unmerged parts. Without an OnResult,
+		// ch-go's default handler accepts only the first block and fails
+		// the second with "no OnResult provided" (an intermittent 500
+		// that tracks insert/merge pressure). The Result columns are
+		// reset per block, so each callback sees just that block's rows;
+		// copy them out before the next block overwrites.
+		OnResult: func(context.Context, proto.Block) error {
+			n := ts.Rows()
+			for i := 0; i < n; i++ {
+				rows = append(rows, traceRow{
+					timestamp:       ts.Row(i),
+					traceID:         traceID.Row(i),
+					spanID:          spanID.Row(i),
+					parentSpanID:    parentSpan.Row(i),
+					traceState:      traceState.Row(i),
+					spanName:        spanName.Row(i),
+					spanKind:        spanKind.Row(i),
+					scopeName:       scName.Row(i),
+					scopeVersion:    scVer.Row(i),
+					duration:        duration.Row(i),
+					statusCode:      statusCode.Row(i),
+					statusMessage:   statusMsg.Row(i),
+					resourceAttrs:   resAttr.Row(i),
+					spanAttrs:       spanAttr.Row(i),
+					eventsTimestamp: evTimestamp.Row(i),
+					eventsName:      evName.Row(i),
+					eventsAttrs:     evAttr.Row(i),
+					linksTraceID:    lnTraceID.Row(i),
+					linksSpanID:     lnSpanID.Row(i),
+					linksTraceState: lnState.Row(i),
+					linksAttrs:      lnAttr.Row(i),
+				})
+			}
+			return nil
+		},
 	}); err != nil {
 		return nil, err
-	}
-	n := ts.Rows()
-	rows := make([]traceRow, 0, n)
-	for i := 0; i < n; i++ {
-		rows = append(rows, traceRow{
-			timestamp:       ts.Row(i),
-			traceID:         traceID.Row(i),
-			spanID:          spanID.Row(i),
-			parentSpanID:    parentSpan.Row(i),
-			traceState:      traceState.Row(i),
-			spanName:        spanName.Row(i),
-			spanKind:        spanKind.Row(i),
-			scopeName:       scName.Row(i),
-			scopeVersion:    scVer.Row(i),
-			duration:        duration.Row(i),
-			statusCode:      statusCode.Row(i),
-			statusMessage:   statusMsg.Row(i),
-			resourceAttrs:   resAttr.Row(i),
-			spanAttrs:       spanAttr.Row(i),
-			eventsTimestamp: evTimestamp.Row(i),
-			eventsName:      evName.Row(i),
-			eventsAttrs:     evAttr.Row(i),
-			linksTraceID:    lnTraceID.Row(i),
-			linksSpanID:     lnSpanID.Row(i),
-			linksTraceState: lnState.Row(i),
-			linksAttrs:      lnAttr.Row(i),
-		})
 	}
 	return rows, nil
 }
