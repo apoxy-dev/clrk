@@ -46,7 +46,7 @@ func BuildEmitter(ctx context.Context, api client.Reader, ns string) otelemit.Em
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName("clrk"),
 		semconv.K8SNamespaceName(ns),
-		attribute.String(otelemit.AttrComponent, "ingress"),
+		attribute.String(otelemit.AttrComponent, otelemit.ComponentIngressExtproc),
 	}
 	if podName != "" {
 		attrs = append(attrs, semconv.ServiceInstanceID(podName), semconv.K8SPodName(podName))

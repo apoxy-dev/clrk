@@ -69,6 +69,12 @@ const (
 	AttrWorkerPool = "clrk.worker.pool"
 	AttrSandboxID  = "clrk.sandbox.id"
 
+	// AttrIoStream is the OTel semconv record-level attribute marking a
+	// log record's source stream (IoStreamStdout / IoStreamStderr). It
+	// is wired onto sandbox stdio LogRecords in APO-718; the read API
+	// uses it to split a component's stdio into the two streams.
+	AttrIoStream = "log.iostream"
+
 	// AttrEgressGateway is the resource attribute every producer
 	// (worker, ingress/egress ext_proc) stamps with "<ns>/<name>" of
 	// the EgressGateway the signal belongs to. The cm OTLP receiver
@@ -94,6 +100,25 @@ const (
 	AttrTaskAgentRevision  = "clrk.taskagent.revision"
 	AttrWorkerAddr         = "clrk.worker.addr"
 	AttrIngressOutcome     = "clrk.ingress.outcome"
+)
+
+// Component* are the canonical clrk.component resource-attribute
+// values — the emitting process/entity. Wire-frozen: the read API's
+// source filter is clrk.component (split further by AttrIoStream for
+// stdio). sentrystack is reserved for the in-Sentry gVisor netstack
+// emitter (internal/sentrystack), which emits nothing yet — it is
+// populated when the egress forwarder callbacks gain their own emitter.
+const (
+	ComponentIngressExtproc = "ingress-extproc"
+	ComponentEgressExtproc  = "egress-extproc"
+	ComponentWorker         = "worker"
+	ComponentSentryStack    = "sentrystack"
+)
+
+// IoStream* are the enumerated values for AttrIoStream.
+const (
+	IoStreamStdout = "stdout"
+	IoStreamStderr = "stderr"
 )
 
 // IngressOutcome* are the enumerated values for AttrIngressOutcome.

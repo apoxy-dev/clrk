@@ -45,7 +45,7 @@ func buildEmitter(ctx context.Context, r *Runtime) otelemit.Emitter {
 		semconv.ServiceInstanceID(r.PodName),
 		semconv.K8SPodName(r.PodName),
 		semconv.K8SNamespaceName(r.Namespace),
-		attribute.String(otelemit.AttrComponent, "worker"),
+		attribute.String(otelemit.AttrComponent, otelemit.ComponentWorker),
 		attribute.String(otelemit.AttrWorkerPool, r.PoolName),
 	}
 	if egRef != "" {

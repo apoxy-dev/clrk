@@ -206,9 +206,17 @@ func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]strin
 		return immediateResponse(typev3.StatusCode_BadRequest, "clrk: invalid "+ports.HeaderTaskAgent+" (want ns/name)")
 	}
 
+	// Stamp both the ingress-specific clrk.taskagent.* attrs and the
+	// canonical agent.* attrs. Ingress only ever dispatches TaskAgents,
+	// so the kind is fixed. The agent.* set is what the chwriter
+	// materialized Agent column reads, so without it agent-keyed reads
+	// would silently miss the ingress.dispatch span (APO-717).
 	span.SetAttributes(
 		attribute.String(otelemit.AttrTaskAgentNamespace, ns),
 		attribute.String(otelemit.AttrTaskAgentName, name),
+		attribute.String(otelemit.AttrAgentKind, clrkv1alpha1.AgentKindTask),
+		attribute.String(otelemit.AttrAgentNamespace, ns),
+		attribute.String(otelemit.AttrAgentName, name),
 	)
 
 	var ta clrkv1alpha1.TaskAgent

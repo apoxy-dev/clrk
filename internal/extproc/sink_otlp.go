@@ -49,7 +49,7 @@ func newOTLPSink(ctx context.Context, endpoint, egRef string) (Sink, func(contex
 	podNS := os.Getenv("POD_NAMESPACE")
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName("clrk"),
-		attribute.String(otelemit.AttrComponent, "extproc"),
+		attribute.String(otelemit.AttrComponent, otelemit.ComponentEgressExtproc),
 	}
 	if podName != "" {
 		attrs = append(attrs, semconv.ServiceInstanceID(podName), semconv.K8SPodName(podName))
