@@ -12,8 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	otellog "go.opentelemetry.io/otel/log"
 
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/workerlog"
 )
 
@@ -29,11 +33,27 @@ import (
 // When fileSink is non-nil each line is also appended (with a `[stdout]`
 // / `[stderr]` prefix and a trailing newline) so `clrk agents logs` can
 // `tail -F` the file from outside the worker process.
+//
+// When otelLogger is non-nil each line is ALSO emitted as an OTLP
+// LogRecord (Body=line, severity INFO for stdout / ERROR for stderr,
+// agent.* + invocation.id + log.iostream attributes; resource
+// clrk.component=worker comes from the emitter). Records flow worker ->
+// cm :4318 receiver -> chwriter -> otel_logs, retrievable via the
+// {taskagents,daemonagents}/{name}/logs read subresource. The file tee
+// is kept for back-compat with the legacy `clrk agents logs` tail.
 type sandboxLineWriter struct {
 	logger   *slog.Logger
 	level    slog.Level
 	stream   string // "stdout" or "stderr".
 	fileSink *os.File
+
+	// otelLogger emits one LogRecord per line. nil disables OTLP emission
+	// (e.g. when the worker has no CLRK_CM_OTLP_ENDPOINT). otelSeverity and
+	// otelAttrs are precomputed from the fixed per-sandbox identity + stream
+	// so the per-line hot path only sets Body/Timestamp.
+	otelLogger   otellog.Logger
+	otelSeverity otellog.Severity
+	otelAttrs    []otellog.KeyValue
 
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -41,13 +61,46 @@ type sandboxLineWriter struct {
 
 const sandboxLineMaxBytes = 64 * 1024
 
-func newSandboxLineWriter(base *slog.Logger, level slog.Level, stream string, fileSink *os.File) *sandboxLineWriter {
-	return &sandboxLineWriter{
-		logger:   base.With(slog.String("stream", stream)),
-		level:    level,
-		stream:   stream,
-		fileSink: fileSink,
+func newSandboxLineWriter(base *slog.Logger, level slog.Level, stream string, fileSink *os.File, otelLogger otellog.Logger, id proxyproto.AgentIdentity) *sandboxLineWriter {
+	sev := otellog.SeverityInfo
+	if stream == otelemit.IoStreamStderr {
+		sev = otellog.SeverityError
 	}
+	return &sandboxLineWriter{
+		logger:       base.With(slog.String("stream", stream)),
+		level:        level,
+		stream:       stream,
+		fileSink:     fileSink,
+		otelLogger:   otelLogger,
+		otelSeverity: sev,
+		otelAttrs:    sandboxLogAttrs(id, stream),
+	}
+}
+
+// sandboxLogAttrs builds the record-level attribute set for a sandbox's
+// stdio LogRecords: the agent identity (so the read API can scope by
+// agent.name/namespace/kind and the materialized columns project Agent /
+// InvocationId) plus log.iostream so a component's stdout and stderr stay
+// separable. clrk.component=worker is a resource attribute on the emitter,
+// not repeated here. Empty UID / Revision / InvocationID are omitted, like
+// identityLogFields, so an absent value reads as absent rather than "".
+func sandboxLogAttrs(id proxyproto.AgentIdentity, stream string) []otellog.KeyValue {
+	attrs := []otellog.KeyValue{
+		otellog.String(otelemit.AttrAgentKind, id.Kind.String()),
+		otellog.String(otelemit.AttrAgentNamespace, id.Namespace),
+		otellog.String(otelemit.AttrAgentName, id.Name),
+	}
+	if id.UID != "" {
+		attrs = append(attrs, otellog.String(otelemit.AttrAgentUID, id.UID))
+	}
+	if id.Revision != "" {
+		attrs = append(attrs, otellog.String(otelemit.AttrAgentRevision, id.Revision))
+	}
+	if id.InvocationID != "" {
+		attrs = append(attrs, otellog.String(otelemit.AttrInvocationID, id.InvocationID))
+	}
+	attrs = append(attrs, otellog.String(otelemit.AttrIoStream, stream))
+	return attrs
 }
 
 var _ io.Writer = (*sandboxLineWriter)(nil)
@@ -99,6 +152,15 @@ func (w *sandboxLineWriter) emit(line string) {
 	if w.fileSink != nil {
 		// Best-effort: a failed write should never break sandbox stdio.
 		_, _ = fmt.Fprintf(w.fileSink, "[%s] %s\n", w.stream, line)
+	}
+	if w.otelLogger != nil {
+		var rec otellog.Record
+		rec.SetTimestamp(time.Now())
+		rec.SetSeverity(w.otelSeverity)
+		rec.SetBody(otellog.StringValue(line))
+		rec.AddAttributes(w.otelAttrs...)
+		// The batch processor owns the network I/O; Emit just enqueues.
+		w.otelLogger.Emit(context.Background(), rec)
 	}
 }
 

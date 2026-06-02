@@ -16,6 +16,7 @@ import (
 	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	otellog "go.opentelemetry.io/otel/log"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -59,6 +60,13 @@ type Manager struct {
 	// are mkdir'd under <workerCgroupPath>/system/<id> in Create and
 	// rmdir'd in Delete.
 	workerCgroupPath string
+
+	// logEmitter is the worker's OTLP logs logger (resource
+	// clrk.component=worker). Each sandbox's stdio line writer emits one
+	// LogRecord per line through it so agent stdout/stderr lands in
+	// otel_logs alongside the egress signals. nil (e.g. no OTLP endpoint)
+	// disables emission; the file tee and slog path are unaffected.
+	logEmitter otellog.Logger
 
 	// mu guards every map below. RWMutex because LookupEgressState is
 	// on the per-egress-conn hot path (one acquire per accepted SYN
@@ -112,6 +120,12 @@ type ManagerConfig struct {
 	// fails if it's empty because per-sandbox enforcement depends on
 	// being able to mkdir under <WorkerCgroupPath>/system/<id>.
 	WorkerCgroupPath string
+	// LogEmitter is the worker's OTLP logs logger (clrk.component=worker
+	// resource). Each sandbox's stdio is emitted through it as OTLP
+	// LogRecords. Optional: a nil logger disables stdio OTLP emission
+	// (the file tee + slog still run), so tests and OTLP-less workers are
+	// unaffected.
+	LogEmitter otellog.Logger
 }
 
 // NewManager constructs the worker's sandbox lifecycle manager.
@@ -126,6 +140,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		egressHostAddr:   cfg.EgressHostAddr,
 		workerResolvers:  cfg.Resolvers,
 		workerCgroupPath: cfg.WorkerCgroupPath,
+		logEmitter:       cfg.LogEmitter,
 		sandboxes:        make(map[SandboxID]*Instance),
 		waiters:          make(map[SandboxID]context.CancelFunc),
 		stdLogs:          make(map[SandboxID]sandboxLogs),
@@ -335,8 +350,8 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	if err != nil {
 		log.Error(err, "Opening agent log file (continuing without file tee)")
 	}
-	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout", logFile)
-	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr", logFile)
+	stdoutLog := newSandboxLineWriter(sbLogger, slog.LevelInfo, "stdout", logFile, m.logEmitter, sb.Identity)
+	stderrLog := newSandboxLineWriter(sbLogger, slog.LevelWarn, "stderr", logFile, m.logEmitter, sb.Identity)
 
 	// Explicit nil-interface for the daemon case so drainSentryStdio's
 	// nil-check actually fires (a typed-nil *os.File would slip through).

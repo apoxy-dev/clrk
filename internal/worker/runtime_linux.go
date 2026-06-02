@@ -103,6 +103,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 		EgressHostAddr:   egressHostAddr,
 		Resolvers:        resolvers,
 		WorkerCgroupPath: workerCgroupPath,
+		// Sandbox stdio fans out as OTLP LogRecords through the same
+		// worker emitter the egress bridge uses (clrk.component=worker).
+		LogEmitter: r.Emitter.Logger(),
 	})
 
 	egressBridge, err := sandbox.NewEgressBridge(egressHostAddr, sandboxMgr.LookupEgressState, r.Emitter)
