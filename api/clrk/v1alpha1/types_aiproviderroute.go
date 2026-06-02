@@ -43,7 +43,12 @@ type AIProviderRouteFilter struct {
 	// +optional
 	TokenBudget *TokenBudgetFilter `json:"tokenBudget,omitempty"`
 
-	// ExtensionRef for cross-cutting policies.
+	// ExtensionRef references a cross-cutting policy. It is also the seam
+	// for classifier-driven backend selection: an ExtensionRef resolving
+	// to a classifier kind picks among the rule's BackendRefs at
+	// RequestBody end-of-stream (the classifier protocol is APO-480). When
+	// absent, backend selection is the standard weighted pick over
+	// BackendRefs (BackendRef.Weight).
 	// +optional
 	ExtensionRef *gwapiv1.LocalObjectReference `json:"extensionRef,omitempty"`
 }
@@ -71,7 +76,15 @@ type AIProviderRouteRule struct {
 	// +optional
 	Filters []AIProviderRouteFilter `json:"filters,omitempty"`
 
-	// BackendRefs optionally routes through a provider-specific proxy.
+	// BackendRefs is the candidate set of clrk Backends
+	// (clrk.apoxy.dev/Backend) this rule may route to, selected at
+	// RequestBody end-of-stream. With a single ref the request is
+	// re-pointed to that backend. With two or more, the request is
+	// distributed by the standard Gateway API BackendRef.Weight
+	// (deterministically per request so retries are stable), unless an
+	// ExtensionRef classifier filter on this rule picks one instead
+	// (APO-480). Refs that are not clrk Backends are reported as
+	// unresolved by the status controller and ignored at selection time.
 	// +optional
 	BackendRefs []gwapiv1.BackendRef `json:"backendRefs,omitempty"`
 }

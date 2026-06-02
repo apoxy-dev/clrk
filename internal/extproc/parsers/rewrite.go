@@ -57,7 +57,15 @@ func BodyAdvertisesStream(body []byte) bool {
 // Caller is responsible for emitting the mutated bytes via ext_proc
 // BodyMutation; Envoy recomputes content-length on the wire.
 func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
-	if !shouldRewriteIncludeUsage(host, path) {
+	return EnsureIncludeUsageForSystem(SystemFor(host), path, body)
+}
+
+// EnsureIncludeUsageForSystem is EnsureIncludeUsage keyed on a canonical
+// gen_ai.system value rather than the request's :authority host. Used
+// when ext_proc re-selected a backend whose wire schema is known
+// directly (the original host is no longer where the request goes).
+func EnsureIncludeUsageForSystem(system, path string, body []byte) ([]byte, bool) {
+	if !shouldRewriteIncludeUsageForSystem(system, path) {
 		return nil, false
 	}
 	if !BodyAdvertisesStream(body) {
@@ -66,11 +74,12 @@ func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
 	return rewriteIncludeUsage(body)
 }
 
-// shouldRewriteIncludeUsage routes via the same provider table the
-// parsers use, so adding a new OpenAI-shape upstream (e.g. Azure
-// OpenAI) only needs to register in `hostProviders` once.
-func shouldRewriteIncludeUsage(host, path string) bool {
-	switch SystemFor(host) {
+// shouldRewriteIncludeUsageForSystem decides include_usage rewriting from
+// a canonical gen_ai.system value. shouldRewriteIncludeUsage routes a
+// host through SystemFor first, so adding a new OpenAI-shape upstream
+// (e.g. Azure OpenAI) only needs to register in `hostProviders` once.
+func shouldRewriteIncludeUsageForSystem(system, path string) bool {
+	switch system {
 	case "openai":
 		return strings.HasPrefix(path, "/v1/chat/completions")
 	case "google_genai":
@@ -80,6 +89,46 @@ func shouldRewriteIncludeUsage(host, path string) bool {
 		return strings.Contains(path, "/openai/chat/completions")
 	}
 	return false
+}
+
+// RequestModel decodes the top-level "model" string from a JSON request
+// body (the OpenAI/Anthropic request shape). Returns "" when the body is
+// not a decodable JSON object or carries no string model — e.g. Google's
+// native surface puts the model in the URL path, not the body.
+func RequestModel(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	m, _ := obj["model"].(string)
+	return m
+}
+
+// RewriteModel sets the top-level "model" field of a JSON request body to
+// `to` and returns the re-serialized body. Returns (nil, false) when the
+// body is not a JSON object or has no "model" field to replace — we don't
+// invent a model field the upstream didn't expect. JSON roundtrip caveats
+// match rewriteIncludeUsage (key order may shift; numbers ride float64).
+func RewriteModel(body []byte, to string) ([]byte, bool) {
+	if len(body) == 0 || to == "" {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	if _, ok := obj["model"]; !ok {
+		return nil, false
+	}
+	obj["model"] = to
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // rewriteIncludeUsage decodes body as JSON, ensures

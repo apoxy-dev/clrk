@@ -39,6 +39,14 @@ const (
 	AttrBodyUsageVisible  = "clrk.body.usage_visible"
 	AttrBodyReqRewritten  = "clrk.body.request_rewritten"
 
+	// Backend re-selection attributes — emitted only when ext_proc
+	// re-pointed the request to a clrk Backend at RequestBody EOS, so
+	// records for single-backend / non-reselectable routes are unchanged.
+	AttrBackendReselected = "clrk.backend.reselected"
+	AttrBackendName       = "clrk.backend.name"
+	AttrBackendNamespace  = "clrk.backend.namespace"
+	AttrBackendSchema     = "clrk.backend.schema"
+
 	AttrMCPMethod             = "mcp.method"
 	AttrMCPToolName           = "mcp.tool.name"
 	AttrMCPResourceURI        = "mcp.resource.uri"

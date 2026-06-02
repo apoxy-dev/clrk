@@ -23,6 +23,8 @@ type AIProviderRouteExpansion interface{}
 
 type AgentSandboxRevisionExpansion interface{}
 
+type BackendExpansion interface{}
+
 type CredentialInjectionPolicyExpansion interface{}
 
 type DaemonAgentExpansion interface{}

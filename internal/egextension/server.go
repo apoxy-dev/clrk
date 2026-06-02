@@ -666,6 +666,17 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *
 		// upstream rewrite happens via auto_host_rewrite; the SNI used
 		// during MITM is also propagated as :authority so the upstream
 		// connection re-resolves the original hostname.
+		//
+		// The route pins only the cluster name, never a host: the upstream
+		// is resolved per request from :authority. That is what lets
+		// ext_proc re-point :authority at RequestBody EOS (APO-689) and
+		// reach a different backend without any new cluster — it sets
+		// ClearRouteCache on the body response so this catch-all is
+		// re-evaluated against the mutated :authority. A body-phase header
+		// mutation only takes effect when the request body mode is
+		// BUFFERED, which ext_proc promotes per-stream via ModeOverride
+		// (AllowModeOverride below) for reselectable routes only, leaving
+		// the default BUFFERED_PARTIAL for everything else.
 		hcm.RouteSpecifier = &hcmv3.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
 				Name: "clrk-egress-dfp",
@@ -991,12 +1002,17 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 			// carries the whole response for non-streaming AI traffic
 			// (embeddings, classifiers, non-streaming completions) and
 			// for error responses we want fully captured in OTLP. The
-			// per-chunk STREAMED cost (Envoy↔UDS↔grpc round-trip per
-			// SSE frame) is paid only when the client actually requested
-			// streaming AND the upstream actually delivered a 200; the
-			// server promotes the mode to STREAMED from
-			// ProcessResponseHeaders in that case, and AllowModeOverride
-			// below makes the promotion legal. Pattern from
+			// per-chunk STREAMED cost (Envoy<->UDS<->grpc round-trip per
+			// SSE frame) is paid only when the response will actually
+			// stream and the upstream delivered a 200. Two triggers OR'd:
+			// the client requested streaming (request body "stream":true,
+			// OpenAI/Anthropic) OR the upstream returned a streamed
+			// content-type (text/event-stream / x-ndjson) — the latter
+			// catches MCP "Streamable HTTP" SSE, which negotiates via
+			// Accept and never sets a request stream flag. The server
+			// promotes the mode to STREAMED from ProcessResponseHeaders in
+			// that case, and AllowModeOverride below makes the promotion
+			// legal. Pattern from
 			// envoyproxy/ai-gateway internal/extproc/processor_impl.go:424.
 			ResponseBodyMode:    extprocv3.ProcessingMode_BUFFERED,
 			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
@@ -1127,6 +1143,14 @@ func buildDFPCluster(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*clusterv3.Cluste
 	// :authority per request, AutoSanValidation matches that SNI against the
 	// cert. Both must be true — the alternative is allow_insecure_cluster_options
 	// which we never want.
+	//
+	// These two are also what make per-request backend RE-SELECTION safe
+	// (APO-689): when ext_proc repoints :authority at RequestBody EOS to a
+	// different backend host, AutoSni derives the new SNI from the new
+	// :authority and the DFP pool keys on the newly-resolved host, so the
+	// re-pointed request can't be multiplexed onto a TLS session opened for
+	// the original host. No per-backend cluster is needed — this cluster is
+	// a per-request, :authority-keyed resolver + pool factory.
 	httpOpts := &upstreamhttpv3.HttpProtocolOptions{
 		UpstreamHttpProtocolOptions: &corev3.UpstreamHttpProtocolOptions{
 			AutoSni:           true,

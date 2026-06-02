@@ -55,6 +55,11 @@ type egSink struct {
 
 	creds        *credTable
 	credsVersion string
+
+	// backendsVersion fingerprints the clrk Backends referenced by APRs
+	// attached to this EG; a change rebuilds the route table so resolved
+	// backend host/schema/rewrites stay current.
+	backendsVersion string
 }
 
 // sinkRegistry caches one egSink per EgressGateway, keyed by ns/name.
@@ -130,6 +135,15 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	}
 	credVersion := CredPoliciesVersion(ctx, r.client, cips.Items, aprs.Items, key)
 
+	// List Backends cluster-wide for the same reason as APRs: a Backend
+	// in any namespace can be referenced by an attached route's
+	// BackendRefs. The fingerprint covers only the referenced set.
+	var backends clrkv1alpha1.BackendList
+	if err := r.client.List(ctx, &backends); err != nil {
+		return nil, fmt.Errorf("list Backends: %w", err)
+	}
+	backendVersion := backendsVersion(aprs.Items, backends.Items, key)
+
 	var captureSpec *clrkv1alpha1.BodyCaptureSpec
 	if eg.Spec.OTLP != nil {
 		captureSpec = eg.Spec.OTLP.CaptureBody
@@ -140,7 +154,8 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 		reflect.DeepEqual(hit.captureSnapshot, captureSpec) &&
 		hit.routesVersion == aprVersion &&
 		hit.mcpRoutesVersion == mcpVersion &&
-		hit.credsVersion == credVersion {
+		hit.credsVersion == credVersion &&
+		hit.backendsVersion == backendVersion {
 		r.mu.Unlock()
 		return hit, nil
 	}
@@ -154,8 +169,9 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build sink: %w", err)
 	}
-	built.routes = buildRouteTable(key.Namespace, key.Name, aprs.Items)
+	built.routes = buildRouteTable(key.Namespace, key.Name, aprs.Items, backends.Items)
 	built.routesVersion = aprVersion
+	built.backendsVersion = backendVersion
 	built.mcpRoutes = buildMCPRouteTable(ctx, key.Namespace, key.Name, mcprs.Items)
 	built.mcpRoutesVersion = mcpVersion
 	built.creds = buildCredTable(ctx, r.client, key.Namespace, key.Name, aprs.Items, cips.Items)
@@ -210,6 +226,54 @@ func mcpRoutesVersion(routes []clrkv1alpha1.MCPRoute, eg types.NamespacedName) s
 			continue
 		}
 		parts = append(parts, r.Namespace+"/"+r.Name+"@"+r.ResourceVersion)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// backendsVersion fingerprints the clrk Backends referenced by APRs
+// attached to the given EG. Mirrors aiproviderRoutesVersion: a sorted
+// parts list, one per referenced Backend, encoding its ResourceVersion
+// (or a `none` sentinel when the referenced Backend doesn't exist yet),
+// so a backend spec edit — or a referenced backend appearing or
+// vanishing — invalidates the cached route table without coupling to
+// backends no attached route references.
+func backendsVersion(routes []clrkv1alpha1.AIProviderRoute, backends []clrkv1alpha1.Backend, eg types.NamespacedName) string {
+	byKey := make(map[types.NamespacedName]string, len(backends))
+	for i := range backends {
+		b := &backends[i]
+		byKey[types.NamespacedName{Namespace: b.Namespace, Name: b.Name}] = b.ResourceVersion
+	}
+	seen := map[types.NamespacedName]bool{}
+	var parts []string
+	for _, r := range routes {
+		if !routeAttachesTo(r, eg.Namespace, eg.Name) {
+			continue
+		}
+		for _, rule := range r.Spec.Rules {
+			for _, ref := range rule.BackendRefs {
+				if !backendRefIsClrkBackend(ref) {
+					continue
+				}
+				ns := r.Namespace
+				if ref.Namespace != nil && *ref.Namespace != "" {
+					ns = string(*ref.Namespace)
+				}
+				k := types.NamespacedName{Namespace: ns, Name: string(ref.Name)}
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+				rv, ok := byKey[k]
+				if !ok {
+					rv = "none"
+				}
+				parts = append(parts, k.String()+"@"+rv)
+			}
+		}
 	}
 	if len(parts) == 0 {
 		return ""

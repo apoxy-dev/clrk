@@ -70,6 +70,13 @@ var (
 	_ rest.SingularNameProvider            = &AIProviderRoute{}
 	_ resource.StatusSubResource           = &AIProviderRouteStatus{}
 
+	_ runtime.Object                       = &Backend{}
+	_ resource.Object                      = &Backend{}
+	_ resource.ObjectWithStatusSubResource = &Backend{}
+	_ rest.SingularNameProvider            = &Backend{}
+	_ resourcestrategy.Defaulter           = &Backend{}
+	_ resource.StatusSubResource           = &BackendStatus{}
+
 	_ runtime.Object             = &CredentialInjectionPolicy{}
 	_ resource.Object            = &CredentialInjectionPolicy{}
 	_ rest.SingularNameProvider  = &CredentialInjectionPolicy{}
@@ -258,6 +265,26 @@ func (r *AIProviderRoute) GetStatus() resource.StatusSubResource { return &r.Sta
 func (s *AIProviderRouteStatus) SubResourceName() string { return "status" }
 func (s *AIProviderRouteStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
 	if p, ok := obj.(*AIProviderRoute); ok {
+		p.Status = *s
+	}
+}
+
+// Backend.
+
+func (r *Backend) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
+func (r *Backend) NamespaceScoped() bool             { return true }
+func (r *Backend) New() runtime.Object               { return &Backend{} }
+func (r *Backend) NewList() runtime.Object           { return &BackendList{} }
+func (r *Backend) GetGroupVersionResource() schema.GroupVersionResource {
+	return gvr("backends")
+}
+func (r *Backend) IsStorageVersion() bool                { return true }
+func (r *Backend) GetSingularName() string               { return "backend" }
+func (r *Backend) GetStatus() resource.StatusSubResource { return &r.Status }
+
+func (s *BackendStatus) SubResourceName() string { return "status" }
+func (s *BackendStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
+	if p, ok := obj.(*Backend); ok {
 		p.Status = *s
 	}
 }

@@ -31,6 +31,14 @@ type credInjection struct {
 	policyName  string
 	headerName  string
 	headerValue string
+
+	// section is the parentRef sectionName the CIP targeted, naming a
+	// specific backend (BackendRef name) on the route. Empty means the
+	// CIP is route-wide: injected at RequestHeaders for every request the
+	// route matches (today's behavior). A non-empty section is injected
+	// only when that backend is selected post-body, in that backend's
+	// scheme — see lookup vs lookupForBackend.
+	section string
 }
 
 // credTable holds resolved CredentialInjectionPolicies attached to one
@@ -103,6 +111,10 @@ func buildCredTable(
 					continue
 				}
 				if inj := resolveCIP(ctx, c, cip, log); inj != nil {
+					// A sectionName on the route parentRef targets a
+					// specific backend; it gates injection to
+					// post-selection of that backend (see lookupForBackend).
+					inj.section = sectionOf(ref)
 					tbl.byRoute[key] = append(tbl.byRoute[key], *inj)
 				}
 			case mcpRouteKind:
@@ -169,24 +181,48 @@ func resolveCIP(ctx context.Context, c client.Client, cip *clrkv1alpha1.Credenti
 	}
 }
 
-// lookup returns the credentials applicable to a transaction matched
-// against the given route. Route-attached entries first, gateway
-// catch-all stacked on top. Pass rr=nil for transactions that matched
-// no APR (gateway-only).
+// lookup returns the credentials applied at RequestHeaders time for a
+// transaction matched against the given route: route-wide entries (no
+// sectionName) first, gateway catch-all stacked on top. Backend-scoped
+// entries (a sectionName naming a specific backend) are deliberately
+// excluded here — they fire only after that backend is selected
+// post-body (see lookupForBackend). Pass rr=nil for transactions that
+// matched no APR (gateway-only). This preserves today's behavior exactly
+// for routes that use no sectionName.
 func (t *credTable) lookup(rr *routeRule) []credInjection {
+	return t.lookupForBackend(rr, "")
+}
+
+// lookupForBackend returns the credentials to inject once `backend` (a
+// BackendRef name) has been selected post-body: route-wide entries plus
+// any whose sectionName matches `backend`, plus the gateway catch-all.
+// Passing backend="" yields only the route-wide + gateway set, i.e. the
+// header-time behavior of lookup.
+func (t *credTable) lookupForBackend(rr *routeRule, backend string) []credInjection {
 	if t == nil {
 		return nil
 	}
 	var out []credInjection
 	if rr != nil {
-		if hits := t.byRoute[types.NamespacedName{Namespace: rr.routeNamespace, Name: rr.routeName}]; len(hits) > 0 {
-			out = append(out, hits...)
+		for _, inj := range t.byRoute[types.NamespacedName{Namespace: rr.routeNamespace, Name: rr.routeName}] {
+			if inj.section == "" || (backend != "" && inj.section == backend) {
+				out = append(out, inj)
+			}
 		}
 	}
 	if len(t.gateway) > 0 {
 		out = append(out, t.gateway...)
 	}
 	return out
+}
+
+// sectionOf returns the parentRef sectionName as a plain string, or ""
+// when unset. For a route parentRef the sectionName names a backend.
+func sectionOf(ref gwapiv1.ParentReference) string {
+	if ref.SectionName != nil {
+		return string(*ref.SectionName)
+	}
+	return ""
 }
 
 // applyInjections appends SetHeaders entries to (or builds) a

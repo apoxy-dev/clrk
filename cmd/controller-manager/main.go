@@ -216,6 +216,7 @@ func main() {
 			&clrkv1alpha1.EgressL4Route{},
 			&clrkv1alpha1.MCPRoute{},
 			&clrkv1alpha1.AIProviderRoute{},
+			&clrkv1alpha1.Backend{},
 			&clrkv1alpha1.CredentialInjectionPolicy{},
 			&clrkv1alpha1.RateLimitPolicy{},
 			&clrkv1alpha1.LoggingPolicy{},
@@ -414,6 +415,16 @@ func main() {
 			EnvoyGatewayNamespace: runtimeNS,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGateway")
+			os.Exit(1)
+		}
+		// Route status is only meaningful when the egress data plane is
+		// active: it validates AIProviderRoute Backend/EgressGateway refs
+		// and writes Accepted/ResolvedRefs.
+		if err := (&controller.AIProviderRouteStatusReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "AIProviderRouteStatus")
 			os.Exit(1)
 		}
 	}

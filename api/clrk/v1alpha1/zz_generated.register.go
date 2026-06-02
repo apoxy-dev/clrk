@@ -66,6 +66,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&AIProviderRouteList{},
 		&AgentSandboxRevision{},
 		&AgentSandboxRevisionList{},
+		&Backend{},
+		&BackendList{},
 		&CredentialInjectionPolicy{},
 		&CredentialInjectionPolicyList{},
 		&DaemonAgent{},

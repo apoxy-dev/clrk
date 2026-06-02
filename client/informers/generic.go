@@ -58,6 +58,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().AIProviderRoutes().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("agentsandboxrevisions"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().AgentSandboxRevisions().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("backends"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().Backends().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("credentialinjectionpolicies"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().CredentialInjectionPolicies().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("daemonagents"):

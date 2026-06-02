@@ -212,6 +212,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	}
 	attrs = appendGenAIAttrs(attrs, r)
 	attrs = appendAPRAttrs(attrs, r)
+	attrs = appendBackendAttrs(attrs, r)
 	attrs = appendMCPAttrs(attrs, r)
 
 	_, span := s.tracer.Start(parentCtx, spanName,
@@ -285,6 +286,7 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 	}
 	attrs = appendLogKVs(attrs, genAIAttrs(r))
 	attrs = appendLogKVs(attrs, aprAttrs(r))
+	attrs = appendLogKVs(attrs, backendAttrs(r))
 	attrs = appendLogKVs(attrs, mcpAttrs(r))
 	rec.AddAttributes(attrs...)
 	s.logger.Emit(context.Background(), rec)
@@ -357,6 +359,26 @@ func aprAttrs(r Record) []attribute.KeyValue {
 
 func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 	return append(dst, aprAttrs(r)...)
+}
+
+// backendAttrs emits the selected-backend attributes only when
+// re-selection actually fired. Guarded on SelectedBackendName so records
+// for single-backend / non-reselectable routes carry no clrk.backend.*
+// keys — zero attribute drift for existing traffic.
+func backendAttrs(r Record) []attribute.KeyValue {
+	if r.SelectedBackendName == "" {
+		return nil
+	}
+	return []attribute.KeyValue{
+		attribute.Bool(otelemit.AttrBackendReselected, r.SelectedBackendReselected),
+		attribute.String(otelemit.AttrBackendNamespace, r.SelectedBackendNamespace),
+		attribute.String(otelemit.AttrBackendName, r.SelectedBackendName),
+		attribute.String(otelemit.AttrBackendSchema, r.SelectedBackendSchema),
+	}
+}
+
+func appendBackendAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
+	return append(dst, backendAttrs(r)...)
 }
 
 // mcpAttrs returns the mcp.* + clrk.mcproute.* attribute slice for

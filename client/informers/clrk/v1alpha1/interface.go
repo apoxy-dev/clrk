@@ -29,6 +29,8 @@ type Interface interface {
 	AIProviderRoutes() AIProviderRouteInformer
 	// AgentSandboxRevisions returns a AgentSandboxRevisionInformer.
 	AgentSandboxRevisions() AgentSandboxRevisionInformer
+	// Backends returns a BackendInformer.
+	Backends() BackendInformer
 	// CredentialInjectionPolicies returns a CredentialInjectionPolicyInformer.
 	CredentialInjectionPolicies() CredentialInjectionPolicyInformer
 	// DaemonAgents returns a DaemonAgentInformer.
@@ -72,6 +74,11 @@ func (v *version) AIProviderRoutes() AIProviderRouteInformer {
 // AgentSandboxRevisions returns a AgentSandboxRevisionInformer.
 func (v *version) AgentSandboxRevisions() AgentSandboxRevisionInformer {
 	return &agentSandboxRevisionInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Backends returns a BackendInformer.
+func (v *version) Backends() BackendInformer {
+	return &backendInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // CredentialInjectionPolicies returns a CredentialInjectionPolicyInformer.

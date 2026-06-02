@@ -51,6 +51,13 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentSandboxRevisionTemplate":        schema_clrk_api_clrk_v1alpha1_AgentSandboxRevisionTemplate(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentState":                          schema_clrk_api_clrk_v1alpha1_AgentState(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.AgentStreaming":                      schema_clrk_api_clrk_v1alpha1_AgentStreaming(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Backend":                             schema_clrk_api_clrk_v1alpha1_Backend(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendBodyMutation":                 schema_clrk_api_clrk_v1alpha1_BackendBodyMutation(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendList":                         schema_clrk_api_clrk_v1alpha1_BackendList(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSchema":                       schema_clrk_api_clrk_v1alpha1_BackendSchema(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSpec":                         schema_clrk_api_clrk_v1alpha1_BackendSpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendStatus":                       schema_clrk_api_clrk_v1alpha1_BackendStatus(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendUpstream":                     schema_clrk_api_clrk_v1alpha1_BackendUpstream(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec":                     schema_clrk_api_clrk_v1alpha1_BodyCaptureSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyExtractor":                       schema_clrk_api_clrk_v1alpha1_BodyExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicy":           schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicy(ref),
@@ -103,6 +110,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.MCPRouteRule":                        schema_clrk_api_clrk_v1alpha1_MCPRouteRule(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.MCPRouteSpec":                        schema_clrk_api_clrk_v1alpha1_MCPRouteSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.MCPRouteStatus":                      schema_clrk_api_clrk_v1alpha1_MCPRouteStatus(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ModelRewrite":                        schema_clrk_api_clrk_v1alpha1_ModelRewrite(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec":                    schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig":                  schema_clrk_api_clrk_v1alpha1_ProviderAuthConfig(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.RateLimitPolicy":                     schema_clrk_api_clrk_v1alpha1_RateLimitPolicy(ref),
@@ -581,7 +589,7 @@ func schema_clrk_api_clrk_v1alpha1_AIProviderRouteFilter(ref common.ReferenceCal
 					},
 					"extensionRef": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ExtensionRef for cross-cutting policies.",
+							Description: "ExtensionRef references a cross-cutting policy. It is also the seam for classifier-driven backend selection: an ExtensionRef resolving to a classifier kind picks among the rule's BackendRefs at RequestBody end-of-stream (the classifier protocol is APO-480). When absent, backend selection is the standard weighted pick over BackendRefs (BackendRef.Weight).",
 							Ref:         ref("sigs.k8s.io/gateway-api/apis/v1.LocalObjectReference"),
 						},
 					},
@@ -731,7 +739,7 @@ func schema_clrk_api_clrk_v1alpha1_AIProviderRouteRule(ref common.ReferenceCallb
 					},
 					"backendRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "BackendRefs optionally routes through a provider-specific proxy.",
+							Description: "BackendRefs is the candidate set of clrk Backends (clrk.apoxy.dev/Backend) this rule may route to, selected at RequestBody end-of-stream. With a single ref the request is re-pointed to that backend. With two or more, the request is distributed by the standard Gateway API BackendRef.Weight (deterministically per request so retries are stable), unless an ExtensionRef classifier filter on this rule picks one instead (APO-480). Refs that are not clrk Backends are reported as unresolved by the status controller and ignored at selection time.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -1255,6 +1263,266 @@ func schema_clrk_api_clrk_v1alpha1_AgentStreaming(ref common.ReferenceCallback) 
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_Backend(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "Backend is an addressable AI-provider upstream that an AIProviderRoute rule can route to via BackendRefs. It declares the wire schema, the destination, and any per-backend model/body rewrites; credentials attach separately via CredentialInjectionPolicy (sectionName-targeted).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendStatus"),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendBodyMutation(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendBodyMutation configures request-body rewrites applied at RequestBody end-of-stream when this backend is selected. Today the only mutation is forcing OpenAI-shaped streaming usage; the struct exists so further per-backend body rewrites can be added without a schema break.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"ensureStreamUsage": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EnsureStreamUsage forces stream_options.include_usage=true on OpenAI-shaped streaming requests so streamed responses always emit terminal token usage. No-op for non-OpenAI schemas.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendList contains a list of Backend resources.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Backend"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.Backend", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendSchema(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendSchema declares the wire schema of the upstream. It is a struct (not a bare enum field) so vendor-specific schema details — e.g. a Bedrock region or an Azure deployment name — can be added later without reshaping the discriminator.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the wire schema the upstream speaks.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendSpec defines the desired state of a Backend.\n\nExactly one destination is set per the Type discriminator: Upstream when Type=Upstream, InferencePoolRef when Type=InferencePool. The API server does not enforce this exclusivity (clrk does not use CEL validation markers); the AIProviderRoute status controller surfaces a violation as ResolvedRefs=False and ext_proc refuses an under-specified backend.\n\nCredentials are NOT declared here. A Backend names no secret and holds no key: the credential injected when this backend is selected comes from a CredentialInjectionPolicy whose parentRef targets the route with a sectionName equal to this Backend's ref name. This keeps the architectural invariant that keys live only in policy + Secret, never in a routing object.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type selects the destination kind.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"schema": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Schema declares the wire schema the upstream speaks.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSchema"),
+						},
+					},
+					"upstream": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Upstream is the external host:port destination. Required when Type=Upstream.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendUpstream"),
+						},
+					},
+					"inferencePoolRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InferencePoolRef references a Gateway API Inference Extension InferencePool in the same namespace. Required when Type=InferencePool. Accepted but not yet served by the data plane.",
+							Ref:         ref("sigs.k8s.io/gateway-api/apis/v1.LocalObjectReference"),
+						},
+					},
+					"modelRewrites": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ModelRewrites remap the request model ID before it reaches the upstream; the first entry whose From glob matches wins.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ModelRewrite"),
+									},
+								},
+							},
+						},
+					},
+					"bodyMutation": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BodyMutation configures request-body rewrites applied at RequestBody end-of-stream when this backend is selected.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendBodyMutation"),
+						},
+					},
+				},
+				Required: []string{"type", "schema"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendBodyMutation", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendSchema", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendUpstream", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ModelRewrite", "sigs.k8s.io/gateway-api/apis/v1.LocalObjectReference"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendStatus describes the observed state of a Backend.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions report whether the Backend is well-formed and its destination resolvable (Accepted, ResolvedRefs).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_BackendUpstream(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "BackendUpstream is an external host:port destination. The host is DNS-resolved per request by the egress forward proxy; no static cluster is provisioned per backend.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"host": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Host is the upstream DNS name (or IP literal) the egress proxy dials. SNI and certificate SAN validation are derived from it.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"port": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Port is the upstream TCP port. Defaults to 443 (the egress data plane is TLS-terminating MITM, so backends are HTTPS).",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"host"},
 			},
 		},
 	}
@@ -3535,6 +3803,36 @@ func schema_clrk_api_clrk_v1alpha1_MCPRouteStatus(ref common.ReferenceCallback) 
 		},
 		Dependencies: []string{
 			"sigs.k8s.io/gateway-api/apis/v1.RouteParentStatus"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_ModelRewrite(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ModelRewrite remaps a request's model ID before it reaches the selected backend. Rewrites are an ordered list; the first entry whose From glob matches the request model wins (mirrors the glob-and-first-hit conventions used by AIProviderRoute matching).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"from": {
+						SchemaProps: spec.SchemaProps{
+							Description: "From is a glob (path.Match shape) over the request's model ID.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"to": {
+						SchemaProps: spec.SchemaProps{
+							Description: "To is the literal model ID substituted on the wire.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"from", "to"},
+			},
+		},
 	}
 }
 

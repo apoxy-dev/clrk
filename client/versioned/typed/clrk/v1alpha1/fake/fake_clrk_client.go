@@ -37,6 +37,10 @@ func (c *FakeClrkV1alpha1) AgentSandboxRevisions(namespace string) v1alpha1.Agen
 	return newFakeAgentSandboxRevisions(c, namespace)
 }
 
+func (c *FakeClrkV1alpha1) Backends(namespace string) v1alpha1.BackendInterface {
+	return newFakeBackends(c, namespace)
+}
+
 func (c *FakeClrkV1alpha1) CredentialInjectionPolicies(namespace string) v1alpha1.CredentialInjectionPolicyInterface {
 	return newFakeCredentialInjectionPolicies(c, namespace)
 }

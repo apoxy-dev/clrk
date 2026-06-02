@@ -96,3 +96,17 @@ func (r *EgressDenyPolicy) Default() {
 		r.Spec.DenyResponse.StatusCode = 403
 	}
 }
+
+// Default sets spec.type to Upstream when unset. This is load-bearing: the
+// aggregated apiserver does not honor the +kubebuilder:default marker (see the
+// package comment), so without it a type-less Backend persists with Type="",
+// and the egress data plane's resolveBackends drops an empty-type backend as
+// malformed instead of treating it as the documented Upstream default.
+// BackendUpstream.Port is intentionally left unstamped: its only consumer
+// (resolveBackends) already maps 0 to 443, so stamping it would add
+// server-side-apply field-ownership churn for no behavioral change.
+func (r *Backend) Default() {
+	if r.Spec.Type == "" {
+		r.Spec.Type = BackendTypeUpstream
+	}
+}

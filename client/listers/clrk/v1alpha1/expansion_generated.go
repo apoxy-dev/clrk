@@ -35,6 +35,14 @@ type AgentSandboxRevisionListerExpansion interface{}
 // AgentSandboxRevisionNamespaceLister.
 type AgentSandboxRevisionNamespaceListerExpansion interface{}
 
+// BackendListerExpansion allows custom methods to be added to
+// BackendLister.
+type BackendListerExpansion interface{}
+
+// BackendNamespaceListerExpansion allows custom methods to be added to
+// BackendNamespaceLister.
+type BackendNamespaceListerExpansion interface{}
+
 // CredentialInjectionPolicyListerExpansion allows custom methods to be added to
 // CredentialInjectionPolicyLister.
 type CredentialInjectionPolicyListerExpansion interface{}

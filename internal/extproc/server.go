@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	extprocfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,6 +155,18 @@ type Record struct {
 	// rule's ToolPolicy fired on a tools/call request; empty for
 	// non-tools/call methods, no-policy rules, or unmatched traffic.
 	MCPToolPolicyDecision string
+
+	// SelectedBackendNamespace / SelectedBackendName identify the clrk
+	// Backend this transaction was re-pointed to at RequestBody EOS.
+	// SelectedBackendSchema is that backend's canonical gen_ai.system
+	// (the wire schema the response was parsed against).
+	// SelectedBackendReselected is true only when re-selection actually
+	// fired. All four stay zero for single-backend / non-reselectable
+	// routes, so OTLP attributes are unchanged for existing traffic.
+	SelectedBackendNamespace  string
+	SelectedBackendName       string
+	SelectedBackendSchema     string
+	SelectedBackendReselected bool
 }
 
 // ServerOption configures the ext_proc Server.
@@ -283,6 +297,18 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// first chunk that carries the probe.
 	streamRequested := false
 
+	// deferReselect latches when the header-time provisional match
+	// resolves to a rule that declares clrk BackendRefs. For those
+	// streams, credential injection and the final :authority repoint are
+	// deferred to RequestBody EOS (after the model is known and a backend
+	// is chosen), and the request body mode is promoted to BUFFERED so
+	// the body-phase header mutation is honored — BUFFERED_PARTIAL
+	// silently drops it (see CommonResponse.HeaderMutation). provMatch is
+	// the model-blind header-time match used for the credential fallback
+	// when re-selection can't run (truncated body, no candidate).
+	deferReselect := false
+	var provMatch *routeRule
+
 	for {
 		req, err := stream.Recv()
 		if err != nil {
@@ -352,14 +378,24 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// agent-set traceparent so deliberately instrumented
 			// agents continue to drive their own context.
 			mut = applyTraceparentInjection(mut, s.invocations, rec.InvocationID, rec.RequestHeaders)
-			// Inject credentials from any CredentialInjectionPolicy
-			// attached to the matched APR or to the EG itself. This is
-			// the architectural enforcement that API keys never live
-			// inside the agent: the proxy adds them on the way out.
-			// Match uses model="" because the request body isn't
-			// buffered yet — same constraint as the budget pre-flight
-			// (see routeTable.match).
-			if injs := lookupCreds(creds, routes, rec.RequestHeaders); len(injs) > 0 {
+			// Decide whether this transaction routes through a
+			// re-selectable rule (a model-blind match that declares clrk
+			// BackendRefs). If so, defer credential injection + the final
+			// :authority repoint to RequestBody EOS — after the model is
+			// known and a backend is chosen — and promote the request
+			// body mode to BUFFERED so the body-phase header mutation
+			// takes effect. Otherwise inject credentials now, exactly as
+			// before: API keys never live inside the agent, the proxy
+			// adds them on the way out (match uses model="" because the
+			// body isn't buffered yet — same constraint as the budget
+			// pre-flight).
+			provMatch = provisionalMatch(routes, rec.RequestHeaders)
+			deferReselect = provMatch != nil && len(provMatch.backends) > 0
+			if deferReselect {
+				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
+					RequestBodyMode: extprocfilterv3.ProcessingMode_BUFFERED,
+				}
+			} else if injs := lookupCreds(creds, routes, rec.RequestHeaders); len(injs) > 0 {
 				if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
 					logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
 						"policies", collisions)
@@ -379,11 +415,18 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			rec.ResponseHeadersAt = now
 			rec.ResponseHeaders = headersToMap(m.ResponseHeaders)
 			resp = headersContinue(false)
-			// Promote response-body mode to STREAMED only when the
-			// client requested streaming AND the upstream returned a
-			// 200. Error responses stay BUFFERED so the capture path
-			// gets the whole error body in one ProcessingRequest.
-			if streamRequested && rec.ResponseHeaders[":status"] == "200" {
+			// Promote response-body mode to STREAMED when the response
+			// will actually stream AND the upstream returned a 200. Two
+			// triggers: the client requested streaming (request body
+			// "stream":true — OpenAI/Anthropic), OR the upstream returned
+			// a streamed content-type. The latter catches MCP "Streamable
+			// HTTP" SSE, which is negotiated via Accept: text/event-stream
+			// and never sets a request-body stream flag — without it that
+			// traffic would buffer the whole SSE response before releasing
+			// it downstream. Error responses stay BUFFERED so the capture
+			// path gets the whole error body in one ProcessingRequest.
+			respIsStreaming := isStreamingContentType(rec.ResponseHeaders["content-type"])
+			if (streamRequested || respIsStreaming) && rec.ResponseHeaders[":status"] == "200" {
 				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
 					ResponseBodyMode: extprocfilterv3.ProcessingMode_STREAMED,
 				}
@@ -391,7 +434,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
 				respBytesLeft = 0
 			}
-			respKeepLast = isStreamingContentType(rec.ResponseHeaders["content-type"])
+			respKeepLast = respIsStreaming
 		case *extprocv3.ProcessingRequest_RequestBody:
 			chunk := m.RequestBody.GetBody()
 			body, trunc := appendBounded(rec.RequestBody, chunk, &reqBytesLeft)
@@ -406,39 +449,69 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if !streamRequested {
 				streamRequested = parsers.BodyAdvertisesStream(chunk)
 			}
-			// On the terminal body chunk (BUFFERED_PARTIAL delivers the
-			// whole body in one ProcessingRequest under the buffer
-			// limit; multi-chunk only happens when the body exceeds
-			// it), try the OpenAI/OAI-compat include_usage rewrite,
-			// then the MCP enforcement path. Skip when truncation
-			// already kicked in — partial JSON can't be safely
-			// re-serialized or policy-gated.
-			if m.RequestBody.GetEndOfStream() && !rec.RequestTruncated {
+			// On the terminal body chunk, run the deferred backend
+			// re-selection (reselectable streams) or the existing
+			// include-usage rewrite + MCP enforcement (everything else).
+			// BUFFERED(_PARTIAL) delivers the whole body in one
+			// ProcessingRequest under the buffer limit; multi-chunk only
+			// happens when the body exceeds it.
+			if m.RequestBody.GetEndOfStream() {
 				host, _ := splitHostPort(rec.RequestHeaders[":authority"])
-				if newBody, mut := parsers.EnsureIncludeUsage(host, rec.RequestHeaders[":path"], rec.RequestBody); mut {
-					// Update the captured copy so OTLP shows what the
-					// upstream actually received, not what the agent
-					// originally sent.
-					rec.RequestBody = newBody
-					rec.RequestBodyRewritten = true
-					resp = bodyMutation(true, newBody)
-					break
-				}
-				// MCP enforcement. Cheap host + content-type gate so
-				// non-MCP traffic pays nothing for the JSON-RPC parse.
-				// The include-usage rewrite (above) and an MCP deny
-				// are mutually exclusive — the former only fires for
-				// OpenAI-shaped requests, the latter only when a host
-				// falls under an MCPRoute.
-				if mcpCandidate(mcpRoutes, host, rec.RequestHeaders["content-type"]) {
-					res := mcpRoutes.evaluate(host, parsers.Input{
-						ReqBody:      rec.RequestBody,
-						ReqTruncated: rec.RequestTruncated,
-						ReqHeaders:   rec.RequestHeaders,
+				reqPath := rec.RequestHeaders[":path"]
+
+				if deferReselect {
+					// A truncated body can't be decoded for the model or
+					// safely re-serialized: fall back to the provisional
+					// match — inject its route-wide credentials so the
+					// request still authenticates, leave :authority on the
+					// header-time host, do not re-select.
+					if rec.RequestTruncated {
+						if mut := injectFallbackCreds(creds, provMatch, rec.RequestHeaders, logger); mut != nil {
+							resp = bodyContinueWithHeaders(true, mut, false)
+						} else {
+							resp = bodyContinue(true)
+						}
+						break
+					}
+
+					system := parsers.SystemFor(host)
+					model := parsers.RequestModel(rec.RequestBody)
+					final := routes.match(system, reqPath, model)
+					if final == nil {
+						final = provMatch
+					}
+					// Weighted/first pick over the rule's candidate
+					// backendRefs (BackendRef.Weight). The candidate set was
+					// already restricted to the rule provider's wire schema
+					// at route-table build time (sameSchemaBackends), so this
+					// cannot pick a cross-schema backend and send it a
+					// mismatched body — same-schema reselection only;
+					// cross-schema needs translation (APO-572). A
+					// classifier-driven ExtensionRef selector is APO-480 and
+					// will swap a different backendSelector in here.
+					chosen, ok := staticSelector{}.Select(final.backends, selectorInput{
+						provider:     system,
+						model:        model,
+						path:         reqPath,
+						invocationID: rec.InvocationID,
+						reqHeaders:   rec.RequestHeaders,
+						reqBody:      rec.RequestBody,
 					})
-					stampMCPResult(&rec, res)
-					if res.decision == mcpDecisionDeny {
-						if err := stream.Send(immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)); err != nil {
+					if !ok {
+						// No candidate resolved (e.g. all refs dangling).
+						// Fall back to route-wide creds + original host.
+						if mut := injectFallbackCreds(creds, final, rec.RequestHeaders, logger); mut != nil {
+							resp = bodyContinueWithHeaders(true, mut, false)
+						} else {
+							resp = bodyContinue(true)
+						}
+						break
+					}
+					if chosen.refuse {
+						// Resolved but unservable (InferencePool). Fail
+						// cleanly rather than mis-route to the agent's
+						// original SaaS host.
+						if err := stream.Send(immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+chosen.unsupportedReason)); err != nil {
 							rec.EndAt = time.Now()
 							enrichRecord(&rec, routes)
 							sink.Emit(rec)
@@ -446,6 +519,75 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 						}
 						// Keep the stream up; EOF emits the record.
 						continue
+					}
+
+					// Repoint :authority to the selected backend and inject
+					// its credentials (route-wide + the CIP whose parentRef
+					// sectionName names this backend + gateway), in the
+					// backend's scheme.
+					mut := setHeaderMut(nil, ":authority", net.JoinHostPort(chosen.host, strconv.Itoa(chosen.port)))
+					if injs := creds.lookupForBackend(final, chosen.name); len(injs) > 0 {
+						if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
+							logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+								"policies", collisions)
+						}
+						mut = applyInjections(mut, injs)
+					}
+					rec.SelectedBackendNamespace = chosen.namespace
+					rec.SelectedBackendName = chosen.name
+					rec.SelectedBackendSchema = chosen.system
+					rec.SelectedBackendReselected = true
+
+					// Apply per-backend body rewrites (model remap +
+					// include-usage in the backend's schema) and emit the
+					// repoint with ClearRouteCache so DFP re-derives the
+					// upstream host + SNI from the new :authority.
+					if newBody, changed := rewriteRequestBody(rec.RequestBody, reqPath, model, chosen); changed {
+						rec.RequestBody = newBody
+						rec.RequestBodyRewritten = true
+						resp = bodyMutationWithHeaders(true, newBody, mut, true)
+					} else {
+						resp = bodyContinueWithHeaders(true, mut, true)
+					}
+					break
+				}
+
+				// Non-reselectable stream: today's path, unchanged. Skip
+				// when truncation already kicked in — partial JSON can't
+				// be safely re-serialized or policy-gated.
+				if !rec.RequestTruncated {
+					if newBody, mut := parsers.EnsureIncludeUsage(host, reqPath, rec.RequestBody); mut {
+						// Update the captured copy so OTLP shows what the
+						// upstream actually received, not what the agent
+						// originally sent.
+						rec.RequestBody = newBody
+						rec.RequestBodyRewritten = true
+						resp = bodyMutation(true, newBody)
+						break
+					}
+					// MCP enforcement. Cheap host + content-type gate so
+					// non-MCP traffic pays nothing for the JSON-RPC parse.
+					// The include-usage rewrite (above) and an MCP deny
+					// are mutually exclusive — the former only fires for
+					// OpenAI-shaped requests, the latter only when a host
+					// falls under an MCPRoute.
+					if mcpCandidate(mcpRoutes, host, rec.RequestHeaders["content-type"]) {
+						res := mcpRoutes.evaluate(host, parsers.Input{
+							ReqBody:      rec.RequestBody,
+							ReqTruncated: rec.RequestTruncated,
+							ReqHeaders:   rec.RequestHeaders,
+						})
+						stampMCPResult(&rec, res)
+						if res.decision == mcpDecisionDeny {
+							if err := stream.Send(immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)); err != nil {
+								rec.EndAt = time.Now()
+								enrichRecord(&rec, routes)
+								sink.Emit(rec)
+								return err
+							}
+							// Keep the stream up; EOF emits the record.
+							continue
+						}
 					}
 				}
 			}
@@ -515,8 +657,19 @@ func enrichRecord(rec *Record, routes *routeTable) *routeRule {
 		}
 	}
 
+	// Key the parser to the SELECTED backend's wire schema when
+	// re-selection fired — the original :authority host is no longer
+	// where the request went, so parsers.For(host) would parse the
+	// response against the wrong schema (zeroing usage and silently
+	// evading budget). Otherwise key on the original host as before.
 	host, _ := splitHostPort(rec.RequestHeaders[":authority"])
-	if parser := parsers.For(host); parser != nil {
+	var parser parsers.Parser
+	if rec.SelectedBackendSchema != "" {
+		parser = parsers.ForSchema(rec.SelectedBackendSchema)
+	} else {
+		parser = parsers.For(host)
+	}
+	if parser != nil {
 		rec.Provider = parser.Parse(parsers.Input{
 			Method:        rec.RequestHeaders[":method"],
 			Path:          rec.RequestHeaders[":path"],
@@ -557,6 +710,63 @@ func lookupCreds(creds *credTable, routes *routeTable, headers map[string]string
 		}
 	}
 	return creds.lookup(rr)
+}
+
+// provisionalMatch is the model-blind header-time match used to decide
+// whether a stream is re-selectable (its rule declares clrk BackendRefs)
+// and, on the fallback paths, which route's credentials apply. It mirrors
+// the pre-flight semantics (model="") but, unlike lookupCreds, does not
+// gate on a known provider host so a custom-provider rule (which matches
+// any host) can still drive re-selection.
+func provisionalMatch(routes *routeTable, headers map[string]string) *routeRule {
+	if routes == nil {
+		return nil
+	}
+	host, _ := splitHostPort(headers[":authority"])
+	return routes.match(parsers.SystemFor(host), headers[":path"], "")
+}
+
+// injectFallbackCreds builds a header mutation injecting rr's route-wide
+// (and gateway) credentials, redacting them from the captured record.
+// Used on the re-selection fallback paths (truncated body, no resolvable
+// candidate) so a deferred-credential request still authenticates against
+// its original host. Returns nil when there is nothing to inject.
+func injectFallbackCreds(creds *credTable, rr *routeRule, headers map[string]string, logger logr.Logger) *extprocv3.HeaderMutation {
+	injs := creds.lookup(rr)
+	if len(injs) == 0 {
+		return nil
+	}
+	if collisions := redactInjected(headers, injs); len(collisions) > 0 {
+		logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+			"policies", collisions)
+	}
+	return applyInjections(nil, injs)
+}
+
+// rewriteRequestBody applies a selected backend's per-backend request
+// rewrites at RequestBody EOS: a model remap (first matching
+// ModelRewrite) then include-usage keyed to the backend's wire schema.
+// The backend's BodyMutation.EnsureStreamUsage gates the include-usage
+// rewrite when set; when unset the schema heuristic decides (preserving
+// today's behavior). Returns the possibly-rewritten body and whether
+// anything changed.
+func rewriteRequestBody(body []byte, reqPath, model string, b resolvedBackend) ([]byte, bool) {
+	changed := false
+	if to, ok := b.rewriteModel(model); ok && to != model {
+		if nb, ok2 := parsers.RewriteModel(body, to); ok2 {
+			body, changed = nb, true
+		}
+	}
+	applyUsage := true
+	if b.bodyMutation != nil && b.bodyMutation.EnsureStreamUsage != nil {
+		applyUsage = *b.bodyMutation.EnsureStreamUsage
+	}
+	if applyUsage {
+		if nb, ok := parsers.EnsureIncludeUsageForSystem(b.system, reqPath, body); ok {
+			body, changed = nb, true
+		}
+	}
+	return body, changed
 }
 
 // evaluateBudget runs the pre-flight TokenBudget check at request-
@@ -890,6 +1100,47 @@ func bodyMutation(isRequest bool, newBody []byte) *extprocv3.ProcessingResponse 
 			Mutation: &extprocv3.BodyMutation_Body{Body: newBody},
 		},
 	}}
+	if isRequest {
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{ResponseBody: r}}
+}
+
+// bodyContinueWithHeaders is bodyContinue plus a header mutation and an
+// optional route-cache clear. Used by the post-body backend re-selection
+// path to repoint :authority + inject credentials at RequestBody EOS
+// without replacing the body. Per the ext_proc contract a header
+// mutation on a body response only takes effect when the request body
+// mode is BUFFERED — which the RequestHeaders ModeOverride promotes for
+// reselectable streams. clearRouteCache forces Envoy to re-derive the
+// upstream (DFP host + SNI) from the mutated :authority.
+func bodyContinueWithHeaders(isRequest bool, mut *extprocv3.HeaderMutation, clearRouteCache bool) *extprocv3.ProcessingResponse {
+	common := &extprocv3.CommonResponse{
+		Status:          extprocv3.CommonResponse_CONTINUE,
+		HeaderMutation:  mut,
+		ClearRouteCache: clearRouteCache,
+	}
+	r := &extprocv3.BodyResponse{Response: common}
+	if isRequest {
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{ResponseBody: r}}
+}
+
+// bodyMutationWithHeaders is bodyMutation (CONTINUE_AND_REPLACE with a
+// new body) plus a header mutation + optional route-cache clear, for the
+// re-selection path where the request body was also rewritten (e.g.
+// include_usage) in the same response that repoints :authority.
+func bodyMutationWithHeaders(isRequest bool, newBody []byte, mut *extprocv3.HeaderMutation, clearRouteCache bool) *extprocv3.ProcessingResponse {
+	common := &extprocv3.CommonResponse{
+		Status: extprocv3.CommonResponse_CONTINUE_AND_REPLACE,
+		BodyMutation: &extprocv3.BodyMutation{
+			Mutation: &extprocv3.BodyMutation_Body{Body: newBody},
+		},
+		HeaderMutation:  mut,
+		ClearRouteCache: clearRouteCache,
+	}
+	r := &extprocv3.BodyResponse{Response: common}
 	if isRequest {
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}
 	}

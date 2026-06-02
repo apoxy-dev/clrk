@@ -143,6 +143,26 @@ func SystemFor(host string) string {
 	return ""
 }
 
+// ForSchema returns the parser for a canonical gen_ai.system value
+// (e.g. "anthropic", "openai", "google_genai") without a host lookup.
+// Used when the response must be parsed against a backend's declared
+// wire schema rather than the request's original :authority host — i.e.
+// when ext_proc re-selected a different backend. Returns nil when no
+// built-in parser speaks that schema (e.g. azure_openai, aws_bedrock
+// have no parser entry yet), in which case usage simply isn't parsed,
+// the same as for any unrecognized host.
+func ForSchema(system string) Parser {
+	if system == "" {
+		return nil
+	}
+	for i := range hostProviders {
+		if hostProviders[i].system == system {
+			return hostProviders[i].parser
+		}
+	}
+	return nil
+}
+
 func lookup(host string) *providerEntry {
 	if host == "" {
 		return nil

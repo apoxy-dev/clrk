@@ -31,6 +31,7 @@ type ClrkV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	AIProviderRoutesGetter
 	AgentSandboxRevisionsGetter
+	BackendsGetter
 	CredentialInjectionPoliciesGetter
 	DaemonAgentsGetter
 	EgressDenyPoliciesGetter
@@ -55,6 +56,10 @@ func (c *ClrkV1alpha1Client) AIProviderRoutes(namespace string) AIProviderRouteI
 
 func (c *ClrkV1alpha1Client) AgentSandboxRevisions(namespace string) AgentSandboxRevisionInterface {
 	return newAgentSandboxRevisions(c, namespace)
+}
+
+func (c *ClrkV1alpha1Client) Backends(namespace string) BackendInterface {
+	return newBackends(c, namespace)
 }
 
 func (c *ClrkV1alpha1Client) CredentialInjectionPolicies(namespace string) CredentialInjectionPolicyInterface {
