@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -194,10 +197,66 @@ func printLogBacklog(ctx context.Context, stdout, stderr io.Writer, rc rest.Inte
 	return watermark, nil
 }
 
-// followAgentLogs opens the streaming endpoint (?follow=true) and prints
-// each NDJSON LogsData chunk as it arrives. since resumes strictly after
-// the backlog's newest record; a zero since lets the server tail from now.
+// Follow reconnection bounds. A single streamed connection to a named
+// subresource is capped at the kube-apiserver front proxy's
+// non-long-running request timeout (~60s) -- which clrk cannot
+// reconfigure -- so the stream is expected to end roughly every minute
+// and the loop reconnects from the last record seen. minFollowBackoff
+// also paces retries when the server is briefly unreachable, growing to
+// maxFollowBackoff for repeated open failures.
+const (
+	minFollowBackoff = 1 * time.Second
+	maxFollowBackoff = 30 * time.Second
+)
+
+// followAgentLogs streams the ?follow=true endpoint and prints each
+// NDJSON LogsData chunk, reconnecting transparently when the stream
+// ends. A single aggregated connection is capped at ~60s by the
+// kube-apiserver front proxy (a named subresource is never long-running
+// there), so the loop re-opens from the newest record already printed --
+// the server's strict "Timestamp > since" filter makes the resume gap-
+// and duplicate-free. since seeds the watermark from the backlog; a zero
+// since (empty backlog) tails from now and is only sent once a real
+// record has advanced the watermark, so a reconnect never replays all
+// history. The loop runs until ctx is cancelled (Ctrl-C) or a permanent
+// (4xx) error.
 func followAgentLogs(ctx context.Context, stdout, stderr io.Writer, rc rest.Interface, basePath string, base url.Values, since time.Time) error {
+	lastSeen := since
+	backoff := minFollowBackoff
+	for {
+		opened, err := streamFollowOnce(ctx, stdout, stderr, rc, basePath, base, &lastSeen)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil && permanentFollowErr(err) {
+			return fmt.Errorf("follow stream: %w", err)
+		}
+		if opened {
+			// A productive connection (it streamed, then hit the front
+			// proxy's ~60s wall or a clean EOF). Reconnect promptly.
+			backoff = minFollowBackoff
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if !opened {
+			// Repeated failures to even open the stream: back off.
+			if backoff *= 2; backoff > maxFollowBackoff {
+				backoff = maxFollowBackoff
+			}
+		}
+	}
+}
+
+// streamFollowOnce opens one follow connection and prints records until
+// it ends, advancing *lastSeen to the newest record time so a reconnect
+// resumes strictly after it. It reports opened=true once the stream is
+// established -- so the caller can tell a mid-stream reset (expected
+// ~every 60s) from a failure to connect -- along with any open/read
+// error.
+func streamFollowOnce(ctx context.Context, stdout, stderr io.Writer, rc rest.Interface, basePath string, base url.Values, lastSeen *time.Time) (bool, error) {
 	req := rc.Get().AbsPath(basePath)
 	for k, vs := range base {
 		for _, v := range vs {
@@ -205,12 +264,16 @@ func followAgentLogs(ctx context.Context, stdout, stderr io.Writer, rc rest.Inte
 		}
 	}
 	req = req.Param("follow", "true")
-	if !since.IsZero() {
-		req = req.Param("since", since.Format(time.RFC3339Nano))
+	// Only send ?since once a real record has set the watermark. A zero
+	// time formats to year 0001 (not an empty value), which the server
+	// would read as "since the epoch" and replay all history on every
+	// reconnect; omitting it lets the server tail from now instead.
+	if !lastSeen.IsZero() {
+		req = req.Param("since", lastSeen.Format(time.RFC3339Nano))
 	}
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return fmt.Errorf("opening follow stream: %w", err)
+		return false, err
 	}
 	defer stream.Close()
 
@@ -231,12 +294,30 @@ func followAgentLogs(ctx context.Context, stdout, stderr io.Writer, rc rest.Inte
 		sortRecordsByTime(records)
 		for _, r := range records {
 			printLogRecord(stdout, stderr, r)
+			if t := time.Unix(0, int64(r.GetTimeUnixNano())); t.After(*lastSeen) {
+				*lastSeen = t
+			}
 		}
 	}
-	if err := sc.Err(); err != nil && ctx.Err() == nil {
-		return fmt.Errorf("follow stream: %w", err)
+	return true, sc.Err()
+}
+
+// permanentFollowErr reports whether a follow open error is fatal (the
+// request will never succeed: the agent is gone, the request is
+// malformed, or authz denies it) rather than a transient or mid-stream
+// condition worth reconnecting through. A 429 is treated as transient.
+func permanentFollowErr(err error) bool {
+	if err == nil {
+		return false
 	}
-	return nil
+	var se *apierrors.StatusError
+	if errors.As(err, &se) {
+		code := se.Status().Code
+		return code >= 400 && code < 500 && code != http.StatusTooManyRequests
+	}
+	// A network/transport error (incl. a mid-stream HTTP/2 reset surfaced
+	// via the scanner) is transient -- reconnect.
+	return false
 }
 
 func flattenLogRecords(ld *logspb.LogsData) []*logspb.LogRecord {

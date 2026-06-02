@@ -22,7 +22,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
+	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	apiserver "k8s.io/apiserver/pkg/server"
+	genericfilters "k8s.io/apiserver/pkg/server/filters"
 	apiserveropts "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -511,6 +514,34 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			// FlowControl post-start hook LISTs FlowSchema / PriorityLevelConfiguration
 			// against CoreAPI, which we don't run. Nilling it prevents readyz from failing.
 			c.FlowControl = nil
+
+			// The {logs,traces} follow subresources stream for as long as
+			// the client watches (?follow=true polls ClickHouse on an
+			// interval). Without intervention the generic apiserver's
+			// default 60s request timeout fires mid-stream -- after the 200
+			// and headers are already flushed -- aborting the handler with
+			// http.ErrAbortHandler and resetting the HTTP/2 stream (the
+			// client sees "stream error ... INTERNAL_ERROR"). Mark a follow
+			// request long-running so this apiserver's
+			// WithTimeoutForNonLongRunningRequests filter leaves it alone;
+			// a non-follow GET stays short and keeps the 60s safety bound.
+			//
+			// This fn runs twice (start.go brackets ApplyTo with two config
+			// passes), so rebuild the generic default rather than chain to
+			// c.LongRunningFunc, which would compound the wrapper on the
+			// second pass.
+			//
+			// Note: the FRONT kube-apiserver aggregator imposes its own 60s
+			// wall on the same request (a named subresource is never
+			// long-running there) which clrk cannot configure; the CLI
+			// follow loop reconnects to ride across it. This override
+			// removes the backend as a second, redundant 60s cap and keeps
+			// a direct (non-aggregated) reader's stream open.
+			defaultLongRunning := genericfilters.BasicLongRunningRequestCheck(sets.NewString("watch"), sets.NewString())
+			c.LongRunningFunc = func(r *http.Request, ri *apirequest.RequestInfo) bool {
+				return defaultLongRunning(r, ri) || IsTelemetryFollowRequest(r, ri)
+			}
+
 			// Test-write door: when enabled, an outermost middleware
 			// stamps the request context for requests carrying the
 			// X-Clrk-Invocation-Write header so the Invocation Storage
