@@ -90,11 +90,10 @@ func (w *Watcher) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result,
 		}
 	}
 
-	// ActiveExecutions intentionally NOT written here. The controller
-	// reads in-flight counts off the worker's WorkerStatusService gRPC
-	// stream (sub-second), not off the apiserver. Status.Workers[]
-	// stays a low-frequency heartbeat aid for `kubectl get` debugging
-	// only.
+	// ActiveExecutions intentionally NOT written here. In-flight counts
+	// flow through the worker's WORKER_STATUS KV (sub-second), not the
+	// apiserver. Status.Workers[] stays a low-frequency heartbeat aid for
+	// `kubectl get` debugging only.
 	if err := w.updateWorkerStatus(ctx, &rev, imagePulled, warmCount); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating worker status: %w", err)
 	}
@@ -164,8 +163,7 @@ func (w *Watcher) electedFor(rev *clrkv1alpha1.AgentSandboxRevision) bool {
 
 // updateWorkerStatus upserts this worker's entry in
 // AgentSandboxRevision.Status.Workers. ActiveExecutions is no longer
-// written here — controller reads it off the worker's
-// WorkerStatusService stream.
+// written here — in-flight counts flow through the WORKER_STATUS KV.
 func (w *Watcher) updateWorkerStatus(ctx context.Context, rev *clrkv1alpha1.AgentSandboxRevision, imagePulled bool, warmCount int32) error {
 	now := metav1.NewTime(time.Now())
 

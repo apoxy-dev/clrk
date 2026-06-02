@@ -1,12 +1,26 @@
-// Package healthcheck streams every worker pod's WorkerStatusService
-// state into an in-memory map and exposes Pick for the ingress
-// ext_proc to choose a per-execution worker.
+// Package healthcheck maintains the controller-manager's view of every
+// worker pod's routing state and exposes Pick for the ingress ext_proc to
+// choose a per-execution worker.
 //
-// Lives in its own package — distinct from internal/controller — so
-// the proto dependency only pollutes the bazel-built controller-
-// manager binary, not anything cmd/clrk transitively imports. Per
-// memory feedback_clrk_standalone_build, generated *.pb.go are not
-// committed to this repo; only cmd/clrk must build standalone.
+// Two inputs are joined by pod name:
+//
+//   - EndpointSlices of each WorkerPool's "<pool>-workers" Service give the
+//     routable pod IP + readiness (the IPs Envoy Gateway routes to). A
+//     worker is multi-homed in general, so the dispatch IP must come from
+//     here, never a worker self-report.
+//   - The "WORKER_STATUS" JetStream KV bucket gives each worker's status
+//     payload (warm sandboxes, in-flight dispatches, cached images), which
+//     workers Put on every change + a 5s floor and Delete on graceful
+//     shutdown. The cm Watches the bucket once (no per-pod connections).
+//
+// Pick joins the two: for each Ready endpoint it looks up the worker's KV
+// status by reconstructing the key from (pool ns, pool name, pod name).
+//
+// Lives in its own package — distinct from internal/controller — so the
+// proto dependency only pollutes the bazel-built controller-manager
+// binary, not anything cmd/clrk transitively imports. Per memory
+// feedback_clrk_standalone_build, generated *.pb.go are not committed to
+// this repo; only cmd/clrk must build standalone.
 package healthcheck
 
 import (
@@ -18,101 +32,126 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/proto"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/ports"
 	workerstatusv1alpha1 "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1"
 )
 
-// healthcheckerSyncInterval is how often the top-level loop reconciles
-// the live set of WorkerPools and their endpoints. Per-endpoint Watch
-// streams are long-lived and only opened/torn down on membership
-// changes; this interval just bounds how quickly the checker reacts
-// to a new pool or a churned EndpointSlice.
+// healthcheckerSyncInterval is how often the top-level loop reconciles the
+// live set of WorkerPools and their EndpointSlices (the routable-IP +
+// readiness half). It also prunes KV entries whose worker is long gone.
+// The cached controller-runtime client makes the List cheap.
 const healthcheckerSyncInterval = 5 * time.Second
 
-// healthcheckerDeadAfter marks a worker dead when no message (real or
-// heartbeat) has arrived in this window. Three times the worker-side
-// heartbeat (5s) per the plan.
+// healthcheckerDeadAfter marks a worker dead when no KV update (real Put or
+// floor heartbeat) has arrived in this window. Three times the worker-side
+// floor (5s). This lastSeen staleness is the authoritative liveness signal
+// — the KV bucket TTL is deliberately not relied on, since a MaxAge expiry
+// is silent to live watchers without LimitMarkerTTL.
 const healthcheckerDeadAfter = 15 * time.Second
 
-// WorkerHealthChecker maintains a streaming view of every worker pod's
-// state across all WorkerPools. The ingress ext_proc consults Pick to
-// route per-execution traffic to a worker that already has the
-// revision warm or cached, and InFlight to enforce cluster-wide
-// MaxConcurrent.
+// kvEvictAfter bounds the in-memory KV map: an entry whose worker stopped
+// Putting (ungraceful death, no Delete) lingers only until this window
+// (past the server-side bucket TTL of 20s) before the sync sweep drops it.
+// Routing already ignores it after healthcheckerDeadAfter; this is just to
+// stop the map growing with pod-name churn.
+const kvEvictAfter = 30 * time.Second
+
+// kvWatchBackoff paces re-establishing the KV watch after it drops (or
+// before the bucket is created on a fresh store).
+const kvWatchBackoff = 2 * time.Second
+
+// NATSProvider is the subset of the embedded NATS server the healthchecker
+// needs to watch the WORKER_STATUS KV bucket: wait for readiness, then open
+// a connection. *internal/nats.Server satisfies it (in-process). Declared
+// locally to avoid importing the apiserver package.
+type NATSProvider interface {
+	Ready(ctx context.Context) error
+	Connect(name string) (*nats.Conn, error)
+}
+
+// WorkerHealthChecker maintains a joined view of every worker pod's routing
+// state across all WorkerPools. The ingress ext_proc consults Pick to route
+// per-execution traffic to a worker that already has the revision warm or
+// cached, and InFlight to enforce cluster-wide MaxConcurrent.
 //
-// One instance per controller-manager. Implements manager.Runnable so
-// it slots into the existing controller-runtime startup. Not leader-
-// gated — every replica needs a live state map for its own ext_proc,
-// even if only the leader runs the EG-CR reconcilers.
+// One instance per controller-manager. Implements manager.Runnable so it
+// slots into the existing controller-runtime startup. Not leader-gated —
+// every replica needs a live state map for its own ext_proc, even if only
+// the leader runs the EG-CR reconcilers; each replica Watches the shared KV
+// bucket independently (native NATS fan-out, no dedup).
 type WorkerHealthChecker struct {
 	client client.Client
+	nats   NATSProvider // nil => worker status disabled (NATS off); Pick finds no candidates
 
 	mu    sync.RWMutex
-	pools map[types.NamespacedName]*workerPoolState
+	pools map[types.NamespacedName]map[string]*endpoint // pool -> podName -> endpoint
+	kv    map[string]*kvEntry                           // KV key -> status
 }
 
-// workerPoolState holds per-pool state. Only the top-level loop
-// mutates pools; individual workers are added/removed inside the
-// pool's syncEndpoints sweep.
-type workerPoolState struct {
-	name types.NamespacedName
-
-	mu      sync.RWMutex
-	workers map[string]*workerState // key: podIP
+// endpoint is a Ready worker pod discovered from a pool's EndpointSlices.
+type endpoint struct {
+	podName string
+	podIP   string
 }
 
-// workerState tracks one worker pod's stream. snapshot is replaced
-// in place by the stream goroutine; lastSeen is the timestamp of the
-// most recent message (real or heartbeat).
-type workerState struct {
-	podIP    string
-	cancel   context.CancelFunc
-	mu       sync.RWMutex
+// kvEntry is one worker's last-seen status from the KV watch. lastSeen is
+// the receive time of the most recent update (Put or initial replay).
+type kvEntry struct {
 	snapshot *workerstatusv1alpha1.WorkerStatus
 	lastSeen time.Time
 }
 
-// NewWorkerHealthChecker constructs a WorkerHealthChecker.
-func NewWorkerHealthChecker(c client.Client) *WorkerHealthChecker {
+// NewWorkerHealthChecker constructs a WorkerHealthChecker. nats may be a
+// true nil interface when the embedded NATS server is disabled; the caller
+// must pass nil (not a typed nil *nats.Server) so the disabled branch is
+// taken cleanly.
+func NewWorkerHealthChecker(c client.Client, nats NATSProvider) *WorkerHealthChecker {
 	return &WorkerHealthChecker{
 		client: c,
-		pools:  make(map[types.NamespacedName]*workerPoolState),
+		nats:   nats,
+		pools:  make(map[types.NamespacedName]map[string]*endpoint),
+		kv:     make(map[string]*kvEntry),
 	}
 }
 
-// NeedLeaderElection lets every replica run its own checker. The
-// state map feeds this replica's ext_proc; without local state, the
-// replica can't route incoming requests.
+// NeedLeaderElection lets every replica run its own checker. The state map
+// feeds this replica's ext_proc; without local state, the replica can't
+// route incoming requests.
 func (h *WorkerHealthChecker) NeedLeaderElection() bool { return false }
 
-// Start runs the top-level sync loop until ctx is cancelled. Per-pool
-// goroutines and per-worker stream goroutines are descendants of ctx
-// so they all unwind on shutdown.
+// Start runs the EndpointSlice sync loop, and (when NATS is enabled) a KV
+// watch goroutine, until ctx is cancelled.
 func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 	log := ctrl.LoggerFrom(ctx).WithName("worker-healthchecker")
 	log.Info("Starting worker health checker")
 
+	if h.nats != nil {
+		go h.runKVWatch(ctx, log)
+	} else {
+		log.Info("WARNING: Worker status routing disabled: embedded NATS is off; ingress will 503")
+	}
+
 	ticker := time.NewTicker(healthcheckerSyncInterval)
 	defer ticker.Stop()
 
-	// Run one sync immediately so first-request routing doesn't have
-	// to wait a full interval after process start.
+	// Run one sync immediately so first-request routing doesn't have to
+	// wait a full interval after process start.
 	h.syncOnce(ctx, log)
 
 	for {
 		select {
 		case <-ctx.Done():
-			h.shutdown()
 			return nil
 		case <-ticker.C:
 			h.syncOnce(ctx, log)
@@ -120,182 +159,170 @@ func (h *WorkerHealthChecker) Start(ctx context.Context) error {
 	}
 }
 
-// syncOnce reconciles the pool/worker membership. New WorkerPools
-// get a workerPoolState; gone pools have their streams cancelled.
+// syncOnce reconciles the pool/endpoint membership from WorkerPools +
+// EndpointSlices, then prunes long-gone KV entries.
 func (h *WorkerHealthChecker) syncOnce(ctx context.Context, log logr.Logger) {
 	var wps clrkv1alpha1.WorkerPoolList
 	if err := h.client.List(ctx, &wps); err != nil {
 		log.Error(err, "List WorkerPools failed")
 		return
 	}
-	live := make(map[types.NamespacedName]struct{}, len(wps.Items))
+
+	pools := make(map[types.NamespacedName]map[string]*endpoint, len(wps.Items))
 	for i := range wps.Items {
 		wp := &wps.Items[i]
 		key := types.NamespacedName{Namespace: wp.Namespace, Name: wp.Name}
-		live[key] = struct{}{}
-		h.ensurePool(ctx, key)
+		workers := h.poolEndpoints(ctx, key, log)
+		if workers == nil {
+			// EndpointSlice List failed for this pool — retain the prior
+			// snapshot rather than flapping every worker out of routing.
+			h.mu.RLock()
+			workers = h.pools[key]
+			h.mu.RUnlock()
+			if workers == nil {
+				workers = map[string]*endpoint{}
+			}
+		}
+		pools[key] = workers
 	}
 
 	h.mu.Lock()
-	for key, ps := range h.pools {
-		if _, ok := live[key]; ok {
-			continue
+	h.pools = pools
+	now := time.Now()
+	for k, e := range h.kv {
+		if now.Sub(e.lastSeen) > kvEvictAfter {
+			delete(h.kv, k)
 		}
-		ps.shutdown()
-		delete(h.pools, key)
-	}
-	pools := make([]*workerPoolState, 0, len(h.pools))
-	for _, ps := range h.pools {
-		pools = append(pools, ps)
 	}
 	h.mu.Unlock()
-
-	for _, ps := range pools {
-		h.syncPoolEndpoints(ctx, ps, log)
-	}
 }
 
-func (h *WorkerHealthChecker) ensurePool(ctx context.Context, key types.NamespacedName) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, ok := h.pools[key]; ok {
-		return
-	}
-	h.pools[key] = &workerPoolState{
-		name:    key,
-		workers: make(map[string]*workerState),
-	}
-}
-
-// syncPoolEndpoints reads the EndpointSlices for {pool}-workers and
-// reconciles per-podIP stream goroutines.
-func (h *WorkerHealthChecker) syncPoolEndpoints(ctx context.Context, ps *workerPoolState, log logr.Logger) {
-	svcName := ps.name.Name + "-workers"
+// poolEndpoints reads the EndpointSlices for "<pool>-workers" and returns
+// the Ready worker pods keyed by pod name. Returns nil on List error so the
+// caller can retain prior state. Only the IPv4 address family is consumed
+// (the family Envoy Gateway routes on); the dispatch IP is whatever the
+// endpoint advertises, never a worker self-report.
+func (h *WorkerHealthChecker) poolEndpoints(ctx context.Context, poolKey types.NamespacedName, log logr.Logger) map[string]*endpoint {
+	svcName := poolKey.Name + "-workers"
 	var slices discoveryv1.EndpointSliceList
 	if err := h.client.List(ctx, &slices,
-		client.InNamespace(ps.name.Namespace),
+		client.InNamespace(poolKey.Namespace),
 		client.MatchingLabels{discoveryv1.LabelServiceName: svcName},
 	); err != nil {
-		log.V(1).Info("List EndpointSlices failed", "pool", ps.name, "err", err)
-		return
+		log.V(1).Info("List EndpointSlices failed", "pool", poolKey, "err", err)
+		return nil
 	}
 
-	live := make(map[string]struct{})
+	workers := make(map[string]*endpoint)
 	for i := range slices.Items {
 		s := &slices.Items[i]
+		if s.AddressType != discoveryv1.AddressTypeIPv4 {
+			continue
+		}
 		for _, ep := range s.Endpoints {
 			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
 				continue
 			}
-			for _, ip := range ep.Addresses {
-				if ip == "" {
-					continue
-				}
-				live[ip] = struct{}{}
+			if ep.TargetRef == nil || ep.TargetRef.Name == "" {
+				continue
 			}
+			var ip string
+			for _, a := range ep.Addresses {
+				if a != "" {
+					ip = a
+					break
+				}
+			}
+			if ip == "" {
+				continue
+			}
+			workers[ep.TargetRef.Name] = &endpoint{podName: ep.TargetRef.Name, podIP: ip}
 		}
 	}
-
-	ps.mu.Lock()
-	for ip := range live {
-		if _, ok := ps.workers[ip]; ok {
-			continue
-		}
-		wctx, cancel := context.WithCancel(ctx)
-		ws := &workerState{podIP: ip, cancel: cancel}
-		ps.workers[ip] = ws
-		go h.runWorkerStream(wctx, ps.name, ws)
-	}
-	for ip, ws := range ps.workers {
-		if _, ok := live[ip]; ok {
-			continue
-		}
-		ws.cancel()
-		delete(ps.workers, ip)
-	}
-	ps.mu.Unlock()
+	return workers
 }
 
-// runWorkerStream opens a Watch stream to the worker and feeds
-// snapshots into ws.snapshot until ctx is cancelled or the stream
-// errors. On any failure, sleeps a short backoff before retrying.
-// Exits cleanly on ctx cancel.
-func (h *WorkerHealthChecker) runWorkerStream(ctx context.Context, pool types.NamespacedName, ws *workerState) {
-	log := ctrl.LoggerFrom(ctx).WithName("worker-healthchecker.stream").
-		WithValues("pool", pool, "ip", ws.podIP)
+// runKVWatch connects to the embedded NATS and Watches the WORKER_STATUS
+// bucket, feeding kvEntry updates into the map until ctx is cancelled. On
+// any failure (bucket not yet created, dropped watch) it retries after a
+// short backoff.
+func (h *WorkerHealthChecker) runKVWatch(ctx context.Context, log logr.Logger) {
+	log = log.WithName("kv")
+	if err := h.nats.Ready(ctx); err != nil {
+		return // ctx done
+	}
+	nc, err := h.nats.Connect("clrk-cm-worker-status")
+	if err != nil {
+		log.Error(err, "Connect NATS for worker-status watch failed")
+		return
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		log.Error(err, "JetStream for worker-status watch failed")
+		return
+	}
 
-	addr := fmt.Sprintf("%s:%d", ws.podIP, ports.WorkerStatusPort)
-	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		err := h.streamOnce(ctx, addr, ws, log)
-		if ctx.Err() != nil {
-			return
+		if err := h.watchOnce(ctx, js); err != nil && ctx.Err() == nil {
+			log.V(1).Info("Worker-status KV watch ended; reconnecting", "err", err, "after", kvWatchBackoff)
 		}
-		log.V(1).Info("Watch stream ended; reconnecting", "err", err, "after", backoff)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
-		}
-		if backoff < 5*time.Second {
-			backoff *= 2
+		case <-time.After(kvWatchBackoff):
 		}
 	}
 }
 
-func (h *WorkerHealthChecker) streamOnce(ctx context.Context, addr string, ws *workerState, log logr.Logger) error {
-	conn, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second,
-			Timeout:             5 * time.Second,
-			PermitWithoutStream: true,
-		}),
-	)
+func (h *WorkerHealthChecker) watchOnce(ctx context.Context, js jetstream.JetStream) error {
+	kv, err := js.KeyValue(ctx, invevent.WorkerStatusBucket)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
+		return fmt.Errorf("bind %s kv: %w", invevent.WorkerStatusBucket, err)
 	}
-	defer conn.Close()
-
-	cli := workerstatusv1alpha1.NewWorkerStatusServiceClient(conn)
-	stream, err := cli.Watch(ctx, &workerstatusv1alpha1.WatchRequest{})
+	w, err := kv.WatchAll(ctx)
 	if err != nil {
-		return fmt.Errorf("open Watch: %w", err)
+		return fmt.Errorf("watch %s kv: %w", invevent.WorkerStatusBucket, err)
 	}
+	defer func() { _ = w.Stop() }()
 
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			return err
+	for entry := range w.Updates() {
+		if entry == nil {
+			// Marks end of the initial-values replay; subsequent entries
+			// are live updates. A cold replica now has the full fleet.
+			continue
 		}
-		ws.mu.Lock()
-		ws.lastSeen = time.Now()
-		if !msg.GetHeartbeat() {
-			ws.snapshot = msg
+		switch entry.Operation() {
+		case jetstream.KeyValuePut:
+			h.upsertKV(entry)
+		case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
+			h.removeKV(entry.Key())
 		}
-		ws.mu.Unlock()
 	}
+	return nil // Updates() closed -> reconnect
 }
 
-func (h *WorkerHealthChecker) shutdown() {
+func (h *WorkerHealthChecker) upsertKV(entry jetstream.KeyValueEntry) {
+	var ws workerstatusv1alpha1.WorkerStatus
+	if err := proto.Unmarshal(entry.Value(), &ws); err != nil {
+		// Drop a malformed value; the next Put supersedes it.
+		return
+	}
+	// lastSeen is the receive time (now), NOT entry.Created(): an initial
+	// replay of a quiet-but-live worker could carry a Put older than
+	// healthcheckerDeadAfter and would otherwise be dropped immediately.
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, ps := range h.pools {
-		ps.shutdown()
-	}
-	h.pools = make(map[types.NamespacedName]*workerPoolState)
+	h.kv[entry.Key()] = &kvEntry{snapshot: &ws, lastSeen: time.Now()}
+	h.mu.Unlock()
 }
 
-func (ps *workerPoolState) shutdown() {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	for _, ws := range ps.workers {
-		ws.cancel()
-	}
-	ps.workers = make(map[string]*workerState)
+func (h *WorkerHealthChecker) removeKV(key string) {
+	h.mu.Lock()
+	delete(h.kv, key)
+	h.mu.Unlock()
 }
 
 // PickResult is what Pick returns to the ingress ext_proc.
@@ -320,30 +347,27 @@ type PickResult struct {
 // 429 instead of 503.
 func (h *WorkerHealthChecker) Pick(pool types.NamespacedName, ns, agent, revision string, maxConcurrent uint32, tieBreaker string) (PickResult, bool) {
 	h.mu.RLock()
-	ps, ok := h.pools[pool]
+	workers := h.pools[pool]
+	states := make([]CandidateState, 0, len(workers))
+	for _, ep := range workers {
+		key := invevent.WorkerStatusKey(pool.Namespace, pool.Name, ep.podName)
+		var snap *workerstatusv1alpha1.WorkerStatus
+		var seen time.Time
+		if e := h.kv[key]; e != nil {
+			snap = e.snapshot
+			seen = e.lastSeen
+		}
+		states = append(states, CandidateState{PodIP: ep.podIP, Snapshot: snap, LastSeen: seen})
+	}
 	h.mu.RUnlock()
-	if !ok {
-		return PickResult{}, false
-	}
-
-	ps.mu.RLock()
-	states := make([]CandidateState, 0, len(ps.workers))
-	for ip, ws := range ps.workers {
-		ws.mu.RLock()
-		snap := ws.snapshot
-		seen := ws.lastSeen
-		ws.mu.RUnlock()
-		states = append(states, CandidateState{PodIP: ip, Snapshot: snap, LastSeen: seen})
-	}
-	ps.mu.RUnlock()
 
 	return PickFromCandidates(states, ns, agent, revision, maxConcurrent, tieBreaker, time.Now())
 }
 
-// CandidateState is the per-worker input to PickFromCandidates. The
-// streaming Watch loop produces these in production; tests construct
-// them directly. Snapshot may be nil (no message received yet);
-// LastSeen zero means no message has been observed.
+// CandidateState is the per-worker input to PickFromCandidates. The KV
+// watch + endpoint join produces these in production; tests construct them
+// directly. Snapshot may be nil (no KV status yet); LastSeen zero means no
+// status has been observed.
 type CandidateState struct {
 	PodIP    string
 	Snapshot *workerstatusv1alpha1.WorkerStatus
@@ -364,7 +388,7 @@ type CandidateState struct {
 //     tieBreakers spread.
 //
 // Exported so unit tests can drive the policy without spinning up a
-// gRPC stream.
+// KV watch.
 func PickFromCandidates(states []CandidateState, ns, agent, revision string, maxConcurrent uint32, tieBreaker string, now time.Time) (PickResult, bool) {
 	type candidate struct {
 		ip       string

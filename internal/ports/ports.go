@@ -13,12 +13,6 @@ package ports
 // rewrites :authority to <podIP>:<DispatchPort> on each request.
 const DispatchPort int32 = 8090
 
-// WorkerStatusPort is the gRPC port each worker pod serves
-// WorkerStatusService on. controller-manager opens one streaming
-// Watch per pod sourced from the WorkerPool's EndpointSlice and
-// feeds the in-memory routing state map.
-const WorkerStatusPort int32 = 8091
-
 // WorkerIMDSPort is the host-bound TCP port each worker process
 // listens on for IMDS requests proxied from in-Sentry forwarders.
 // Bound on 127.0.0.1 only — the per-sandbox Sentry inherits the

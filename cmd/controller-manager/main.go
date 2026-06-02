@@ -320,14 +320,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// WorkerHealthChecker streams every worker pod's status RPC into
-	// an in-memory map. The ingress ext_proc consults Pick() per
-	// inbound request to route to a worker that already has the
-	// revision warm/cached, and to enforce cluster-wide MaxConcurrent.
-	// Run in every mode (not gated on --ingress-controller) so even
-	// the cron-only/dispatch-only paths can read consistent in-flight
-	// state.
-	healthChecker := healthcheck.NewWorkerHealthChecker(cm.GetClient())
+	// WorkerHealthChecker joins each worker pod's KV-published status
+	// (warm/in-flight/cached) with its routable IP + readiness from the
+	// pool's EndpointSlices into an in-memory map. The ingress ext_proc
+	// consults Pick() per inbound request to route to a worker that
+	// already has the revision warm/cached, and to enforce cluster-wide
+	// MaxConcurrent. Run in every mode (not gated on --ingress-controller)
+	// so even the cron-only/dispatch-only paths can read consistent
+	// in-flight state. When NATS is disabled (natsSrv nil) status routing
+	// is unavailable and Pick finds no candidates (ingress 503s); pass a
+	// true nil interface, not a typed nil *nats.Server.
+	var statusNATS healthcheck.NATSProvider
+	if natsSrv != nil {
+		statusNATS = natsSrv
+	}
+	healthChecker := healthcheck.NewWorkerHealthChecker(cm.GetClient(), statusNATS)
 	if err := cm.Add(healthChecker); err != nil {
 		log.Error(err, "Unable to add worker health checker")
 		os.Exit(1)

@@ -4,7 +4,7 @@ import "sync"
 
 // changeNotifier is a tiny pub/sub primitive used by the worker's
 // in-process state holders (activeCounter, SandboxManager) to wake
-// the WorkerStatusService stream loop on every state mutation.
+// the status KV publisher loop on every state mutation.
 //
 // Subscribers receive a coalesced edge-trigger: each subscriber's
 // channel is a 1-buffer chan struct{}. broadcast() sends a

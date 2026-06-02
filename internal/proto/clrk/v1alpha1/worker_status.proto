@@ -1,13 +1,13 @@
-// WorkerStatusService is served by every clrk worker pod on a dedicated
-// gRPC port. The controller-manager opens one Watch stream per pod from
-// the WorkerPool's EndpointSlice and feeds the in-memory state map that
-// the ingress ext_proc consults to pick a per-execution worker.
-//
-// First message on a stream is a snapshot (snapshot=true). Subsequent
-// messages are deltas (snapshot=false) that the consumer applies on
-// top of its last seen state. The server emits an empty heartbeat
-// every 5s when no real state change has fired so the consumer can
-// detect a dead stream via inactivity.
+// WorkerStatus is the per-worker routing state the controller-manager's
+// ingress ext_proc consults to pick a per-execution worker. Each worker
+// pod publishes its current status as the value of a key in the
+// controller-manager's "WORKER_STATUS" NATS JetStream KV bucket, keyed by
+// "<podNamespace>.<poolName>.<podName>". The value is last-writer-wins: a
+// worker Puts a complete snapshot on every in-flight change and on a 5s
+// floor, and Deletes its key on graceful shutdown. The controller-manager
+// Watches the bucket and joins each status with the worker's routable pod
+// IP + readiness from the WorkerPool Service's EndpointSlices (the IPs
+// Envoy Gateway routes to) by pod name.
 
 syntax = "proto3";
 
@@ -15,27 +15,7 @@ package clrk.v1alpha1;
 
 option go_package = "github.com/apoxy-dev/clrk/internal/proto/clrk/v1alpha1;workerstatusv1alpha1";
 
-service WorkerStatusService {
-  rpc Watch(WatchRequest) returns (stream WorkerStatus);
-}
-
-message WatchRequest {
-  // Reserved for future filters (e.g. namespace scoping). Empty in v1.
-}
-
 message WorkerStatus {
-  // Monotonic counter that increments on every server-side state
-  // mutation. Heartbeat messages reuse the last emitted value.
-  uint64 update_seq = 1;
-
-  // True for the snapshot sent immediately after a stream opens.
-  // False for deltas + heartbeats.
-  bool snapshot = 2;
-
-  // True when this message carries no state change; emitted every
-  // 5s by default to keep the stream alive.
-  bool heartbeat = 3;
-
   // Warm sandboxes ready to accept a dispatch (Phase=Ready in the
   // worker's SandboxManager). One entry per (ns, agent, revision).
   repeated WarmRevision warm_revisions = 4;
@@ -49,9 +29,6 @@ message WorkerStatus {
   // store. Routing prefers a worker that already has the image
   // even if no warm sandbox exists.
   repeated CachedImage cached_images = 6;
-
-  // Best-effort resource utilization. Snapshot value, not a delta.
-  ResourceUsage resources = 7;
 }
 
 message WarmRevision {
@@ -71,11 +48,4 @@ message InFlight {
 message CachedImage {
   // Fully qualified image reference (e.g. "registry/foo:abc123").
   string image_ref = 1;
-}
-
-message ResourceUsage {
-  // 0..1.0 reflecting recent CPU usage on this worker.
-  double cpu_fraction = 1;
-  // Resident memory in bytes used by sandboxes on this worker.
-  uint64 memory_bytes = 2;
 }

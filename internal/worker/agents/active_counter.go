@@ -7,8 +7,8 @@ import (
 )
 
 // activeCounter tracks in-flight TaskAgent executions per
-// (taskAgentNS, taskAgentName). The WorkerStatusService streams the
-// snapshot to the controller-manager which feeds it into the ingress
+// (taskAgentNS, taskAgentName). The status publisher Puts the snapshot
+// into the controller-manager's WORKER_STATUS KV, which feeds the ingress
 // ext_proc cluster-wide MaxConcurrent enforcement.
 //
 // Kept in an untagged file so cross-platform test seams in
@@ -53,8 +53,8 @@ func (c *activeCounter) get(key types.NamespacedName) int32 {
 	return c.counts[key]
 }
 
-// Snapshot returns a copy of all (key, count) pairs. Used by the
-// WorkerStatusService to build a stream message.
+// Snapshot returns a copy of all (key, count) pairs. Used by
+// buildWorkerStatus to assemble a status KV value.
 func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -66,7 +66,7 @@ func (c *activeCounter) Snapshot() map[types.NamespacedName]int32 {
 }
 
 // Notifier returns the change notifier for this counter so external
-// publishers (e.g. the WorkerStatusService) can subscribe to inc/dec
+// publishers (e.g. the status KV publisher) can subscribe to inc/dec
 // events.
 func (c *activeCounter) Notifier() *changeNotifier { return c.notifier }
 

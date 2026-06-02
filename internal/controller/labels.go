@@ -39,7 +39,6 @@ const (
 // generated protobuf code.
 const (
 	DispatchPort              = ports.DispatchPort
-	WorkerStatusPort          = ports.WorkerStatusPort
 	IngressExtProcBackendName = ports.IngressExtProcBackendName
 )
 

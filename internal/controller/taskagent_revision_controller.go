@@ -45,12 +45,13 @@ type TaskAgentRevisionReconciler struct {
 }
 
 // workerActiveSum is the legacy ActiveExecutions source: the per-worker
-// in-flight counts the WorkerStatusService stream writes onto the
-// latest-ready revision's Status.Workers. Only the latest-ready slice is
-// summed because executions against older revisions drain quickly
-// (one-shot) and summing every revision would double-count during a
-// rollover. Used as the fallback when the invocation read model is
-// unavailable.
+// in-flight counts summed off the latest-ready revision's Status.Workers.
+// Only the latest-ready slice is summed because executions against older
+// revisions drain quickly (one-shot) and summing every revision would
+// double-count during a rollover. Used as the fallback when the invocation
+// read model is unavailable. (In-flight state now flows through the
+// WORKER_STATUS KV, not onto Status.Workers, so this sum is effectively a
+// zero floor until the fallback is removed.)
 func (r *TaskAgentRevisionReconciler) workerActiveSum(ctx context.Context, namespace, revName string) (int32, error) {
 	var rev clrkv1alpha1.AgentSandboxRevision
 	if err := r.Get(ctx, types.NamespacedName{Name: revName, Namespace: namespace}, &rev); err != nil {

@@ -504,7 +504,6 @@ func bootstrapDefaultWorkerPool(ctx context.Context, cluster *drivers.ClusterDri
 				},
 				Ports: []corev1.ContainerPort{
 					{Name: "dispatch", ContainerPort: ports.DispatchPort, Protocol: corev1.ProtocolTCP},
-					{Name: "status", ContainerPort: ports.WorkerStatusPort, Protocol: corev1.ProtocolTCP},
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "state", MountPath: "/var/lib/clrk/state"},

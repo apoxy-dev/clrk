@@ -147,17 +147,17 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}()
 
 	// Warm pool shares the activeCounter's notifier so warm
-	// fills/evictions push deltas to the WorkerStatusService stream
-	// alongside in-flight changes.
+	// fills/evictions trigger a status KV Put alongside in-flight
+	// changes.
 	warmPool := agents.NewWarmPool(sandboxMgr, r.Client, router, active.Notifier(), r.PoolName, r.PodName, 0)
 	disp.SetWarmPool(warmPool)
 	if err := warmPool.SetupWithManager(r.Manager); err != nil {
 		return fmt.Errorf("setting up warm pool reconciler: %w", err)
 	}
 
-	// Set up SandboxState watcher. ActiveExecutions accounting lives
-	// in the WorkerStatusService gRPC stream consumed by the
-	// controller — the watcher only owns image-pull + heartbeat.
+	// Set up SandboxState watcher. In-flight accounting lives in the
+	// WORKER_STATUS KV the controller-manager watches — the watcher
+	// only owns image-pull + heartbeat.
 	watcher := agents.NewWatcher(r.Client, sandboxMgr, daemonMgr, r.PoolName, r.PodName, r.Namespace)
 	if err := watcher.SetupWithManager(r.Manager); err != nil {
 		return fmt.Errorf("setting up sandbox watcher: %w", err)
@@ -188,18 +188,22 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Start the worker status gRPC server. controller-manager opens
-	// one Watch stream per pod (sourced from the WorkerPool's
-	// EndpointSlice) and feeds the in-memory routing state map.
-	statusAddr := fmt.Sprintf(":%d", ports.WorkerStatusPort)
-	statusSvc := agents.NewStatusService(sandboxMgr, imageStore, active)
-	go func() {
-		if err := agents.RunStatusServer(ctx, statusAddr, statusSvc); err != nil {
-			log.Error(err, "Worker status server exited", "addr", statusAddr)
-		}
-	}()
+	// Publish this worker's routing state into the cm's WORKER_STATUS KV
+	// bucket on every in-flight/warm change + a 5s floor. No-op when
+	// CMNATSAddr is empty (status routing is then unavailable cluster-wide
+	// and the ingress ext_proc 503s). The cm watches the bucket and joins
+	// each snapshot to the worker's routable pod IP + readiness from the
+	// pool's EndpointSlices.
+	if r.CMNATSAddr != "" {
+		statusPub := agents.NewStatusPublisher(r.CMNATSAddr, r.Namespace, r.PoolName, r.PodName, sandboxMgr, imageStore, active)
+		go func() {
+			if err := statusPub.Run(ctx); err != nil {
+				log.Error(err, "Worker status publisher exited")
+			}
+		}()
+	}
 
-	log.Info("Worker runtime started", "dispatchAddr", dispatchAddr, "statusAddr", statusAddr)
+	log.Info("Worker runtime started", "dispatchAddr", dispatchAddr)
 
 	// Block until context is cancelled.
 	<-ctx.Done()

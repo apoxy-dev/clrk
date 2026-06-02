@@ -193,7 +193,7 @@ func (b *EgressBridge) handleConn(client net.Conn) {
 	// worker itself. The bridge runs in the worker's netns (see
 	// oci_spec.go: NetworkNamespace pinned to /proc/self/ns/net), so
 	// loopback / worker pod IPs would otherwise reach control surfaces
-	// like the dispatcher (:8090) and worker status gRPC (:8091).
+	// like the dispatcher (:8090).
 	if reason, deny := b.filter.deny(origDst); deny {
 		logger.Warn("Egress dial denied: worker-local destination", append(
 			identityLogFields(state.Identity),

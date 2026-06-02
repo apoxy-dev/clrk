@@ -115,9 +115,9 @@ type WarmPool struct {
 }
 
 // NewWarmPool constructs a WarmPool. The notifier is shared with the
-// dispatcher's activeCounter so warm-pool inserts/evictions push
-// immediately to the WorkerStatusService stream — same edge-trigger
-// pattern in-flight changes use today.
+// dispatcher's activeCounter so warm-pool inserts/evictions trigger a
+// status KV Put immediately — same edge-trigger pattern in-flight
+// changes use.
 func NewWarmPool(
 	sandboxMgr SandboxRuntime,
 	c client.Client,

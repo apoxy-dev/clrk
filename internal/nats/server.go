@@ -52,6 +52,17 @@ const (
 	// readyTimeout caps how long Run waits for the server to accept
 	// connections before declaring startup failed.
 	readyTimeout = 10 * time.Second
+
+	// workerStatusKVTTL bounds how long a worker's last status lingers
+	// after its final Put. Set strictly greater than the consumer's
+	// dead-after window (healthcheck.healthcheckerDeadAfter, 15s) so the
+	// controller-manager's lastSeen staleness check drops a quiet worker
+	// from routing before the key is reaped; TTL is bucket hygiene only
+	// (so a cold replica's initial Watch replay doesn't see corpses), not
+	// a liveness signal. LimitMarkerTTL is deliberately left unset — a
+	// MaxAge expiry is silent to live watchers, and we rely on lastSeen +
+	// explicit Delete-on-shutdown instead.
+	workerStatusKVTTL = 20 * time.Second
 )
 
 // Server is the embedded nats-server + JetStream stream supervisor.
@@ -143,6 +154,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.srv.WaitForShutdown()
 		return fmt.Errorf("ensure %s stream: %w", invevent.StreamName, err)
 	}
+	if err := s.ensureWorkerStatusKV(ctx); err != nil {
+		s.srv.Shutdown()
+		s.srv.WaitForShutdown()
+		return fmt.Errorf("ensure %s kv: %w", invevent.WorkerStatusBucket, err)
+	}
 	slog.Info("Embedded NATS ready",
 		"client_url", s.srv.ClientURL(), "stream", invevent.StreamName, "max_age", s.maxAge)
 
@@ -200,6 +216,35 @@ func (s *Server) ensureStream(ctx context.Context) error {
 		Retention:   jetstream.LimitsPolicy,
 		MaxAge:      s.maxAge,
 		MaxBytes:    s.maxBytes,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureWorkerStatusKV idempotently creates (or updates) the WORKER_STATUS
+// KV bucket workers publish their routing state into. Created before the
+// server advertises ready so a worker's first Put and the cm's first Watch
+// always find the bucket. History 1 (routing reads only the latest value
+// per key); short TTL for dead-worker GC (see workerStatusKVTTL).
+func (s *Server) ensureWorkerStatusKV(ctx context.Context) error {
+	nc, err := s.Connect("clrk-cm-kv-admin")
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return err
+	}
+	if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:      invevent.WorkerStatusBucket,
+		Description: "clrk per-worker routing state (warm/in-flight/cached)",
+		History:     1,
+		TTL:         workerStatusKVTTL,
+		Storage:     jetstream.FileStorage,
+		Replicas:    1,
 	}); err != nil {
 		return err
 	}
