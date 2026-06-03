@@ -95,19 +95,12 @@ func (o Orchestration) Steps() []Step {
 		Why:   fmt.Sprintf("create the control-plane namespace %q and worker namespace %q", p.Namespace, p.WorkerNamespace),
 		Risky: false,
 		Run: func(ctx context.Context) error {
-			// The worker namespace hosts privileged gVisor/runsc pods, so it must
-			// allow them: stamp the privileged Pod Security labels rather than let
-			// a freshly created namespace inherit a restrictive cluster-wide PSA
-			// default and silently reject the workers at admission. When the worker
-			// and control-plane namespaces are the same, that one namespace carries
-			// the labels (it hosts the workers too).
-			if p.WorkerNamespace == p.Namespace {
-				return o.Applier.ApplyObjects(ctx, workerNamespace(p.Namespace))
-			}
-			if err := o.Applier.EnsureNamespace(ctx, p.Namespace); err != nil {
-				return err
-			}
-			return o.Applier.ApplyObjects(ctx, workerNamespace(p.WorkerNamespace))
+			// Apply the same namespace set the YAML render emits (see
+			// namespaceObjects): the worker namespace carries privileged Pod
+			// Security labels so the gVisor/runsc pods aren't rejected by a
+			// restrictive cluster-wide PSA default, and a distinct control-plane
+			// namespace is created plain.
+			return o.Applier.ApplyObjects(ctx, namespaceObjects(p)...)
 		},
 	}}
 
@@ -237,6 +230,32 @@ func StepNames(steps []Step) []string {
 		names[i] = s.Name
 	}
 	return names
+}
+
+// namespaceObjects returns the namespace objects the bring-up applies, the
+// single source of truth shared by the orchestration's namespaces step and the
+// YAML render so the two never drift. The worker namespace carries the
+// privileged Pod Security labels (the gVisor/runsc pods need them); when the
+// control-plane namespace is distinct it is created plain. When both are the
+// same namespace, the one labeled namespace covers both roles.
+func namespaceObjects(p Profile) []client.Object {
+	if p.WorkerNamespace == p.Namespace {
+		return []client.Object{workerNamespace(p.Namespace)}
+	}
+	return []client.Object{
+		controlPlaneNamespace(p.Namespace),
+		workerNamespace(p.WorkerNamespace),
+	}
+}
+
+// controlPlaneNamespace builds the plain control-plane Namespace (no PSA labels;
+// it holds the cm, not the privileged workers). Matches the object
+// Applier.EnsureNamespace applies on the live path.
+func controlPlaneNamespace(ns string) *corev1.Namespace {
+	return &corev1.Namespace{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{Name: ns},
+	}
 }
 
 // workerNamespace builds the worker Namespace with privileged Pod Security

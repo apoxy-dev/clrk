@@ -77,6 +77,9 @@ func runUpgrade(ctx context.Context, o *upgradeOpts) error {
 	if err := validatePullFlag(o.pull); err != nil {
 		return err
 	}
+	if err := validateOutputFlag(o.output); err != nil {
+		return err
+	}
 
 	rc, cl, tlsMode, err := resolveTarget(ctx, &o.installOpts)
 	if err != nil {

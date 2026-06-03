@@ -4,6 +4,7 @@
 package crds
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"embed"
@@ -160,6 +161,34 @@ func Install(ctx context.Context, cfg *rest.Config, opts InstallOptions) error {
 
 	slog.Info("CRD install complete", "applied", applied.Load(), "skipped", skipped.Load(), "mode", modeString(opts.Mode))
 	return nil
+}
+
+// Manifests returns the embedded Gateway API + Envoy Gateway CRD documents as
+// individual YAML byte slices, in apply order (Gateway API first), with the
+// comment-only/empty leading documents skipped. It is the read-only counterpart
+// to Install: `clrk install --dry-run -o yaml` emits these alongside the
+// control-plane objects so the rendered set is the full manifest the apply path
+// would lay down. Each returned doc is the upstream YAML (trimmed of surrounding
+// whitespace), asserted to be a CustomResourceDefinition; the caller may further
+// normalize it (the renderer strips serializer-noise lines for stream
+// consistency).
+func Manifests() ([][]byte, error) {
+	var out [][]byte
+	for _, bundle := range [][]byte{gatewayAPIYAML, envoyGatewayYAML} {
+		for _, doc := range resource.SplitYAMLDocuments(bundle) {
+			name, err := extractCRDName(doc)
+			if err != nil {
+				return nil, err
+			}
+			if name == "" {
+				// Comment-only/empty document (e.g. the Gateway API copyright
+				// header); not a CRD, nothing to emit.
+				continue
+			}
+			out = append(out, bytes.TrimSpace(doc))
+		}
+	}
+	return out, nil
 }
 
 // extractCRDName parses just enough of the doc to assert kind=CRD and
