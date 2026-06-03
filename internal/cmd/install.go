@@ -13,6 +13,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"k8s.io/client-go/discovery"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
 	"github.com/apoxy-dev/clrk/internal/crds"
@@ -33,6 +35,10 @@ type installOpts struct {
 	pull            string
 	crdMode         string
 	imagePullSecret string
+	rbac            string
+	tlsMode         string
+	apiserverCIDR   string
+	networkPolicy   bool
 	yes             bool
 	skipPreflight   bool
 	dryRun          bool
@@ -69,6 +75,10 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&o.pull, "pull", "", "Image pull policy: always | missing | never (default IfNotPresent).")
 	f.StringVar(&o.crdMode, "crd-mode", "if-missing", "Gateway-API/Envoy-Gateway CRD handling: always | if-missing | skip.")
 	f.StringVar(&o.imagePullSecret, "image-pull-secret", "", "Name of an imagePullSecret to attach to the cm + worker pods.")
+	f.StringVar(&o.rbac, "rbac", "scoped", "Controller-manager + worker RBAC: scoped | cluster-admin.")
+	f.StringVar(&o.tlsMode, "tls", "auto", "APIService serving TLS: auto (cert-manager if present, else self-signed) | cert-manager | self-signed | insecure.")
+	f.StringVar(&o.apiserverCIDR, "apiserver-cidr", "", "CIDR(s) allowed to reach the unauthenticated aggregated API, comma-separated (auto-derived from apiserver Endpoints + node IPs).")
+	f.BoolVar(&o.networkPolicy, "network-policy", true, "Emit a NetworkPolicy restricting the aggregated API (cm:8443) to the apiserver/node CIDRs.")
 	f.BoolVar(&o.yes, "yes", false, "Skip interactive confirmation (required for non-interactive use).")
 	f.BoolVar(&o.skipPreflight, "skip-preflight", false, "Skip the cluster readiness checks.")
 	f.BoolVar(&o.dryRun, "dry-run", false, "Print the plan (objects + diffs) without changing the cluster.")
@@ -106,11 +116,31 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	if err != nil {
 		return err
 	}
+	rbacScoped, err := parseRBACFlag(o.rbac)
+	if err != nil {
+		return err
+	}
 
 	rc, err := install.NewRemoteCluster(o.kubeconfig, o.context)
 	if err != nil {
 		return err
 	}
+	cl, err := rc.KubeClient(ctx)
+	if err != nil {
+		return err
+	}
+	disco, err := rc.Discovery()
+	if err != nil {
+		return err
+	}
+
+	// Resolve the serving-TLS mode (auto picks cert-manager when its CRDs are
+	// present, else self-signed). Insecure mirrors the dev posture.
+	tlsMode, err := resolveTLSMode(o.tlsMode, disco)
+	if err != nil {
+		return err
+	}
+
 	p := install.Profile{
 		Namespace:       o.namespace,
 		WorkerNamespace: o.workerNamespace,
@@ -121,18 +151,20 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		Replicas:        1,
 		Workers:         int32(o.workers),
 		StorageClass:    o.storageClass,
-		// TLS hardening (cert-manager / self-signed) + scoped RBAC land in a
-		// follow-up; v1 install mirrors the dev TLS/RBAC posture and is guarded
-		// by ClusterIP reachability.
-		TLS:     install.TLSInsecureSkipVerify,
-		Version: o.version,
+		RBACScoped:      rbacScoped,
+		TLS:             tlsMode,
+		Version:         o.version,
 	}
 
 	fmt.Fprintf(os.Stderr, "Target cluster: context %s, namespace %s\n",
 		lipgloss.NewStyle().Bold(true).Render(rc.Context()), p.Namespace)
-	fmt.Fprintf(os.Stderr, "%s\n\n", mutedSt.Render(
-		"note: v1 installs with the dev-equivalent security posture (insecure-skip-verify APIService, "+
-			"cluster-admin RBAC); serving-cert + scoped-RBAC hardening is the next milestone."))
+	fmt.Fprintf(os.Stderr, "%s\n", mutedSt.Render(fmt.Sprintf(
+		"posture: TLS=%s, RBAC=%s, NetworkPolicy=%s", tlsModeLabel(tlsMode), rbacLabel(rbacScoped), onOff(o.networkPolicy))))
+	if tlsMode == install.TLSInsecureSkipVerify {
+		fmt.Fprintf(os.Stderr, "%s\n", warnStyle.Render(
+			"warning: --tls=insecure serves the aggregated API without a verified cert (dev posture)."))
+	}
+	fmt.Fprintln(os.Stderr)
 
 	// Preflight.
 	if !o.skipPreflight {
@@ -141,12 +173,31 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		}
 	}
 
-	// Plan: SSA dry-run each object and show create/update/unchanged + diffs.
-	cl, err := rc.KubeClient(ctx)
+	// Serving cert: build (and, for self-signed, mint/reuse the CA) the cert
+	// objects, which also stamps the APIService caBundle / inject-ca-from
+	// annotation onto p so the built objects reflect the real posture.
+	certObjs, err := install.PrepareTLS(ctx, cl, &p)
 	if err != nil {
-		return err
+		return fmt.Errorf("preparing serving TLS: %w", err)
 	}
-	objs := append(install.BuildControllerManager(p), install.BuildWorkerPool(p)...)
+
+	// NetworkPolicy CIDRs guarding the unauthenticated aggregated API. An
+	// explicit --apiserver-cidr wins; otherwise derive from apiserver Endpoints +
+	// node IPs. A derivation failure is a warning, not fatal — we skip the policy
+	// rather than risk walling off the cm with a wrong CIDR.
+	if o.networkPolicy {
+		p.APIServerCIDRs, err = resolveAPIServerCIDRs(ctx, cl, o.apiserverCIDR)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", warnStyle.Render(
+				"warning: could not derive an apiserver CIDR ("+err.Error()+"); skipping the NetworkPolicy. Pass --apiserver-cidr to enable it."))
+		}
+	}
+
+	// Plan: SSA dry-run each object and show create/update/unchanged + diffs.
+	// Cert objects apply first (the cm mounts/serves them), then the cm set, then
+	// the worker set.
+	objs := append(append(append([]client.Object{}, certObjs...),
+		install.BuildControllerManager(p)...), install.BuildWorkerPool(p)...)
 	plans := install.BuildPlan(ctx, cl, "clrk-install", objs)
 	renderPlan(plans, rc.Context(), o.crdMode)
 
@@ -169,6 +220,20 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		}
 	}
 
+	// Bundle the bring-up. cert-manager mints the serving Secret asynchronously,
+	// so wait for it before the cm rolls; the self-signed Secret is applied
+	// inline and needs no wait.
+	orch := install.Orchestration{
+		Applier:        rc,
+		Config:         rc.RESTConfig(),
+		Profile:        p,
+		CRDMode:        crdMode,
+		CertObjects:    certObjs,
+		WaitCertSecret: tlsMode == install.TLSCertManager,
+		WaitTimeout:    o.timeout,
+		ReadyInterval:  o.readyInterval,
+	}
+
 	// Auto-disable the TUI on a non-TTY stdout (CI, piped) unless the user
 	// explicitly set --tui.
 	useTUI := o.tui
@@ -179,14 +244,14 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// Execute the bring-up.
 	fmt.Fprintln(os.Stderr)
 	if useTUI {
-		if err := runInstallTUI(ctx, rc, p, crdMode, o); err != nil {
+		if err := runInstallTUI(ctx, rc.Context(), orch); err != nil {
 			return err
 		}
 	} else {
-		steps := install.InstallSteps(rc, rc.RESTConfig(), p, crdMode, o.timeout, o.readyInterval, func(line string) {
+		orch.Log = func(line string) {
 			fmt.Fprintf(os.Stderr, "      %s\n", mutedSt.Render(line))
-		})
-		if err := install.RunSteps(ctx, steps, plainStepLogger); err != nil {
+		}
+		if err := install.RunSteps(ctx, orch.Steps(), plainStepLogger); err != nil {
 			return err
 		}
 	}
@@ -196,24 +261,32 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	return nil
 }
 
-// installStepNames are the sidebar component names for the install TUI, in
-// bring-up order. Must match the Step.Name values InstallSteps produces.
-var installStepNames = []string{
-	"namespaces", "crds", "controller-manager", "aggregated-api", "worker-pool", "readiness",
-}
-
 // runInstallTUI drives the bring-up inside the devtui system-only progress view:
 // a step-list sidebar with status glyphs and a per-step streaming-log pane. The
 // orchestration runs in a goroutine; the TUI renders on the main goroutine and
 // stays up after completion so the operator can review, then quits on `q`.
 // stderr is redirected to a file for the TUI's lifetime so stray library writes
 // don't corrupt the alt-screen.
-func runInstallTUI(ctx context.Context, rc *install.RemoteCluster, p install.Profile, crdMode crds.Mode, o *installOpts) error {
+func runInstallTUI(ctx context.Context, contextName string, orch install.Orchestration) error {
 	if restore, err := redirectStderrToFile(filepath.Join(clrkDir, "install.stderr.log")); err == nil {
 		defer restore()
 	}
 
-	prog := devtui.NewSystem(installStepNames, "install · "+rc.Context())
+	// current is set by the step logger on "start" and read by the log sink;
+	// both run on the orchestration goroutine, so no synchronization is needed.
+	var current string
+	var prog *devtui.Program
+	orch.Log = func(line string) {
+		if current != "" {
+			prog.SendLog(current, line, devtui.StreamStdout)
+		}
+	}
+
+	// Build the steps (with Log wired) and seed the sidebar from them so the
+	// component list matches what actually runs (e.g. the conditional
+	// serving-cert step).
+	steps := orch.Steps()
+	prog = devtui.NewSystem(install.StepNames(steps), "install · "+contextName)
 
 	// Route slog (e.g. crds.Install's progress) into the cli pane while the TUI
 	// owns the screen, then restore.
@@ -221,14 +294,6 @@ func runInstallTUI(ctx context.Context, rc *install.RemoteCluster, p install.Pro
 	slog.SetDefault(slog.New(devtui.NewSlogHandler(prog, slog.LevelInfo)))
 	defer slog.SetDefault(prev)
 
-	// current is set by the step logger on "start" and read by the log sink;
-	// both run on the orchestration goroutine, so no synchronization is needed.
-	var current string
-	sink := func(line string) {
-		if current != "" {
-			prog.SendLog(current, line, devtui.StreamStdout)
-		}
-	}
 	logger := func(step install.Step, status string, err error) {
 		switch status {
 		case "start":
@@ -247,7 +312,7 @@ func runInstallTUI(ctx context.Context, rc *install.RemoteCluster, p install.Pro
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		err := install.RunSteps(runCtx, install.InstallSteps(rc, rc.RESTConfig(), p, crdMode, o.timeout, o.readyInterval, sink), logger)
+		err := install.RunSteps(runCtx, steps, logger)
 		if err != nil {
 			prog.SendLog(devtui.ClrkSource, "install failed: "+err.Error()+" — press q to exit", devtui.StreamStderr)
 		} else {
@@ -378,6 +443,82 @@ func plainStepLogger(step install.Step, status string, err error) {
 	case "error":
 		fmt.Fprintf(os.Stderr, "%s %s: %v\n", failStyle.Render("✕"), step.Name, err)
 	}
+}
+
+// parseRBACFlag maps the --rbac flag to Profile.RBACScoped.
+func parseRBACFlag(s string) (bool, error) {
+	switch s {
+	case "scoped", "":
+		return true, nil
+	case "cluster-admin":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid --rbac %q (want: scoped | cluster-admin)", s)
+	}
+}
+
+// resolveTLSMode maps the --tls flag to an install.TLSMode, auto-detecting
+// cert-manager when "auto". An explicit "cert-manager" errors if its CRDs are
+// absent rather than silently downgrading.
+func resolveTLSMode(flag string, disco discovery.DiscoveryInterface) (install.TLSMode, error) {
+	switch flag {
+	case "auto", "":
+		if install.DetectCertManager(disco) {
+			return install.TLSCertManager, nil
+		}
+		return install.TLSSelfSigned, nil
+	case "cert-manager":
+		if !install.DetectCertManager(disco) {
+			return 0, errors.New("--tls=cert-manager but the cert-manager.io API group is not served on this cluster")
+		}
+		return install.TLSCertManager, nil
+	case "self-signed":
+		return install.TLSSelfSigned, nil
+	case "insecure":
+		return install.TLSInsecureSkipVerify, nil
+	default:
+		return 0, fmt.Errorf("invalid --tls %q (want: auto | cert-manager | self-signed | insecure)", flag)
+	}
+}
+
+// resolveAPIServerCIDRs uses an explicit --apiserver-cidr override (comma-
+// separated) when set, else derives the host-network CIDRs from the cluster.
+func resolveAPIServerCIDRs(ctx context.Context, cl client.Client, override string) ([]string, error) {
+	if override != "" {
+		var cidrs []string
+		for _, c := range strings.Split(override, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				cidrs = append(cidrs, c)
+			}
+		}
+		return cidrs, nil
+	}
+	return install.DeriveAPIServerCIDRs(ctx, cl)
+}
+
+func tlsModeLabel(m install.TLSMode) string {
+	switch m {
+	case install.TLSCertManager:
+		return "cert-manager"
+	case install.TLSSelfSigned:
+		return "self-signed"
+	default:
+		return "insecure"
+	}
+}
+
+func rbacLabel(scoped bool) string {
+	if scoped {
+		return "scoped"
+	}
+	return "cluster-admin"
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // parseCRDModeFlag maps the --crd-mode flag to a crds.Mode.

@@ -5,7 +5,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -53,25 +52,6 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		ObjectMeta: metav1.ObjectMeta{Name: ControllerManagerName, Namespace: p.Namespace},
 	}
 
-	// Dev shortcut: cluster-admin gives the cm enough RBAC to install
-	// gateway-api CRDs, watch Pods for healthcheck, and own
-	// Deployments/Services for WorkerPool. The scoped-role path (RBACScoped)
-	// is built in M4; for now the dev/non-scoped binding is emitted.
-	crb := &rbacv1.ClusterRoleBinding{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding"},
-		ObjectMeta: metav1.ObjectMeta{Name: "clrk-dev-controller-manager"},
-		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
-			Name:      ControllerManagerName,
-			Namespace: p.Namespace,
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     "cluster-admin",
-		},
-	}
-
 	// Apiserver/cm arguments. The base set is identical across dev + cluster
 	// (auth is disabled in v1, so --insecure-allow-public is required to bind
 	// 0.0.0.0 in both); the dev-only flags are appended conditionally so a
@@ -101,6 +81,31 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 	if p.EgressBackendHost != "" {
 		args = append(args, "--dev-egress-backend-host="+p.EgressBackendHost)
 	}
+	// On a cluster the cm serves the aggregated API with a real cert mounted at
+	// --cert-dir (cert-manager- or installer-minted); dev leaves it empty and
+	// self-signs in-memory (with InsecureSkipTLSVerify on the APIService).
+	if p.TLS != TLSInsecureSkipVerify {
+		args = append(args, "--cert-dir="+servingCertMountPath)
+	}
+
+	// Volumes/mounts: the three embedded-store PVCs always; the serving-cert
+	// Secret when a real cert is wired.
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "data", MountPath: "/var/lib/clrk"},
+		{Name: clickhouseDataPVC, MountPath: clickhouse.DefaultDataDir},
+		{Name: natsDataPVC, MountPath: clrknats.DefaultStoreDir},
+	}
+	volumes := []corev1.Volume{
+		{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: kineDataPVC}}},
+		{Name: clickhouseDataPVC, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: clickhouseDataPVC}}},
+		{Name: natsDataPVC, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: natsDataPVC}}},
+	}
+	if p.TLS != TLSInsecureSkipVerify {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: servingCertVolumeName, MountPath: servingCertMountPath, ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{Name: servingCertVolumeName, VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: servingCertSecretName},
+		}})
+	}
 
 	var hostAliases []corev1.HostAlias
 	if p.HostAliasIP != "" {
@@ -116,6 +121,29 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 	replicas := p.Replicas
 	if replicas == 0 {
 		replicas = 1
+	}
+
+	// Pull secrets for private registries (cluster-only; empty/nil in dev, which
+	// keeps the dev PodSpec byte-identical).
+	var imagePullSecrets []corev1.LocalObjectReference
+	if p.ImagePullSecret != "" {
+		imagePullSecrets = []corev1.LocalObjectReference{{Name: p.ImagePullSecret}}
+	}
+
+	// Requests in both profiles; a cluster also caps the cm with limits (it
+	// co-hosts kine + ClickHouse + NATS + the EG control plane in one pod). Dev
+	// stays requests-only to preserve the existing bootstrap object byte-for-byte.
+	resources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+	}
+	if !p.Dev {
+		resources.Limits = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
+		}
 	}
 
 	deploy = &appsv1.Deployment{
@@ -163,11 +191,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 							{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
 							{Name: "nats", ContainerPort: ports.NATSClientPort, Protocol: corev1.ProtocolTCP},
 						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "data", MountPath: "/var/lib/clrk"},
-							{Name: clickhouseDataPVC, MountPath: clickhouse.DefaultDataDir},
-							{Name: natsDataPVC, MountPath: clrknats.DefaultStoreDir},
-						},
+						VolumeMounts: volumeMounts,
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{
@@ -190,39 +214,10 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 							InitialDelaySeconds: 10,
 							PeriodSeconds:       10,
 						},
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("100m"),
-								corev1.ResourceMemory: resource.MustParse("128Mi"),
-							},
-						},
+						Resources: resources,
 					}},
-					Volumes: []corev1.Volume{
-						{
-							Name: "data",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: kineDataPVC,
-								},
-							},
-						},
-						{
-							Name: clickhouseDataPVC,
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: clickhouseDataPVC,
-								},
-							},
-						},
-						{
-							Name: natsDataPVC,
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: natsDataPVC,
-								},
-							},
-						},
-					},
+					ImagePullSecrets: imagePullSecrets,
+					Volumes:          volumes,
 				},
 			},
 		},
@@ -304,7 +299,15 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		}
 	}
 
-	preDeploy = []client.Object{sa, crb, svc, egSvc, apiSvc, chPVC, natsPVC, kinePVC}
+	// Order: SA, then its (Cluster)Role(Binding), then the Services/APIService/
+	// PVCs, then the NetworkPolicy. A Dev profile yields the same set the dev
+	// bootstrap applied before this refactor (cluster-admin binding, no policy).
+	preDeploy = []client.Object{sa}
+	preDeploy = append(preDeploy, flattenRBAC(controllerManagerRBAC(p))...)
+	preDeploy = append(preDeploy, svc, egSvc, apiSvc, chPVC, natsPVC, kinePVC)
+	if np := controllerManagerNetworkPolicy(p); np != nil {
+		preDeploy = append(preDeploy, np)
+	}
 	return preDeploy, deploy
 }
 
@@ -343,19 +346,10 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
 		ObjectMeta: metav1.ObjectMeta{Name: WorkerAccountName, Namespace: p.WorkerNamespace},
 	}
-	workerCRB := &rbacv1.ClusterRoleBinding{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding"},
-		ObjectMeta: metav1.ObjectMeta{Name: "clrk-dev-worker"},
-		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
-			Name:      WorkerAccountName,
-			Namespace: p.WorkerNamespace,
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     "cluster-admin",
-		},
+
+	var imagePullSecrets []corev1.LocalObjectReference
+	if p.ImagePullSecret != "" {
+		imagePullSecrets = []corev1.LocalObjectReference{{Name: p.ImagePullSecret}}
 	}
 
 	podTemplate := corev1.PodTemplateSpec{
@@ -368,6 +362,7 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: WorkerAccountName,
+			ImagePullSecrets:   imagePullSecrets,
 			Containers: []corev1.Container{{
 				Name:            "worker",
 				Image:           p.WorkerImage,
@@ -437,6 +432,7 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 		},
 	}
 
-	preWP = []client.Object{workerSA, workerCRB}
+	preWP = []client.Object{workerSA}
+	preWP = append(preWP, flattenRBAC(workerRBAC(p))...)
 	return preWP, wp
 }

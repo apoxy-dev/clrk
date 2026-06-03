@@ -86,6 +86,16 @@ type Profile struct {
 	// dev shortcut. Cluster-only (M4).
 	RBACScoped bool
 
+	// APIServerCIDRs, when non-empty, emits a NetworkPolicy admitting the
+	// unauthenticated aggregated API (cm:8443) only from these CIDRs — the
+	// host-network sources the aggregation proxy can originate from (the
+	// kube-apiserver Endpoint IPs plus node InternalIPs, since aggregation
+	// requests are commonly SNAT'd to a node IP). Pods live on the pod network,
+	// so they are excluded. Derived by DeriveAPIServerCIDRs with an
+	// --apiserver-cidr override; empty (dev, or undetected, or --network-policy=
+	// false) emits no policy. Cluster-only (M4).
+	APIServerCIDRs []string
+
 	// TLS holds the APIService serving-cert posture. CABundle is the PEM the
 	// installer sets on APIService.spec.caBundle for TLSSelfSigned;
 	// CertManagerCertRef ("<ns>/<name>") drives the inject-ca-from annotation
