@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -67,7 +68,7 @@ func Preflight(ctx context.Context, c client.Client, disco discovery.DiscoveryIn
 	add(checkStorageClass(ctx, c, p))
 	add(checkCRDConflict(groups, groupsErr))
 	add(checkWorkerNamespacePSA(ctx, c, p))
-	add(checkCertManager(groups, groupsErr))
+	add(checkCertManager(ctx, c, groups, groupsErr))
 	add(checkMetricsServer(groups, groupsErr))
 	add(checkExistingInstall(ctx, c, p))
 	return out
@@ -124,6 +125,15 @@ func checkRBAC(ctx context.Context, c client.Client, p Profile) []PreflightResul
 		{"", "secrets", p.Namespace, "Secret"},
 		{"", "persistentvolumeclaims", p.Namespace, "PVC"},
 		{"networking.k8s.io", "networkpolicies", p.Namespace, "NetworkPolicy"},
+	}
+	// When the workers land in a separate namespace, the installer creates a
+	// ServiceAccount and the default WorkerPool there too -- probe those so a
+	// permission gap fails preflight up front rather than mid-apply.
+	if p.WorkerNamespace != "" && p.WorkerNamespace != p.Namespace {
+		probes = append(probes,
+			rbacProbe{"", "serviceaccounts", p.WorkerNamespace, "ServiceAccount (worker ns)"},
+			rbacProbe{"clrk.apoxy.dev", "workerpools", p.WorkerNamespace, "WorkerPool (worker ns)"},
+		)
 	}
 	var denied []string
 	failed := false
@@ -210,7 +220,7 @@ func checkWorkerNamespacePSA(ctx context.Context, c client.Client, p Profile) Pr
 	var ns corev1.Namespace
 	if err := c.Get(ctx, client.ObjectKey{Name: p.WorkerNamespace}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
-			return PreflightResult{Name: name, Level: LevelPass, Detail: p.WorkerNamespace + " will be created (no restricted PSA)"}
+			return PreflightResult{Name: name, Level: LevelPass, Detail: p.WorkerNamespace + " will be created with privileged Pod Security labels"}
 		}
 		return PreflightResult{Name: name, Level: LevelWarn, Detail: "could not read namespace: " + err.Error()}
 	}
@@ -227,15 +237,37 @@ func checkWorkerNamespacePSA(ctx context.Context, c client.Client, p Profile) Pr
 	}
 }
 
-func checkCertManager(groups *metav1.APIGroupList, err error) PreflightResult {
+func checkCertManager(ctx context.Context, c client.Client, groups *metav1.APIGroupList, err error) PreflightResult {
 	const name = "cert-manager"
 	if err != nil {
 		return PreflightResult{Name: name, Level: LevelWarn, Detail: "could not list API groups"}
 	}
-	if hasGroup(groups, "cert-manager.io") {
-		return PreflightResult{Name: name, Level: LevelPass, Detail: "detected — APIService cert via cert-manager"}
+	if !hasGroup(groups, "cert-manager.io") {
+		return PreflightResult{Name: name, Level: LevelPass, Detail: "not detected — APIService cert via installer self-signed CA"}
 	}
-	return PreflightResult{Name: name, Level: LevelPass, Detail: "not detected — APIService cert via installer self-signed CA"}
+	// cert-manager is present, so the cert-manager TLS path wires the APIService
+	// caBundle through cert-manager's CA injector (the inject-ca-from annotation).
+	// That only works if the cainjector component is running; a CRD-only or
+	// cainjector-disabled install would leave caBundle empty and the aggregated
+	// API would never become Available. Surface that as a confirmable warning.
+	if !cainjectorRunning(ctx, c) {
+		return PreflightResult{Name: name, Level: LevelWarn,
+			Detail: "cert-manager.io present but the cainjector component was not found",
+			Hint:   "cert-manager's CA injector populates the APIService caBundle; install cainjector or pass --tls=self-signed"}
+	}
+	return PreflightResult{Name: name, Level: LevelPass, Detail: "detected — APIService cert via cert-manager"}
+}
+
+// cainjectorRunning reports whether a cert-manager cainjector Deployment is
+// present (any namespace), keyed off its standard component label. A List error
+// is treated as "present" so a transient/RBAC hiccup never blocks the install
+// on a heuristic check.
+func cainjectorRunning(ctx context.Context, c client.Client) bool {
+	var deps appsv1.DeploymentList
+	if err := c.List(ctx, &deps, client.MatchingLabels{"app.kubernetes.io/component": "cainjector"}); err != nil {
+		return true
+	}
+	return len(deps.Items) > 0
 }
 
 func checkMetricsServer(groups *metav1.APIGroupList, err error) PreflightResult {

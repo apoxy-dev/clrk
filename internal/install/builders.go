@@ -146,12 +146,21 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		}
 	}
 
+	// Stamp the installed version onto the cm Deployment so DetectInstall (and
+	// the upgrade gate) can read it back. Left nil when unset (dev) so the dev
+	// SSA object stays byte-identical.
+	var cmAnnotations map[string]string
+	if p.Version != "" {
+		cmAnnotations = map[string]string{installedVersionAnnotation: p.Version}
+	}
+
 	deploy = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ControllerManagerName,
-			Namespace: p.Namespace,
-			Labels:    cmLabels,
+			Name:        ControllerManagerName,
+			Namespace:   p.Namespace,
+			Labels:      cmLabels,
+			Annotations: cmAnnotations,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(replicas),

@@ -117,25 +117,22 @@ func BuildWorkerPodTemplate(t clrkv1alpha1.WorkerPodTemplate, inj Injections) co
 			},
 		}},
 	}
-	// POD_NAME/POD_NAMESPACE/CLRK_POOL_NAME are always controller-owned. The
-	// CLRK_CM_* vars are reserved only when the controller actually injects a
-	// value (cm mode): then a user duplicate is dropped so the controller's
-	// value wins without a duplicate env entry. In single-binary / no-NATS mode
-	// (empty injection) they are NOT reserved, so an operator can point the
-	// worker at an external collector/JetStream via the overlay and that value
-	// survives -- matching the pre-overlay behavior where a user-set value won.
+	// POD_NAME/POD_NAMESPACE/CLRK_POOL_NAME are always controller-owned
+	// (downward API); a user value for those is dropped. The CLRK_CM_* wiring,
+	// by contrast, is a controller-supplied default the operator may override:
+	// inject it only when the overlay did not already set the var, so an
+	// operator-set endpoint wins -- matching the pre-overlay reconciler, which
+	// injected behind a !hasEnv guard.
 	reserved := map[string]bool{
 		"POD_NAME":       true,
 		"POD_NAMESPACE":  true,
 		"CLRK_POOL_NAME": true,
 	}
-	if inj.CMOTLPEndpoint != "" {
+	if inj.CMOTLPEndpoint != "" && !hasEnv(t.Env, otelemit.CMOTLPEndpointEnv) {
 		env = append(env, corev1.EnvVar{Name: otelemit.CMOTLPEndpointEnv, Value: inj.CMOTLPEndpoint})
-		reserved[otelemit.CMOTLPEndpointEnv] = true
 	}
-	if inj.CMNATSAddr != "" {
+	if inj.CMNATSAddr != "" && !hasEnv(t.Env, invevent.CMNATSAddrEnv) {
 		env = append(env, corev1.EnvVar{Name: invevent.CMNATSAddrEnv, Value: inj.CMNATSAddr})
-		reserved[invevent.CMNATSAddrEnv] = true
 	}
 	for _, e := range t.Env {
 		if reserved[e.Name] {
@@ -193,4 +190,14 @@ func BuildWorkerPodTemplate(t clrkv1alpha1.WorkerPodTemplate, inj Injections) co
 			TopologySpreadConstraints: t.TopologySpreadConstraints,
 		},
 	}
+}
+
+// hasEnv reports whether env already contains a variable named name.
+func hasEnv(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
 }

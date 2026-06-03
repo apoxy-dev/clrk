@@ -42,13 +42,21 @@ func controllerManagerRBAC(p Profile) []rbacObject {
 			rule([]string{""}, []string{"secrets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			rule([]string{""}, []string{"services"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			rule([]string{""}, []string{"configmaps"}, "get", "list", "watch", "create", "update", "patch", "delete"),
-			rule([]string{""}, []string{"serviceaccounts"}, "get", "list", "watch"),
+			// EG provisions a per-proxy ServiceAccount via server-side apply, so the
+			// cm (which supervises the EG control plane under this SA) must create/
+			// update them, not just read.
+			rule([]string{""}, []string{"serviceaccounts"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			rule([]string{""}, []string{"pods"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"endpoints"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"namespaces"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"events"}, "create", "patch"),
-			// Workloads the WorkerPool + EG reconcilers create.
-			rule([]string{"apps"}, []string{"deployments", "replicasets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			// Workloads the WorkerPool + EG reconcilers create. EG provisions its
+			// proxy data plane as a Deployment or DaemonSet (with an optional PDB +
+			// HPA), so the cm manages daemonsets/poddisruptionbudgets/
+			// horizontalpodautoscalers too, not only deployments.
+			rule([]string{"apps"}, []string{"deployments", "daemonsets", "replicasets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			rule([]string{"policy"}, []string{"poddisruptionbudgets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			rule([]string{"autoscaling"}, []string{"horizontalpodautoscalers"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			// Endpoint resolution (dispatch IP join).
 			rule([]string{"discovery.k8s.io"}, []string{"endpointslices"}, "get", "list", "watch"),
 			// The cm installs/verifies the Gateway-API + EG CRD bundles.

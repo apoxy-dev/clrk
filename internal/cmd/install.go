@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,9 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := validatePullFlag(o.pull); err != nil {
+		return err
+	}
 
 	rc, err := install.NewRemoteCluster(o.kubeconfig, o.context)
 	if err != nil {
@@ -188,6 +192,13 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	if o.networkPolicy {
 		p.APIServerCIDRs, err = resolveAPIServerCIDRs(ctx, cl, o.apiserverCIDR)
 		if err != nil {
+			if o.apiserverCIDR != "" {
+				// An explicit override that doesn't parse is an operator error,
+				// not a soft auto-derive miss — fail loudly rather than silently
+				// dropping the policy they asked for (a bad IPBlock would also
+				// abort the install mid-apply).
+				return fmt.Errorf("invalid --apiserver-cidr: %w", err)
+			}
 			fmt.Fprintf(os.Stderr, "%s\n", warnStyle.Render(
 				"warning: could not derive an apiserver CIDR ("+err.Error()+"); skipping the NetworkPolicy. Pass --apiserver-cidr to enable it."))
 		}
@@ -487,13 +498,51 @@ func resolveAPIServerCIDRs(ctx context.Context, cl client.Client, override strin
 	if override != "" {
 		var cidrs []string
 		for _, c := range strings.Split(override, ",") {
-			if c = strings.TrimSpace(c); c != "" {
-				cidrs = append(cidrs, c)
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
 			}
+			norm, err := normalizeCIDR(c)
+			if err != nil {
+				return nil, err
+			}
+			cidrs = append(cidrs, norm)
+		}
+		if len(cidrs) == 0 {
+			return nil, errors.New("--apiserver-cidr is set but has no usable entries")
 		}
 		return cidrs, nil
 	}
 	return install.DeriveAPIServerCIDRs(ctx, cl)
+}
+
+// normalizeCIDR validates an --apiserver-cidr entry and returns it in CIDR
+// notation, accepting a bare IP (converted to a single-host /32 or /128) so the
+// NetworkPolicy always gets an IPBlock the apiserver accepts. The auto-derive
+// path already normalizes via hostCIDR; this brings the override to parity.
+func normalizeCIDR(s string) (string, error) {
+	if _, _, err := net.ParseCIDR(s); err == nil {
+		return s, nil
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if ip.To4() != nil {
+			return s + "/32", nil
+		}
+		return s + "/128", nil
+	}
+	return "", fmt.Errorf("invalid --apiserver-cidr entry %q (want a CIDR like 10.0.0.0/24 or a bare IP)", s)
+}
+
+// validatePullFlag rejects an unknown --pull value up front (mirroring --rbac/
+// --tls/--crd-mode) so a typo like "alway" fails loudly instead of silently
+// falling back to IfNotPresent.
+func validatePullFlag(s string) error {
+	switch s {
+	case "", "always", "missing", "never":
+		return nil
+	default:
+		return fmt.Errorf("invalid --pull %q (want: always | missing | never)", s)
+	}
 }
 
 func tlsModeLabel(m install.TLSMode) string {

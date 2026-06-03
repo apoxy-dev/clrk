@@ -40,6 +40,12 @@ const WorkerDeploymentName = "default-workers"
 //   - controller-manager Deployment is Available
 //   - worker Deployment is Available
 func WaitReady(ctx context.Context, cfg *rest.Config, p Profile, interval time.Duration, log func(string)) error {
+	// Guard the caller-supplied interval: a zero/negative value makes
+	// time.After(interval) busy-spin and the progress throttle's
+	// int(time.Second/interval) panic with an integer divide-by-zero.
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
 	probe := *cfg
 	probe.Timeout = readyPerCheckTimeout
 	core, err := kubernetes.NewForConfig(&probe)

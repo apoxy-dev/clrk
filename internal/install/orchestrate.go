@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,15 +89,19 @@ func (o Orchestration) Steps() []Step {
 		Why:   fmt.Sprintf("create the control-plane namespace %q and worker namespace %q", p.Namespace, p.WorkerNamespace),
 		Risky: false,
 		Run: func(ctx context.Context) error {
+			// The worker namespace hosts privileged gVisor/runsc pods, so it must
+			// allow them: stamp the privileged Pod Security labels rather than let
+			// a freshly created namespace inherit a restrictive cluster-wide PSA
+			// default and silently reject the workers at admission. When the worker
+			// and control-plane namespaces are the same, that one namespace carries
+			// the labels (it hosts the workers too).
+			if p.WorkerNamespace == p.Namespace {
+				return o.Applier.ApplyObjects(ctx, workerNamespace(p.Namespace))
+			}
 			if err := o.Applier.EnsureNamespace(ctx, p.Namespace); err != nil {
 				return err
 			}
-			if p.WorkerNamespace != p.Namespace {
-				if err := o.Applier.EnsureNamespace(ctx, p.WorkerNamespace); err != nil {
-					return err
-				}
-			}
-			return nil
+			return o.Applier.ApplyObjects(ctx, workerNamespace(p.WorkerNamespace))
 		},
 	}}
 
@@ -163,6 +169,11 @@ func (o Orchestration) Steps() []Step {
 			Why:   "verify the API, Invocation store, Gateway CRDs, EG cert, and both Deployments are green",
 			Risky: false,
 			Run: func(ctx context.Context) error {
+				// Bound the readiness gate by the same per-wait timeout the other
+				// wait steps use; WaitReady itself only honors ctx, so without this
+				// a signal that never goes green would hang the install forever.
+				ctx, cancel := context.WithTimeout(ctx, o.WaitTimeout)
+				defer cancel()
 				return WaitReady(ctx, o.Config, p, o.ReadyInterval, o.Log)
 			},
 		},
@@ -178,6 +189,24 @@ func StepNames(steps []Step) []string {
 		names[i] = s.Name
 	}
 	return names
+}
+
+// workerNamespace builds the worker Namespace with privileged Pod Security
+// labels. Applied via SSA so it both creates the namespace and idempotently
+// keeps the labels on re-run; the labels opt the namespace into running the
+// privileged worker pods regardless of the cluster's default PSA level.
+func workerNamespace(ns string) *corev1.Namespace {
+	return &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ns,
+			Labels: map[string]string{
+				"pod-security.kubernetes.io/enforce": "privileged",
+				"pod-security.kubernetes.io/audit":   "privileged",
+				"pod-security.kubernetes.io/warn":    "privileged",
+			},
+		},
+	}
 }
 
 // certStepWhy explains the serving-cert step for the chosen TLS mode.

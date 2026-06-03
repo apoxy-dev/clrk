@@ -188,19 +188,56 @@ func sanitizedYAML(obj client.Object) (string, error) {
 	if md, ok := u["metadata"].(map[string]interface{}); ok {
 		for _, k := range []string{
 			"managedFields", "resourceVersion", "uid", "generation",
-			"creationTimestamp", "selfLink", "ownerReferences",
-			"finalizers", "annotations",
+			"creationTimestamp", "selfLink", "ownerReferences", "finalizers",
 		} {
 			delete(md, k)
 		}
-		// Keep only our labels; servers add their own (e.g. PVC binding labels).
-		// Annotations are dropped wholesale above because controllers add many.
+		// Drop only server- and controller-managed annotation churn; keep the
+		// annotations the installer itself drives (the cert-manager
+		// inject-ca-from wiring, the installed-version stamp) so an
+		// annotation-only change isn't silently rendered "unchanged" in the plan.
+		if ann, ok := md["annotations"].(map[string]interface{}); ok {
+			for k := range ann {
+				if isNoisyAnnotation(k) {
+					delete(ann, k)
+				}
+			}
+			if len(ann) == 0 {
+				delete(md, "annotations")
+			}
+		}
+		// Labels are kept as-is; the diff surfaces real label changes, and the
+		// builders set a small stable set servers don't churn.
 	}
 	out, err := yaml.Marshal(u)
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// isNoisyAnnotation reports whether an annotation key is server- or
+// controller-managed churn that shouldn't register as a real diff. Everything
+// else — including the annotations the installer sets — is kept, so the plan
+// surfaces annotation-only changes.
+func isNoisyAnnotation(k string) bool {
+	switch k {
+	case "kubectl.kubernetes.io/last-applied-configuration",
+		"deployment.kubernetes.io/revision",
+		"kubernetes.io/change-cause",
+		"endpoints.kubernetes.io/last-change-trigger-time":
+		return true
+	}
+	for _, prefix := range []string{
+		"pv.kubernetes.io/",
+		"pvc.kubernetes.io/",
+		"volume.kubernetes.io/",
+	} {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // lineDiff returns a compact diff of two line slices using an LCS so only
