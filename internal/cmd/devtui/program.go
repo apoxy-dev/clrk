@@ -50,6 +50,24 @@ func New(componentNames []string, store *devagents.Store) *Program {
 	}
 }
 
+// NewSystem constructs a TUI program that renders only the system view (the
+// step-list sidebar + per-step log pane) with no agents store or agent screens,
+// for `clrk install`/`upgrade` progress. componentNames are the install steps;
+// title is the header subtitle (e.g. "install · my-context"). The clrk pseudo-
+// source is still the implicit first sidebar entry, so slog routed via
+// NewSlogHandler lands in its pane.
+func NewSystem(componentNames []string, title string) *Program {
+	m := newSystemRootModel(componentNames, title)
+	p := tea.NewProgram(
+		m,
+		tea.WithAltScreen(),
+	)
+	return &Program{
+		p:     p,
+		queue: make(chan tea.Msg, preRunQueueSize),
+	}
+}
+
 // Run blocks until the user quits or ctx is cancelled. Send* calls made
 // before Run are buffered and replayed once the event loop is up.
 func (p *Program) Run(ctx context.Context) error {

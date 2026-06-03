@@ -27,6 +27,23 @@ func renderHeader(width int, title string, stats headerStats) string {
 	return headerBoxStyle.Width(width).Render(body)
 }
 
+// renderHeaderSimple paints the top bar without the live agent-stats strip,
+// for the install/upgrade progress view which has no agent counters. The brand
+// + title render on line 1; an empty second line keeps the box height stable
+// with the dev header so layouts don't jump between the two modes.
+func renderHeaderSimple(width int, title string) string {
+	if width <= 0 {
+		width = 80
+	}
+	brand := headerLogoStyle.Render("apoxy://clrk")
+	titleBlock := title
+	if titleBlock != "" {
+		titleBlock = " " + headerSubtitleStyle.Render("· "+title)
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, brand+titleBlock, "")
+	return headerBoxStyle.Width(width).Render(body)
+}
+
 // renderFooter paints the always-visible bottom legend with the
 // screen-specific keybindings. Single line, muted text, top border so
 // it visually closes the body.
