@@ -31,7 +31,6 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 )
@@ -487,50 +486,9 @@ func (d *ClusterDriver) ApplyObjects(ctx context.Context, objs ...client.Object)
 	return nil
 }
 
-// ApplyAndVerify SSAs obj exactly like ApplyObjects, then GETs the
-// stored object back and runs verify against it. Returns nil iff SSA
-// succeeded *and* verify saw the field it cares about. Used by
-// dev_bootstrap to catch the "SSA returned 200 but the spec didn't
-// change" case that left a stale WorkerPool image in kine across
-// multiple `clrk dev` launches.
-//
-// A free function with a type parameter (Go forbids generic methods)
-// so the verify callback is typed at the call site — no
-// `got.(*appsv1.Deployment)` boilerplate per verifier. The freshly-
-// zeroed verify target is built via the registered scheme rather than
-// reusing obj, because controller-runtime's SSA Patch mutates obj
-// (clears TypeMeta) in ways that confuse a subsequent GET.
-func ApplyAndVerify[T client.Object](ctx context.Context, d *ClusterDriver, obj T, verify func(got T) error) error {
-	c, err := d.kubeClientFor(ctx)
-	if err != nil {
-		return err
-	}
-	gvk, err := apiutil.GVKForObject(obj, c.Scheme())
-	if err != nil {
-		return fmt.Errorf("resolving GVK for %T: %w", obj, err)
-	}
-	key := client.ObjectKeyFromObject(obj)
-	if err := c.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
-		return fmt.Errorf("applying %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
-	}
-	raw, err := c.Scheme().New(gvk)
-	if err != nil {
-		return fmt.Errorf("instantiating verify object for %s: %w", gvk, err)
-	}
-	got, ok := raw.(T)
-	if !ok {
-		return fmt.Errorf("scheme returned %T for %s, expected %T", raw, gvk, obj)
-	}
-	if err := c.Get(ctx, key, got); err != nil {
-		return fmt.Errorf("re-reading %s/%s after apply: %w", key.Namespace, key.Name, err)
-	}
-	if verify != nil {
-		if err := verify(got); err != nil {
-			return fmt.Errorf("apply of %s/%s did not persist: %w", key.Namespace, key.Name, err)
-		}
-	}
-	return nil
-}
+// ApplyAndVerify moved to internal/install (interface-based, shared by dev +
+// install). dev_bootstrap and the installer both call install.ApplyAndVerify
+// against this driver, which satisfies install.Applier.
 
 // KubeClient returns the lazy controller-runtime client. Useful for
 // callers that need to Get/Watch/Patch outside the SSA-only path
