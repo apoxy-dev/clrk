@@ -29,24 +29,16 @@ func verifyCMDeployment(wantImage string, wantEnvCount int) func(*appsv1.Deploym
 }
 
 // verifyWorkerPool returns a comparator that checks the WorkerPool the
-// aggregated apiserver stored matches what we sent. We assert image (the
-// original bug: a stripped spec persisted clrk/worker:latest across reapplies)
-// and the privileged SecurityContext (the same stripped-spec failure mode
-// silently demoted the worker out of privileged, breaking runsc gofer fork).
-// One indicative field per failure mode — full deep-equal would tilt at
-// status/managedFields.
+// aggregated apiserver stored matches what we sent. We assert the overlay's
+// image (the original bug: a stripped spec persisted clrk/worker:latest across
+// reapplies). The gVisor/runsc invariants no longer need a guard here: they are
+// not in the CR at all — the controller's pod builder (internal/workerpod) owns
+// them — so an edit can't demote a worker pod out of privileged. One indicative
+// field; a full deep-equal would tilt at status/managedFields.
 func verifyWorkerPool(wantImage string) func(*clrkv1alpha1.WorkerPool) error {
 	return func(wp *clrkv1alpha1.WorkerPool) error {
-		containers := wp.Spec.PodTemplate.Spec.Containers
-		if len(containers) != 1 {
-			return fmt.Errorf("expected 1 container, found %d", len(containers))
-		}
-		if containers[0].Image != wantImage {
-			return fmt.Errorf("image: want %q, got %q", wantImage, containers[0].Image)
-		}
-		sc := containers[0].SecurityContext
-		if sc == nil || sc.Privileged == nil || !*sc.Privileged {
-			return fmt.Errorf("privileged SecurityContext missing (PodSpec may have been stripped)")
+		if got := wp.Spec.Template.Image; got != wantImage {
+			return fmt.Errorf("image: want %q, got %q", wantImage, got)
 		}
 		return nil
 	}

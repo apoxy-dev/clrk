@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -43,10 +44,20 @@ func (r *TaskAgent) Default() {
 	}
 }
 
-// Default sets spec.replicas to 1 when unset.
+// Default sets spec.replicas to 1 when unset and stamps the curated overlay's
+// load-bearing defaults (image pull policy and service account) so a minimal
+// WorkerPool resolves to the canonical worker pod. The gVisor invariants
+// themselves are not in the overlay -- the controller's pod builder owns them
+// -- so they need no defaulting here.
 func (r *WorkerPool) Default() {
 	if r.Spec.Replicas == nil {
 		r.Spec.Replicas = ptr.To(int32(1))
+	}
+	if r.Spec.Template.ImagePullPolicy == "" {
+		r.Spec.Template.ImagePullPolicy = corev1.PullIfNotPresent
+	}
+	if r.Spec.Template.ServiceAccountName == "" {
+		r.Spec.Template.ServiceAccountName = WorkerServiceAccountName
 	}
 }
 

@@ -336,9 +336,12 @@ func newPVC(name, namespace, size, storageClass string) *corev1.PersistentVolume
 }
 
 // workerPoolObjects builds the worker SA + ClusterRoleBinding (preWP) and the
-// `default` WorkerPool CR (wp, ApplyAndVerify'd). The privileged +
-// seccomp-unconfined + AppArmor-unconfined PodSpec is required for gVisor/runsc
-// on customer clusters too, so it is kept verbatim across profiles.
+// `default` WorkerPool CR (wp, ApplyAndVerify'd). The CR carries only the
+// curated overlay (image/pull policy/SA/pull secrets); the controller's pod
+// builder (internal/workerpod) expands it onto the fixed gVisor/runsc base
+// (privileged + seccomp-unconfined + AppArmor-unconfined + the reserved
+// volumes/port/env), so those invariants can't be stripped by an edit and the
+// installer no longer has to carry them verbatim.
 func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.WorkerPool) {
 	pull := p.pullPolicy()
 
@@ -352,74 +355,6 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 		imagePullSecrets = []corev1.LocalObjectReference{{Name: p.ImagePullSecret}}
 	}
 
-	podTemplate := corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				// AppArmor unconfined for runsc. K3s on Linux honors this;
-				// k3d-on-mac silently ignores it. Setting it covers both.
-				"container.apparmor.security.beta.kubernetes.io/worker": "unconfined",
-			},
-		},
-		Spec: corev1.PodSpec{
-			ServiceAccountName: WorkerAccountName,
-			ImagePullSecrets:   imagePullSecrets,
-			Containers: []corev1.Container{{
-				Name:            "worker",
-				Image:           p.WorkerImage,
-				ImagePullPolicy: pull,
-				SecurityContext: &corev1.SecurityContext{
-					Privileged: ptr.To(true),
-					SeccompProfile: &corev1.SeccompProfile{
-						Type: corev1.SeccompProfileTypeUnconfined,
-					},
-				},
-				Env: []corev1.EnvVar{
-					{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
-					}},
-					{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-					}},
-					// CLRK_POOL_NAME is auto-injected by
-					// WorkerPoolDeploymentReconciler.
-				},
-				Ports: []corev1.ContainerPort{
-					{Name: "dispatch", ContainerPort: ports.DispatchPort, Protocol: corev1.ProtocolTCP},
-				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "state", MountPath: "/var/lib/clrk/state"},
-					{Name: "run", MountPath: "/run/clrk"},
-					{Name: "varlog", MountPath: "/var/log/clrk"},
-				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/readyz",
-							Port: intstr.FromInt(8083),
-						},
-					},
-					InitialDelaySeconds: 2,
-					PeriodSeconds:       2,
-				},
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/healthz",
-							Port: intstr.FromInt(8083),
-						},
-					},
-					InitialDelaySeconds: 10,
-					PeriodSeconds:       10,
-				},
-			}},
-			Volumes: []corev1.Volume{
-				{Name: "state", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: "run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: "varlog", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			},
-		},
-	}
-
 	wp = &clrkv1alpha1.WorkerPool{
 		TypeMeta: metav1.TypeMeta{APIVersion: "clrk.apoxy.dev/v1alpha1", Kind: "WorkerPool"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -427,8 +362,13 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 			Namespace: p.WorkerNamespace,
 		},
 		Spec: clrkv1alpha1.WorkerPoolSpec{
-			Replicas:    ptr.To(p.Workers),
-			PodTemplate: podTemplate,
+			Replicas: ptr.To(p.Workers),
+			Template: clrkv1alpha1.WorkerPodTemplate{
+				Image:              p.WorkerImage,
+				ImagePullPolicy:    pull,
+				ServiceAccountName: WorkerAccountName,
+				ImagePullSecrets:   imagePullSecrets,
+			},
 		},
 	}
 

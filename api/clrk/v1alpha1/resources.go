@@ -38,6 +38,8 @@ var (
 	_ rest.SingularNameProvider            = &WorkerPool{}
 	_ resource.StatusSubResource           = &WorkerPoolStatus{}
 	_ resourcestrategy.Defaulter           = &WorkerPool{}
+	_ resourcestrategy.Validater           = &WorkerPool{}
+	_ resourcestrategy.ValidateUpdater     = &WorkerPool{}
 
 	_ runtime.Object                       = &AgentSandboxRevision{}
 	_ resource.Object                      = &AgentSandboxRevision{}

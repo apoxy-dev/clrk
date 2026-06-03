@@ -1,6 +1,10 @@
 package install
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	corev1 "k8s.io/api/core/v1"
+
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+)
 
 // Canonical object names shared by every component of the control plane. Kept
 // here as the single source of truth so the cm Service/APIService/Deployment
@@ -10,8 +14,10 @@ const (
 	// ControllerManagerName is shared by the cm ServiceAccount,
 	// (Cluster)RoleBinding, Deployment, and Service.
 	ControllerManagerName = "clrk-controller-manager"
-	// WorkerAccountName is the ServiceAccount the worker Pods run under.
-	WorkerAccountName = "clrk-worker"
+	// WorkerAccountName is the ServiceAccount the worker Pods run under. It
+	// aliases the API package's constant so the value is defined once (the pod
+	// builder defaults spec.template.serviceAccountName to it).
+	WorkerAccountName = clrkv1alpha1.WorkerServiceAccountName
 	// EnvoyGatewayServiceName fronts the cm's in-process envoy-gateway xDS
 	// listener under the well-known name the EG data-plane bootstrap dials.
 	EnvoyGatewayServiceName = "envoy-gateway"

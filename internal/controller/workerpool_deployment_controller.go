@@ -15,8 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/invevent"
-	"github.com/apoxy-dev/clrk/internal/otelemit"
+	"github.com/apoxy-dev/clrk/internal/workerpod"
 )
 
 // WorkerPoolDeploymentReconciler owns the k8s-side half of WorkerPool: it
@@ -150,55 +149,16 @@ func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.Work
 		labelComponent:              "worker",
 	}
 
-	// Merge the pool labels into the pod template so the Service selector
-	// matches.
-	podTemplate := wp.Spec.PodTemplate.DeepCopy()
-	if podTemplate.Labels == nil {
-		podTemplate.Labels = make(map[string]string)
-	}
-	for k, v := range lbls {
-		podTemplate.Labels[k] = v
-	}
-
-	// Inject CLRK_POOL_NAME into every container in the template via
-	// downward API off the workerpool label we just stamped. The worker
-	// binary reads this to advertise itself into WorkerPool.status.workers.
-	// Skipped per-container if the operator already set CLRK_POOL_NAME
-	// explicitly (manual override wins).
-	for i := range podTemplate.Spec.Containers {
-		c := &podTemplate.Spec.Containers[i]
-		if !hasEnv(c.Env, "CLRK_POOL_NAME") {
-			c.Env = append(c.Env, corev1.EnvVar{
-				Name: "CLRK_POOL_NAME",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.labels['clrk.apoxy.dev/workerpool']",
-					},
-				},
-			})
-		}
-		// CLRK_CM_OTLP_ENDPOINT points the worker's OTLP emitter at
-		// the controller-manager's receiver, which persists every
-		// signal to the embedded ClickHouse and re-exports per-EG to
-		// the customer's collector. Empty when the reconciler has no
-		// CM endpoint configured (single-binary mode); the worker
-		// falls back to a noop emitter in that case.
-		if r.CMOTLPEndpoint != "" && !hasEnv(c.Env, otelemit.CMOTLPEndpointEnv) {
-			c.Env = append(c.Env, corev1.EnvVar{
-				Name:  otelemit.CMOTLPEndpointEnv,
-				Value: r.CMOTLPEndpoint,
-			})
-		}
-		// CLRK_CM_NATS_ADDR points the worker's invocation publisher at
-		// the cm's embedded JetStream. Empty in single-binary / no-NATS
-		// deployments; the worker then skips lifecycle publishing.
-		if r.CMNATSAddr != "" && !hasEnv(c.Env, invevent.CMNATSAddrEnv) {
-			c.Env = append(c.Env, corev1.EnvVar{
-				Name:  invevent.CMNATSAddrEnv,
-				Value: r.CMNATSAddr,
-			})
-		}
-	}
+	// Expand the curated overlay onto the fixed gVisor/runsc base. The builder
+	// owns every load-bearing field, so whatever the WorkerPool spec carries
+	// the worker pods always satisfy the sandbox-runtime invariants. The pool
+	// selector labels are stamped via Injections so the Service selector
+	// matches; the CLRK_CM_* env is wired from the reconciler's runtime flags.
+	podTemplate := workerpod.BuildWorkerPodTemplate(wp.Spec.Template, workerpod.Injections{
+		CMOTLPEndpoint: r.CMOTLPEndpoint,
+		CMNATSAddr:     r.CMNATSAddr,
+		SelectorLabels: lbls,
+	})
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -211,7 +171,7 @@ func (r *WorkerPoolDeploymentReconciler) desiredDeployment(wp *clrkv1alpha1.Work
 			Selector: &metav1.LabelSelector{
 				MatchLabels: lbls,
 			},
-			Template: *podTemplate,
+			Template: podTemplate,
 		},
 	}
 }
@@ -244,15 +204,6 @@ func (r *WorkerPoolDeploymentReconciler) desiredService(wp *clrkv1alpha1.WorkerP
 			Type: corev1.ServiceTypeClusterIP,
 		},
 	}
-}
-
-func hasEnv(env []corev1.EnvVar, name string) bool {
-	for _, e := range env {
-		if e.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *WorkerPoolDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {

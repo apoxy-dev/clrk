@@ -543,16 +543,17 @@ func (d *ClusterDriver) Rollout(ctx context.Context, ns, name string) error {
 
 // RolloutWorkerPool triggers a rolling restart of a WorkerPool's worker
 // Deployment by bumping RestartedAtAnnotation on the WorkerPool's
-// spec.podTemplate — NOT on the Deployment. The Deployment is a
-// controller-owned child: WorkerPoolDeploymentReconciler rebuilds its pod
-// template from wp.spec.podTemplate on every reconcile, so an annotation
-// patched straight onto the Deployment is wiped on the next pass and the
-// freshly-created ReplicaSet is scaled back to zero (the rollout silently
-// no-ops). Patching the WorkerPool makes the controller propagate the
+// spec.template.metadata.annotations — NOT on the Deployment. The Deployment is
+// a controller-owned child: WorkerPoolDeploymentReconciler rebuilds its pod
+// template from wp.spec.template on every reconcile (via internal/workerpod,
+// which propagates spec.template.metadata.annotations into the pod template),
+// so an annotation patched straight onto the Deployment is wiped on the next
+// pass and the freshly-created ReplicaSet is scaled back to zero (the rollout
+// silently no-ops). Patching the WorkerPool makes the controller propagate the
 // annotation into the Deployment template itself — it can't revert a change
-// it's the source of. Uses a JSON merge patch: no Get+Update, so it can't
-// lose the rollout to a 409, and on an annotations map its merge semantics
-// match strategic merge anyway.
+// it's the source of. Uses a JSON merge patch: no Get+Update, so it can't lose
+// the rollout to a 409, and on an annotations map its merge semantics match
+// strategic merge anyway.
 //
 // Returns the WorkerPool's post-patch metadata.generation so the caller can
 // wait for status.observedGeneration to catch up (see WaitWorkerPoolConverged)
@@ -562,7 +563,7 @@ func (d *ClusterDriver) RolloutWorkerPool(ctx context.Context, ns, name string) 
 	if err != nil {
 		return 0, err
 	}
-	body := fmt.Sprintf(`{"spec":{"podTemplate":{"metadata":{"annotations":{%q:%q}}}}}`,
+	body := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`,
 		clrkv1alpha1.RestartedAtAnnotation, time.Now().UTC().Format(time.RFC3339))
 	wp := &clrkv1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	if err := c.Patch(ctx, wp, client.RawPatch(types.MergePatchType, []byte(body))); err != nil {

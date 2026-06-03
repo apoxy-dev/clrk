@@ -36,7 +36,7 @@ const (
 	// RestartedAtAnnotation is stamped with an RFC3339 timestamp on a pod
 	// template's annotations to force a rolling restart. For a controller-
 	// owned Deployment (a WorkerPool's), it must be set on
-	// WorkerPool.spec.podTemplate, not the Deployment: the
+	// WorkerPool.spec.template.metadata.annotations, not the Deployment: the
 	// WorkerPoolDeploymentReconciler rebuilds the Deployment's pod template
 	// from the WorkerPool on every reconcile, so an annotation patched onto
 	// the Deployment is wiped on the next pass and the new ReplicaSet is

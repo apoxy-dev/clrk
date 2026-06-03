@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/robfig/cron"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -245,4 +246,109 @@ func (da *DaemonAgent) Validate(_ context.Context) field.ErrorList {
 
 func (da *DaemonAgent) ValidateUpdate(ctx context.Context, _ runtime.Object) field.ErrorList {
 	return da.Validate(ctx)
+}
+
+// validateWorkerExtraMounts rejects ExtraVolumes/ExtraVolumeMounts that would
+// collide with a reserved worker volume name, reference an undeclared volume,
+// or mount at a path the worker container owns. WorkerReservedVolumes
+// (workerpool_invariants.go) is the source of truth for the reserved names and
+// scratch paths; reservedMountPaths covers the rootfs/system dirs the worker
+// and runsc depend on.
+func validateWorkerExtraMounts(t WorkerPodTemplate, fp *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	reservedNames := make(map[string]bool, len(WorkerReservedVolumes))
+	declaredNames := make(map[string]bool)
+	for _, rv := range WorkerReservedVolumes {
+		reservedNames[rv.Name] = true
+		declaredNames[rv.Name] = true
+	}
+	for i, v := range t.ExtraVolumes {
+		if reservedNames[v.Name] {
+			errs = append(errs, field.Invalid(fp.Child("extraVolumes").Index(i).Child("name"), v.Name,
+				"name conflicts with a reserved worker volume (state/run/varlog)"))
+		}
+		declaredNames[v.Name] = true
+	}
+	for i, m := range t.ExtraVolumeMounts {
+		mp := fp.Child("extraVolumeMounts").Index(i)
+		if reservedNames[m.Name] {
+			errs = append(errs, field.Invalid(mp.Child("name"), m.Name,
+				"name conflicts with a reserved worker volume (state/run/varlog)"))
+		} else if !declaredNames[m.Name] {
+			errs = append(errs, field.Invalid(mp.Child("name"), m.Name,
+				"no volume with this name is declared in extraVolumes"))
+		}
+		errs = append(errs, validateWorkerMountPath(m.MountPath, mp.Child("mountPath"))...)
+	}
+	return errs
+}
+
+// validateWorkerMountPath rejects an ExtraVolumeMount path that is empty,
+// non-absolute, non-clean, root, or that overlaps a path the worker container
+// owns -- the runsc scratch volumes (run/state/varlog) or a rootfs/system path
+// from reservedMountPaths. It mirrors validateAgentState's path discipline so a
+// bad path fails loudly at admission rather than as a CreateContainerError when
+// the kubelet later refuses the pod (relative/non-clean paths in particular
+// would otherwise evade pathConflicts, which assumes clean absolute paths).
+func validateWorkerMountPath(p string, fp *field.Path) field.ErrorList {
+	if p == "" {
+		return field.ErrorList{field.Required(fp, "mountPath is required")}
+	}
+	if !filepath.IsAbs(p) {
+		return field.ErrorList{field.Invalid(fp, p, "mountPath must be an absolute path")}
+	}
+	if p != filepath.Clean(p) {
+		return field.ErrorList{field.Invalid(fp, p, "mountPath must be a clean path (no '.', '..', '//' or trailing '/')")}
+	}
+	if p == "/" {
+		return field.ErrorList{field.Invalid(fp, p, "mountPath must not be the root path")}
+	}
+	var errs field.ErrorList
+	for _, rv := range WorkerReservedVolumes {
+		if pathConflicts(p, rv.MountPath) {
+			errs = append(errs, field.Invalid(fp, p, fmt.Sprintf("mountPath conflicts with reserved worker path %q", rv.MountPath)))
+		}
+	}
+	for _, r := range reservedMountPaths {
+		if pathConflicts(p, r) {
+			errs = append(errs, field.Invalid(fp, p, fmt.Sprintf("mountPath conflicts with reserved system path %q", r)))
+		}
+	}
+	return errs
+}
+
+func (wp *WorkerPool) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+	tp := specPath.Child("template")
+
+	errs = append(errs, validateImage(wp.Spec.Template.Image, tp.Child("image"))...)
+
+	if wp.Spec.Replicas != nil && *wp.Spec.Replicas < 0 {
+		errs = append(errs, field.Invalid(specPath.Child("replicas"), *wp.Spec.Replicas, "replicas must be >= 0"))
+	}
+	if wp.Spec.MaxExecutionsPerWorker != nil && *wp.Spec.MaxExecutionsPerWorker < 0 {
+		errs = append(errs, field.Invalid(specPath.Child("maxExecutionsPerWorker"), *wp.Spec.MaxExecutionsPerWorker,
+			"maxExecutionsPerWorker must be >= 0"))
+	}
+	if wp.Spec.WarmPool != nil && *wp.Spec.WarmPool < 0 {
+		errs = append(errs, field.Invalid(specPath.Child("warmPool"), *wp.Spec.WarmPool, "warmPool must be >= 0"))
+	}
+
+	errs = append(errs, validateWorkerExtraMounts(wp.Spec.Template, tp)...)
+
+	return errs
+}
+
+func (wp *WorkerPool) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	// The aggregated apiserver's status subresource strategy inherits this
+	// ValidateUpdate, so a status (or metadata-only) write re-runs it. Skip the
+	// spec checks when the spec is unchanged: otherwise a status patch to a pool
+	// whose stored spec predates this validator -- e.g. a pre-overlay WorkerPool
+	// that decoded with an empty Template.Image -- would be rejected, and the
+	// deployment/status reconcilers could never report ReadyReplicas/conditions.
+	if prev, ok := old.(*WorkerPool); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &wp.Spec) {
+		return nil
+	}
+	return wp.Validate(ctx)
 }
