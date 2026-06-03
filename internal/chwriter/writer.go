@@ -126,13 +126,51 @@ func (w *Writer) LogsDropped() uint64 { return w.logsDropped.Load() }
 // TracesDropped returns the cumulative drop count for the traces channel.
 func (w *Writer) TracesDropped() uint64 { return w.tracesDropped.Load() }
 
+// dial opens a fresh ch-go client to the configured engine, bounded by
+// dialTimeout. Shared by Run's startup dials and the pumps' reconnect
+// path so connection options stay identical across both.
+func (w *Writer) dial(ctx context.Context) (*ch.Client, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	return ch.Dial(dialCtx, ch.Options{Address: w.address, Database: w.database})
+}
+
+// recoverConn is called on a pump's INSERT-error path to keep one
+// transient connection failure from permanently wedging telemetry. A
+// broken pipe leaves ch-go's client in a half-dead state: Do returns an
+// error but IsClosed() stays false, so every later INSERT keeps failing
+// on the same dead socket until the pod restarts. We disambiguate with a
+// Ping probe — if the probe succeeds the failure was server-side (a
+// rejected batch) and the same client is kept; if it fails the socket is
+// dead and we dial a replacement. The old client is closed only after a
+// replacement is in hand, so a failed re-dial leaves the pump retrying on
+// the next flush rather than holding nothing. During shutdown we skip the
+// churn entirely.
+func (w *Writer) recoverConn(ctx context.Context, client *ch.Client) *ch.Client {
+	if ctx.Err() != nil {
+		return client
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	perr := client.Ping(pingCtx)
+	cancel()
+	if perr == nil {
+		return client
+	}
+	fresh, err := w.dial(ctx)
+	if err != nil {
+		slog.Error("ClickHouse reconnect failed; will retry on next flush", "addr", w.address, "err", err)
+		return client
+	}
+	_ = client.Close()
+	slog.Warn("Reconnected to ClickHouse after connection failure", "addr", w.address, "probe_err", perr)
+	return fresh
+}
+
 // Run dials CH, creates tables on first start, then pumps incoming
 // batches into INSERTs until ctx is done. Returns nil on clean
 // shutdown or the first unrecoverable error from CH.
 func (w *Writer) Run(ctx context.Context) error {
-	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	defer cancel()
-	ddlClient, err := ch.Dial(dialCtx, ch.Options{Address: w.address, Database: w.database})
+	ddlClient, err := w.dial(ctx)
 	if err != nil {
 		return fmt.Errorf("dial clickhouse %s: %w", w.address, err)
 	}
@@ -142,11 +180,11 @@ func (w *Writer) Run(ctx context.Context) error {
 	}
 	_ = ddlClient.Close()
 
-	logsClient, err := ch.Dial(ctx, ch.Options{Address: w.address, Database: w.database})
+	logsClient, err := w.dial(ctx)
 	if err != nil {
 		return fmt.Errorf("dial logs client: %w", err)
 	}
-	tracesClient, err := ch.Dial(ctx, ch.Options{Address: w.address, Database: w.database})
+	tracesClient, err := w.dial(ctx)
 	if err != nil {
 		_ = logsClient.Close()
 		return fmt.Errorf("dial traces client: %w", err)
@@ -157,14 +195,15 @@ func (w *Writer) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 	go func() {
 		defer wg.Done()
-		defer logsClient.Close()
+		// The pump owns closing its client: a reconnect swaps the client
+		// out from under us, so closing here in Run would close the stale
+		// pointer and leak the reconnected one.
 		if err := w.runLogs(ctx, logsClient); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- fmt.Errorf("logs pump: %w", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		defer tracesClient.Close()
 		if err := w.runTraces(ctx, tracesClient); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- fmt.Errorf("traces pump: %w", err)
 		}
@@ -341,6 +380,8 @@ func (b *tracesBlock) input() proto.Input {
 }
 
 func (w *Writer) runLogs(ctx context.Context, client *ch.Client) error {
+	// Closure over client so a reconnect-swapped client is the one closed.
+	defer func() { _ = client.Close() }()
 	block := newLogsBlock()
 	ticker := time.NewTicker(w.flushEvery)
 	defer ticker.Stop()
@@ -354,6 +395,7 @@ func (w *Writer) runLogs(ctx context.Context, client *ch.Client) error {
 		cancel()
 		if err != nil {
 			slog.Error("Logs INSERT failed", "rows", block.rows, "reason", reason, "err", err)
+			client = w.recoverConn(ctx, client)
 		} else {
 			slog.Debug("Logs INSERT", "rows", block.rows, "reason", reason)
 		}
@@ -376,6 +418,8 @@ func (w *Writer) runLogs(ctx context.Context, client *ch.Client) error {
 }
 
 func (w *Writer) runTraces(ctx context.Context, client *ch.Client) error {
+	// Closure over client so a reconnect-swapped client is the one closed.
+	defer func() { _ = client.Close() }()
 	block := newTracesBlock()
 	ticker := time.NewTicker(w.flushEvery)
 	defer ticker.Stop()
@@ -389,6 +433,7 @@ func (w *Writer) runTraces(ctx context.Context, client *ch.Client) error {
 		cancel()
 		if err != nil {
 			slog.Error("Traces INSERT failed", "rows", block.rows, "reason", reason, "err", err)
+			client = w.recoverConn(ctx, client)
 		} else {
 			slog.Debug("Traces INSERT", "rows", block.rows, "reason", reason)
 		}
