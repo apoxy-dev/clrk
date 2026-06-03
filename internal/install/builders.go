@@ -146,12 +146,20 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		}
 	}
 
-	// Stamp the installed version onto the cm Deployment so DetectInstall (and
-	// the upgrade gate) can read it back. Left nil when unset (dev) so the dev
-	// SSA object stays byte-identical.
+	// Stamp the installed version onto the cm Deployment (annotation for the
+	// upgrade gate / DetectInstall, label for `kubectl get -L`). Both are left
+	// unset when Version is empty (dev) so the dev SSA object stays
+	// byte-identical, and the version label is kept off the immutable selector +
+	// pod template (cmLabels) — only the Deployment's own metadata carries it.
 	var cmAnnotations map[string]string
+	deployLabels := cmLabels
 	if p.Version != "" {
-		cmAnnotations = map[string]string{installedVersionAnnotation: p.Version}
+		cmAnnotations = map[string]string{clrkv1alpha1.InstalledVersionAnnotation: p.Version}
+		deployLabels = make(map[string]string, len(cmLabels)+1)
+		for k, v := range cmLabels {
+			deployLabels[k] = v
+		}
+		deployLabels[clrkv1alpha1.LabelVersion] = p.Version
 	}
 
 	deploy = &appsv1.Deployment{
@@ -159,7 +167,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        ControllerManagerName,
 			Namespace:   p.Namespace,
-			Labels:      cmLabels,
+			Labels:      deployLabels,
 			Annotations: cmAnnotations,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -367,7 +375,7 @@ func workerPoolObjects(p Profile) (preWP []client.Object, wp *clrkv1alpha1.Worke
 	wp = &clrkv1alpha1.WorkerPool{
 		TypeMeta: metav1.TypeMeta{APIVersion: "clrk.apoxy.dev/v1alpha1", Kind: "WorkerPool"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default",
+			Name:      DefaultWorkerPoolName,
 			Namespace: p.WorkerNamespace,
 		},
 		Spec: clrkv1alpha1.WorkerPoolSpec{

@@ -63,6 +63,13 @@ func newInstallCmd() *cobra.Command {
 			return runInstall(cmd.Context(), o)
 		},
 	}
+	registerInstallFlags(cmd, o)
+	return cmd
+}
+
+// registerInstallFlags registers the flags shared by `clrk install` and `clrk
+// upgrade` onto cmd.
+func registerInstallFlags(cmd *cobra.Command, o *installOpts) {
 	f := cmd.Flags()
 	f.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to the kubeconfig (defaults to $KUBECONFIG, then ~/.kube/config).")
 	f.StringVar(&o.context, "context", "", "Kubeconfig context to target (defaults to the current-context).")
@@ -86,7 +93,6 @@ func newInstallCmd() *cobra.Command {
 	f.BoolVar(&o.tui, "tui", true, "Render the bring-up in an interactive TUI (auto-disabled when stdout isn't a TTY).")
 	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "Per-wait timeout (cm/workers Available, API discoverable).")
 	f.DurationVar(&o.readyInterval, "ready-interval", 2*time.Second, "Polling interval for the readiness gate.")
-	return cmd
 }
 
 // preflight level styles. Adaptive so the output reads on light + dark
@@ -125,27 +131,57 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		return err
 	}
 
-	rc, err := install.NewRemoteCluster(o.kubeconfig, o.context)
+	rc, cl, tlsMode, err := resolveTarget(ctx, o)
 	if err != nil {
 		return err
+	}
+	p := o.buildProfile(tlsMode, rbacScoped, o.version)
+
+	return applyControlPlane(ctx, controlPlaneApply{
+		o:            o,
+		rc:           rc,
+		cl:           cl,
+		profile:      p,
+		tlsMode:      tlsMode,
+		rbacScoped:   rbacScoped,
+		crdMode:      crdMode,
+		crdModeLabel: o.crdMode,
+		confirmPrompt: fmt.Sprintf(
+			"\nApply the clrk control plane to context %q? [y/N]: ", rc.Context()),
+		okMessage: fmt.Sprintf("clrk installed into context %s (namespace %s).",
+			rc.Context(), p.Namespace),
+	})
+}
+
+// resolveTarget resolves the kubeconfig+context into a RemoteCluster, its
+// controller-runtime client, and the resolved serving-TLS mode. Shared by
+// install and upgrade.
+func resolveTarget(ctx context.Context, o *installOpts) (*install.RemoteCluster, client.Client, install.TLSMode, error) {
+	rc, err := install.NewRemoteCluster(o.kubeconfig, o.context)
+	if err != nil {
+		return nil, nil, 0, err
 	}
 	cl, err := rc.KubeClient(ctx)
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
 	disco, err := rc.Discovery()
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
-
-	// Resolve the serving-TLS mode (auto picks cert-manager when its CRDs are
-	// present, else self-signed). Insecure mirrors the dev posture.
+	// auto picks cert-manager when its CRDs are present, else self-signed;
+	// insecure mirrors the dev posture.
 	tlsMode, err := resolveTLSMode(o.tlsMode, disco)
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
+	return rc, cl, tlsMode, nil
+}
 
-	p := install.Profile{
+// buildProfile assembles the install.Profile from the resolved flags. version is
+// the value to stamp: --version for install, the gated target for upgrade.
+func (o *installOpts) buildProfile(tlsMode install.TLSMode, rbacScoped bool, version string) install.Profile {
+	return install.Profile{
 		Namespace:       o.namespace,
 		WorkerNamespace: o.workerNamespace,
 		ControllerImage: o.controllerImage,
@@ -157,14 +193,41 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		StorageClass:    o.storageClass,
 		RBACScoped:      rbacScoped,
 		TLS:             tlsMode,
-		Version:         o.version,
+		Version:         version,
 	}
+}
+
+// controlPlaneApply carries the resolved inputs for the shared install/upgrade
+// bring-up pipeline.
+type controlPlaneApply struct {
+	o             *installOpts
+	rc            *install.RemoteCluster
+	cl            client.Client
+	profile       install.Profile
+	tlsMode       install.TLSMode
+	rbacScoped    bool
+	crdMode       crds.Mode
+	crdModeLabel  string
+	upgrade       bool
+	confirmPrompt string
+	okMessage     string
+}
+
+// applyControlPlane runs the pipeline both `clrk install` and `clrk upgrade`
+// share: print the posture, preflight, prepare serving TLS, derive the
+// NetworkPolicy CIDRs, render the SSA plan, gate on confirmation, and run the
+// ordered bring-up. The upgrade switch (set by the caller) flips the worker-roll
+// behaviour and the prompt/OK text; the caller also forces ModeAlways for the
+// CRD step on upgrade.
+func applyControlPlane(ctx context.Context, a controlPlaneApply) error {
+	o := a.o
+	p := a.profile
 
 	fmt.Fprintf(os.Stderr, "Target cluster: context %s, namespace %s\n",
-		lipgloss.NewStyle().Bold(true).Render(rc.Context()), p.Namespace)
+		lipgloss.NewStyle().Bold(true).Render(a.rc.Context()), p.Namespace)
 	fmt.Fprintf(os.Stderr, "%s\n", mutedSt.Render(fmt.Sprintf(
-		"posture: TLS=%s, RBAC=%s, NetworkPolicy=%s", tlsModeLabel(tlsMode), rbacLabel(rbacScoped), onOff(o.networkPolicy))))
-	if tlsMode == install.TLSInsecureSkipVerify {
+		"posture: TLS=%s, RBAC=%s, NetworkPolicy=%s", tlsModeLabel(a.tlsMode), rbacLabel(a.rbacScoped), onOff(o.networkPolicy))))
+	if a.tlsMode == install.TLSInsecureSkipVerify {
 		fmt.Fprintf(os.Stderr, "%s\n", warnStyle.Render(
 			"warning: --tls=insecure serves the aggregated API without a verified cert (dev posture)."))
 	}
@@ -172,7 +235,7 @@ func runInstall(ctx context.Context, o *installOpts) error {
 
 	// Preflight.
 	if !o.skipPreflight {
-		if err := runPreflight(ctx, rc, p, o.yes); err != nil {
+		if err := runPreflight(ctx, a.rc, p, o.yes, a.upgrade); err != nil {
 			return err
 		}
 	}
@@ -180,7 +243,7 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// Serving cert: build (and, for self-signed, mint/reuse the CA) the cert
 	// objects, which also stamps the APIService caBundle / inject-ca-from
 	// annotation onto p so the built objects reflect the real posture.
-	certObjs, err := install.PrepareTLS(ctx, cl, &p)
+	certObjs, err := install.PrepareTLS(ctx, a.cl, &p)
 	if err != nil {
 		return fmt.Errorf("preparing serving TLS: %w", err)
 	}
@@ -190,13 +253,13 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// node IPs. A derivation failure is a warning, not fatal — we skip the policy
 	// rather than risk walling off the cm with a wrong CIDR.
 	if o.networkPolicy {
-		p.APIServerCIDRs, err = resolveAPIServerCIDRs(ctx, cl, o.apiserverCIDR)
+		p.APIServerCIDRs, err = resolveAPIServerCIDRs(ctx, a.cl, o.apiserverCIDR)
 		if err != nil {
 			if o.apiserverCIDR != "" {
 				// An explicit override that doesn't parse is an operator error,
 				// not a soft auto-derive miss — fail loudly rather than silently
 				// dropping the policy they asked for (a bad IPBlock would also
-				// abort the install mid-apply).
+				// abort the apply mid-flight).
 				return fmt.Errorf("invalid --apiserver-cidr: %w", err)
 			}
 			fmt.Fprintf(os.Stderr, "%s\n", warnStyle.Render(
@@ -209,17 +272,17 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// the worker set.
 	objs := append(append(append([]client.Object{}, certObjs...),
 		install.BuildControllerManager(p)...), install.BuildWorkerPool(p)...)
-	plans := install.BuildPlan(ctx, cl, "clrk-install", objs)
-	renderPlan(plans, rc.Context(), o.crdMode)
+	plans := install.BuildPlan(ctx, a.cl, "clrk-install", objs)
+	renderPlan(plans, a.rc.Context(), a.crdModeLabel)
 
 	if o.dryRun {
 		fmt.Fprintln(os.Stderr, "\n--dry-run: no changes applied. (YAML export via -o yaml lands with the render milestone.)")
 		return nil
 	}
 
-	// Confirm the risky, mutating install before touching the cluster.
+	// Confirm the risky, mutating apply before touching the cluster.
 	if !o.yes {
-		ok, cerr := confirm(ctx, fmt.Sprintf("\nApply the clrk control plane to context %q? [y/N]: ", rc.Context()))
+		ok, cerr := confirm(ctx, a.confirmPrompt)
 		if cerr != nil {
 			if errors.Is(cerr, errNoTTY) {
 				return errors.New("non-interactive terminal: pass --yes to proceed without confirmation")
@@ -227,7 +290,7 @@ func runInstall(ctx context.Context, o *installOpts) error {
 			return cerr
 		}
 		if !ok {
-			return errors.New("install aborted")
+			return errors.New("aborted")
 		}
 	}
 
@@ -235,12 +298,13 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// so wait for it before the cm rolls; the self-signed Secret is applied
 	// inline and needs no wait.
 	orch := install.Orchestration{
-		Applier:        rc,
-		Config:         rc.RESTConfig(),
+		Applier:        a.rc,
+		Config:         a.rc.RESTConfig(),
 		Profile:        p,
-		CRDMode:        crdMode,
+		CRDMode:        a.crdMode,
 		CertObjects:    certObjs,
-		WaitCertSecret: tlsMode == install.TLSCertManager,
+		WaitCertSecret: a.tlsMode == install.TLSCertManager,
+		Upgrade:        a.upgrade,
 		WaitTimeout:    o.timeout,
 		ReadyInterval:  o.readyInterval,
 	}
@@ -255,7 +319,7 @@ func runInstall(ctx context.Context, o *installOpts) error {
 	// Execute the bring-up.
 	fmt.Fprintln(os.Stderr)
 	if useTUI {
-		if err := runInstallTUI(ctx, rc.Context(), orch); err != nil {
+		if err := runInstallTUI(ctx, a.rc.Context(), orch); err != nil {
 			return err
 		}
 	} else {
@@ -267,8 +331,7 @@ func runInstall(ctx context.Context, o *installOpts) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s clrk installed into context %s (namespace %s).\n",
-		passStyle.Render("OK"), rc.Context(), p.Namespace)
+	fmt.Fprintf(os.Stderr, "\n%s %s\n", passStyle.Render("OK"), a.okMessage)
 	return nil
 }
 
@@ -399,8 +462,9 @@ func diffLineStyle(line string) lipgloss.Style {
 }
 
 // runPreflight runs the cluster checks, renders them, aborts on FAIL, and
-// confirms on WARN unless yes is set.
-func runPreflight(ctx context.Context, rc *install.RemoteCluster, p install.Profile, yes bool) error {
+// confirms on WARN unless yes is set. upgrade flips the existing-install check
+// from a WARN to an informational PASS.
+func runPreflight(ctx context.Context, rc *install.RemoteCluster, p install.Profile, yes, upgrade bool) error {
 	cl, err := rc.KubeClient(ctx)
 	if err != nil {
 		return err
@@ -410,7 +474,7 @@ func runPreflight(ctx context.Context, rc *install.RemoteCluster, p install.Prof
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "Preflight:")
-	results := install.Preflight(ctx, cl, disco, p)
+	results := install.Preflight(ctx, cl, disco, p, upgrade)
 	var fails, warns int
 	for _, r := range results {
 		label := levelStyle(r.Level).Render(fmt.Sprintf("%-4s", r.Level))
@@ -437,7 +501,7 @@ func runPreflight(ctx context.Context, rc *install.RemoteCluster, p install.Prof
 			return cerr
 		}
 		if !ok {
-			return errors.New("install aborted at preflight")
+			return errors.New("aborted at preflight")
 		}
 	}
 	return nil

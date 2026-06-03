@@ -32,6 +32,7 @@ func init() {
 
 	RootCmd.AddCommand(newDevCmd())
 	RootCmd.AddCommand(newInstallCmd())
+	RootCmd.AddCommand(newUpgradeCmd())
 	RootCmd.AddCommand(newApplyCmd())
 	RootCmd.AddCommand(newSecretCmd())
 	RootCmd.AddCommand(newAgentsCmd())

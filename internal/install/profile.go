@@ -24,6 +24,9 @@ const (
 	// APIServiceName is the aggregated APIService routing
 	// clrk.apoxy.dev/v1alpha1 to the cm.
 	APIServiceName = "v1alpha1.clrk.apoxy.dev"
+	// DefaultWorkerPoolName is the name of the WorkerPool the installer creates
+	// (its Deployment is WorkerDeploymentName, "default-workers").
+	DefaultWorkerPoolName = "default"
 
 	// PVC names backing the cm pod's embedded stores.
 	clickhouseDataPVC = "clickhouse-data"

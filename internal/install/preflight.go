@@ -53,11 +53,12 @@ const minKubeMinor = 28
 
 // Preflight runs every cluster-readiness check against the target cluster and
 // returns the findings (collect-all-then-report). The caller decides policy:
-// any LevelFail aborts; LevelWarn is confirmable. cmExists reports whether an
-// existing clrk control plane was found (install vs upgrade hint). The Profile
-// shapes namespace-scoped checks (worker-ns PSA, RBAC on the install namespace,
-// named StorageClass).
-func Preflight(ctx context.Context, c client.Client, disco discovery.DiscoveryInterface, p Profile) []PreflightResult {
+// any LevelFail aborts; LevelWarn is confirmable. upgrade flips the existing-
+// install check from a WARN ("an install exists; use `clrk upgrade`") to an
+// informational PASS, since on the upgrade path an existing install is exactly
+// what is expected. The Profile shapes namespace-scoped checks (worker-ns PSA,
+// RBAC on the install namespace, named StorageClass).
+func Preflight(ctx context.Context, c client.Client, disco discovery.DiscoveryInterface, p Profile, upgrade bool) []PreflightResult {
 	var out []PreflightResult
 	add := func(r PreflightResult) { out = append(out, r) }
 
@@ -70,7 +71,7 @@ func Preflight(ctx context.Context, c client.Client, disco discovery.DiscoveryIn
 	add(checkWorkerNamespacePSA(ctx, c, p))
 	add(checkCertManager(ctx, c, groups, groupsErr))
 	add(checkMetricsServer(groups, groupsErr))
-	add(checkExistingInstall(ctx, c, p))
+	add(checkExistingInstall(ctx, c, p, upgrade))
 	return out
 }
 
@@ -282,18 +283,31 @@ func checkMetricsServer(groups *metav1.APIGroupList, err error) PreflightResult 
 		Hint: "optional; install metrics-server for `kubectl top` and HPA support"}
 }
 
-func checkExistingInstall(ctx context.Context, c client.Client, p Profile) PreflightResult {
+func checkExistingInstall(ctx context.Context, c client.Client, p Profile, upgrade bool) PreflightResult {
 	const name = "Existing clrk install"
 	exists, version, err := DetectInstall(ctx, c, p.Namespace)
 	if err != nil {
 		return PreflightResult{Name: name, Level: LevelWarn, Detail: "could not check: " + err.Error()}
 	}
 	if !exists {
+		if upgrade {
+			// runUpgrade already requires an existing install before preflight, so
+			// this is effectively unreachable — surface it plainly rather than as a
+			// reassuring PASS if it ever is.
+			return PreflightResult{Name: name, Level: LevelWarn, Detail: "none in namespace " + p.Namespace,
+				Hint: "nothing to upgrade in this namespace; use `clrk install`"}
+		}
 		return PreflightResult{Name: name, Level: LevelPass, Detail: "none in namespace " + p.Namespace}
 	}
 	detail := "controller-manager already present in " + p.Namespace
 	if version != "" {
 		detail += " (version " + version + ")"
+	}
+	if upgrade {
+		// On upgrade an existing install is the expected precondition, not a
+		// warning — flagging it WARN would add a spurious confirm whose hint tells
+		// the operator to run the very command already in progress.
+		return PreflightResult{Name: name, Level: LevelPass, Detail: detail + " — will be upgraded"}
 	}
 	return PreflightResult{Name: name, Level: LevelWarn, Detail: detail,
 		Hint: "an install already exists; use `clrk upgrade` to change versions, or re-run install to reconcile"}

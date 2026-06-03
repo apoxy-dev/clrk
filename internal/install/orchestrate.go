@@ -72,6 +72,12 @@ type Orchestration struct {
 	// asynchronously); the self-signed path applies the Secret directly.
 	WaitCertSecret bool
 
+	// Upgrade marks an in-place upgrade (vs a fresh install). It makes the
+	// worker-pool step force a WorkerPool rollout and wait for convergence, so
+	// the workers reliably pick up a new image even when only the image digest
+	// (not the tag) moved. `clrk install` leaves it false.
+	Upgrade bool
+
 	WaitTimeout   time.Duration
 	ReadyInterval time.Duration
 	Log           func(string)
@@ -136,16 +142,37 @@ func (o Orchestration) Steps() []Step {
 		},
 		Step{
 			Name:  "controller-manager",
-			Why:   "apply the controller-manager (apiserver + embedded kine/ClickHouse/NATS + Envoy-Gateway) and its aggregated APIService",
+			Why:   controllerManagerStepWhy(o.Upgrade),
 			Risky: true,
 			Run: func(ctx context.Context) error {
 				if err := ApplyControllerManager(ctx, o.Applier, p); err != nil {
 					return err
 				}
-				if o.Log != nil {
-					o.Log("controller-manager applied; waiting for it to become Available")
+				if !o.Upgrade {
+					if o.Log != nil {
+						o.Log("controller-manager applied; waiting for it to become Available")
+					}
+					return o.Applier.WaitDeploymentAvailable(ctx, p.Namespace, ControllerManagerName, o.WaitTimeout)
 				}
-				return o.Applier.WaitDeploymentAvailable(ctx, p.Namespace, ControllerManagerName, o.WaitTimeout)
+				// On upgrade, force a roll and wait for the Recreate to complete.
+				// The version stamp lives on the cm Deployment's OWN metadata
+				// (annotation + version label), deliberately NOT on the pod template,
+				// so a same-tag/moved-digest image (or a stamp-only bump) is no
+				// pod-template change and the Deployment controller wouldn't roll the
+				// cm — leaving the OLD binary running while the recorded version says
+				// otherwise. The same reasoning drives the worker-pool roll below.
+				cl, err := o.Applier.KubeClient(ctx)
+				if err != nil {
+					return err
+				}
+				gen, err := Rollout(ctx, cl, p.Namespace, ControllerManagerName)
+				if err != nil {
+					return err
+				}
+				if o.Log != nil {
+					o.Log("rolled the controller-manager (Recreate); waiting for the new pod to become Available")
+				}
+				return WaitDeploymentRolledOut(ctx, cl, p.Namespace, ControllerManagerName, gen, o.WaitTimeout)
 			},
 		},
 		Step{
@@ -158,10 +185,31 @@ func (o Orchestration) Steps() []Step {
 		},
 		Step{
 			Name:  "worker-pool",
-			Why:   "apply the default WorkerPool; the controller-manager reconciles it into the worker Deployment",
+			Why:   workerPoolStepWhy(o.Upgrade),
 			Risky: true,
 			Run: func(ctx context.Context) error {
-				return ApplyWorkerPool(ctx, o.Applier, p)
+				if err := ApplyWorkerPool(ctx, o.Applier, p); err != nil {
+					return err
+				}
+				if !o.Upgrade {
+					return nil
+				}
+				// On upgrade, force a roll and wait for the WorkerPool to converge
+				// at the new generation: a same-tag/moved-digest image is no spec
+				// change to SSA, so without an explicit restartedAt bump the workers
+				// would keep running the old image.
+				cl, err := o.Applier.KubeClient(ctx)
+				if err != nil {
+					return err
+				}
+				gen, err := RolloutWorkerPool(ctx, cl, p.WorkerNamespace, DefaultWorkerPoolName)
+				if err != nil {
+					return err
+				}
+				if o.Log != nil {
+					o.Log("rolled the default WorkerPool; waiting for the workers to converge")
+				}
+				return WaitWorkerPoolConverged(ctx, cl, p.WorkerNamespace, DefaultWorkerPoolName, gen, o.WaitTimeout)
 			},
 		},
 		Step{
@@ -207,6 +255,25 @@ func workerNamespace(ns string) *corev1.Namespace {
 			},
 		},
 	}
+}
+
+// controllerManagerStepWhy explains the controller-manager step, noting the
+// forced Recreate roll on upgrade (the version stamp doesn't change the pod
+// template, so a same-tag image needs an explicit roll to pick up new code).
+func controllerManagerStepWhy(upgrade bool) string {
+	if upgrade {
+		return "apply the controller-manager, roll it (Recreate — brief aggregated-API downtime), and wait for the new pod to become Available"
+	}
+	return "apply the controller-manager (apiserver + embedded kine/ClickHouse/NATS + Envoy-Gateway) and its aggregated APIService"
+}
+
+// workerPoolStepWhy explains the worker-pool step, noting the forced roll on
+// upgrade.
+func workerPoolStepWhy(upgrade bool) string {
+	if upgrade {
+		return "re-apply the default WorkerPool, roll it, and wait for the workers to converge on the new image"
+	}
+	return "apply the default WorkerPool; the controller-manager reconciles it into the worker Deployment"
 }
 
 // certStepWhy explains the serving-cert step for the chosen TLS mode.
