@@ -40,6 +40,21 @@ const (
 	// reaches Dial CH should be up; this is a safety belt.
 	dialTimeout = 5 * time.Second
 
+	// insertTimeout bounds a single INSERT attempt. A broken socket errors
+	// fast; this only bites a connected-but-slow CH (merge backpressure).
+	insertTimeout = 30 * time.Second
+
+	// A failed INSERT is held and retried (through reconnects) until it
+	// commits, so a CH restart costs zero already-buffered rows. Backoff is
+	// capped exactly like the invocation materializer's drain loop.
+	flushRetryInitial = 250 * time.Millisecond
+	flushRetryMax     = 5 * time.Second
+
+	// shutdownFlushTimeout bounds the final drain on ctx cancel. It runs on
+	// a detached context so the last buffered block can still commit (and
+	// reconnect if needed) after the parent ctx is already done.
+	shutdownFlushTimeout = 10 * time.Second
+
 	// channel buffer sizes: large enough to absorb a few seconds of
 	// receive at typical agent QPS without dropping, small enough that
 	// drop+count kicks in promptly when CH is wedged.
@@ -164,6 +179,48 @@ func (w *Writer) recoverConn(ctx context.Context, client *ch.Client) *ch.Client 
 	_ = client.Close()
 	slog.Warn("Reconnected to ClickHouse after connection failure", "addr", w.address, "probe_err", perr)
 	return fresh
+}
+
+// insertWithRetry sends one columnar block, holding it and retrying
+// through reconnects until it commits or ctx is cancelled. The block is
+// NEVER discarded on a transient failure: ch-go reads (does not consume)
+// the Input columns, so a retry re-sends identical data, and recoverConn
+// re-dials a dead socket between attempts. This mirrors the invocation
+// materializer's hold-and-retry drain so a CH restart or network blip
+// costs zero already-buffered rows (at-least-once: a failure after CH
+// committed but before we read the ack can re-send a block, so a rare
+// duplicate is possible — acceptable for append-only telemetry). Returns
+// the (possibly reconnected) client and whether the block committed; a
+// false result means only that ctx was cancelled mid-retry. Backoff is
+// capped exactly like consumer.drain.
+func (w *Writer) insertWithRetry(ctx context.Context, client *ch.Client, body string, in proto.Input, rows int, reason string) (*ch.Client, bool) {
+	backoff := flushRetryInitial
+	for {
+		insertCtx, cancel := context.WithTimeout(ctx, insertTimeout)
+		err := client.Do(insertCtx, ch.Query{Body: body, Input: in})
+		cancel()
+		if err == nil {
+			slog.Debug("INSERT committed", "rows", rows, "reason", reason)
+			return client, true
+		}
+		if ctx.Err() != nil {
+			// Cancelled mid-retry: hold the block. On a live ctx this is the
+			// shutdown drain giving up after shutdownFlushTimeout; the rows
+			// are lost only because chwriter has no durable spool.
+			slog.Error("INSERT abandoned (context done)", "rows", rows, "reason", reason, "err", err)
+			return client, false
+		}
+		slog.Error("INSERT failed; holding batch and retrying", "rows", rows, "reason", reason, "err", err)
+		client = w.recoverConn(ctx, client)
+		select {
+		case <-ctx.Done():
+			return client, false
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > flushRetryMax {
+			backoff = flushRetryMax
+		}
+	}
 }
 
 // Run dials CH, creates tables on first start, then pumps incoming
@@ -386,32 +443,32 @@ func (w *Writer) runLogs(ctx context.Context, client *ch.Client) error {
 	ticker := time.NewTicker(w.flushEvery)
 	defer ticker.Stop()
 	body := fmt.Sprintf(insertTmpl, w.database, LogsTable)
-	flush := func(reason string) {
+	// flush sends the current block under fctx (the normal path passes the
+	// pump ctx so a retry blocks until CH recovers; shutdown passes a
+	// detached, bounded ctx). The block is reset only on a committed insert,
+	// so a transient failure holds the rows and the next flush re-sends them.
+	flush := func(fctx context.Context, reason string) {
 		if block.rows == 0 {
 			return
 		}
-		insertCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := client.Do(insertCtx, ch.Query{Body: body, Input: block.input()})
-		cancel()
-		if err != nil {
-			slog.Error("Logs INSERT failed", "rows", block.rows, "reason", reason, "err", err)
-			client = w.recoverConn(ctx, client)
-		} else {
-			slog.Debug("Logs INSERT", "rows", block.rows, "reason", reason)
+		var ok bool
+		if client, ok = w.insertWithRetry(fctx, client, body, block.input(), block.rows, reason); ok {
+			block = newLogsBlock()
 		}
-		block = newLogsBlock()
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			flush("shutdown")
+			fctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
+			flush(fctx, "shutdown")
+			cancel()
 			return ctx.Err()
 		case <-ticker.C:
-			flush("tick")
+			flush(ctx, "tick")
 		case rls := <-w.logsCh:
 			w.appendLogs(block, rls)
 			if block.rows >= w.flushRows || block.bytes >= w.flushBytes {
-				flush("size")
+				flush(ctx, "size")
 			}
 		}
 	}
@@ -424,32 +481,29 @@ func (w *Writer) runTraces(ctx context.Context, client *ch.Client) error {
 	ticker := time.NewTicker(w.flushEvery)
 	defer ticker.Stop()
 	body := fmt.Sprintf(insertTmpl, w.database, TracesTable)
-	flush := func(reason string) {
+	// See runLogs: the block is held and re-sent until it commits.
+	flush := func(fctx context.Context, reason string) {
 		if block.rows == 0 {
 			return
 		}
-		insertCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := client.Do(insertCtx, ch.Query{Body: body, Input: block.input()})
-		cancel()
-		if err != nil {
-			slog.Error("Traces INSERT failed", "rows", block.rows, "reason", reason, "err", err)
-			client = w.recoverConn(ctx, client)
-		} else {
-			slog.Debug("Traces INSERT", "rows", block.rows, "reason", reason)
+		var ok bool
+		if client, ok = w.insertWithRetry(fctx, client, body, block.input(), block.rows, reason); ok {
+			block = newTracesBlock()
 		}
-		block = newTracesBlock()
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			flush("shutdown")
+			fctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
+			flush(fctx, "shutdown")
+			cancel()
 			return ctx.Err()
 		case <-ticker.C:
-			flush("tick")
+			flush(ctx, "tick")
 		case rss := <-w.tracesCh:
 			w.appendTraces(block, rss)
 			if block.rows >= w.flushRows || block.bytes >= w.flushBytes {
-				flush("size")
+				flush(ctx, "size")
 			}
 		}
 	}
