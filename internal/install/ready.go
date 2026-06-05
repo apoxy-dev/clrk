@@ -153,5 +153,12 @@ func deploymentAvailable(ctx context.Context, core kubernetes.Interface, ns, nam
 			return nil
 		}
 	}
+	// Not Available yet — surface the pod-level reason (ImagePullBackOff,
+	// CrashLoopBackOff, unschedulable) so the readiness gate's "waiting:" line
+	// says WHY instead of an opaque "not Available yet" that the operator can't
+	// act on.
+	if issues := podIssuesForDeployment(ctx, core, dep); len(issues) > 0 {
+		return fmt.Errorf("%s/%s not Available yet: %s", ns, name, joinIssues(issues))
+	}
 	return fmt.Errorf("%s/%s not Available yet", ns, name)
 }

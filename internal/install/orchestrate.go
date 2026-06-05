@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -141,11 +142,24 @@ func (o Orchestration) Steps() []Step {
 				if err := ApplyControllerManager(ctx, o.Applier, p); err != nil {
 					return err
 				}
+				// A typed client for pod-level diagnostics: both waits below run
+				// under runWithPodDiagnostics so a stuck container (bad image,
+				// config error, crash loop) is surfaced live AND fails fast,
+				// instead of hanging the cm wait out to the full --timeout in
+				// silence. An unschedulable pod is surfaced live but left to the
+				// timeout (it can clear as the cluster scales).
+				core, err := kubernetes.NewForConfig(o.Config)
+				if err != nil {
+					return fmt.Errorf("building kubernetes client: %w", err)
+				}
 				if !o.Upgrade {
 					if o.Log != nil {
 						o.Log("controller-manager applied; waiting for it to become Available")
 					}
-					return o.Applier.WaitDeploymentAvailable(ctx, p.Namespace, ControllerManagerName, o.WaitTimeout)
+					return runWithPodDiagnostics(ctx, core, p.Namespace, ControllerManagerName, o.Log,
+						func(c context.Context) error {
+							return o.Applier.WaitDeploymentAvailable(c, p.Namespace, ControllerManagerName, o.WaitTimeout)
+						})
 				}
 				// On upgrade, force a roll and wait for the Recreate to complete.
 				// The version stamp lives on the cm Deployment's OWN metadata
@@ -165,7 +179,10 @@ func (o Orchestration) Steps() []Step {
 				if o.Log != nil {
 					o.Log("rolled the controller-manager (Recreate); waiting for the new pod to become Available")
 				}
-				return WaitDeploymentRolledOut(ctx, cl, p.Namespace, ControllerManagerName, gen, o.WaitTimeout)
+				return runWithPodDiagnostics(ctx, core, p.Namespace, ControllerManagerName, o.Log,
+					func(c context.Context) error {
+						return WaitDeploymentRolledOut(c, cl, p.Namespace, ControllerManagerName, gen, o.WaitTimeout)
+					})
 			},
 		},
 		Step{

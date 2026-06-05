@@ -55,13 +55,6 @@ type rootModel struct {
 	agents *agentsView
 	detail *agentDetailView
 	system *systemView
-
-	// systemOnly renders just the system view (step-list + log pane) with no
-	// agent screens or agent-stats header. Used by `clrk install`/`upgrade`
-	// progress, which reuse systemView but have no agents to show. title is the
-	// header subtitle in this mode (e.g. "install").
-	systemOnly bool
-	title      string
 }
 
 func newRootModel(componentNames []string, store *devagents.Store) *rootModel {
@@ -74,20 +67,6 @@ func newRootModel(componentNames []string, store *devagents.Store) *rootModel {
 		store:   store,
 		agents:  newAgentsView(store),
 		system:  newSystemView(componentNames),
-	}
-}
-
-// newSystemRootModel builds a system-only router for the install/upgrade
-// progress view: it starts on (and stays on) the system screen, has no agents
-// store/screens, and renders a stats-free header titled by title.
-func newSystemRootModel(componentNames []string, title string) *rootModel {
-	return &rootModel{
-		current:    screenSystem,
-		keys:       defaultKeys,
-		store:      devagents.New(),
-		system:     newSystemView(componentNames),
-		systemOnly: true,
-		title:      title,
 	}
 }
 
@@ -146,9 +125,6 @@ func (m *rootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.AgentsScreen):
-		if m.systemOnly {
-			return m, nil
-		}
 		m.current = screenAgents
 		return m, nil
 	case key.Matches(msg, m.keys.SystemScreen):
@@ -276,9 +252,6 @@ func (m *rootModel) View() string {
 
 func (m *rootModel) renderHeader() string {
 	title := m.screenTitle()
-	if m.systemOnly {
-		return renderHeaderSimple(m.width, title)
-	}
 	stats := m.collectStats()
 	return renderHeader(m.width, title, stats)
 }
@@ -302,9 +275,6 @@ func (m *rootModel) screenTitle() string {
 		}
 		return "agent"
 	case screenSystem:
-		if m.systemOnly && m.title != "" {
-			return m.title
-		}
 		return "system view"
 	}
 	return ""
@@ -323,9 +293,6 @@ func (m *rootModel) screenNav() string {
 		}
 		return "tab logs/traces   y spec   esc back   a agents   s system   q quit"
 	case screenSystem:
-		if m.systemOnly {
-			return "↑↓ select   c clear   g/G top/bottom   q quit"
-		}
 		return "↑↓ select   c clear   g/G top/bottom   a agents   q quit"
 	}
 	return ""

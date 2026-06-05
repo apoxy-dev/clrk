@@ -50,18 +50,18 @@ func New(componentNames []string, store *devagents.Store) *Program {
 	}
 }
 
-// NewSystem constructs a TUI program that renders only the system view (the
-// step-list sidebar + per-step log pane) with no agents store or agent screens,
-// for `clrk install`/`upgrade` progress. componentNames are the install steps;
-// title is the header subtitle (e.g. "install · my-context"). The clrk pseudo-
-// source is still the implicit first sidebar entry, so slog routed via
-// NewSlogHandler lands in its pane.
-func NewSystem(componentNames []string, title string) *Program {
-	m := newSystemRootModel(componentNames, title)
-	p := tea.NewProgram(
-		m,
-		tea.WithAltScreen(),
-	)
+// NewStatus constructs the compact install/upgrade progress program: an inline
+// (no alt-screen) step checklist with a spinner on the in-flight step, its
+// latest log line shown beneath it, and a toggleable per-step log tail. Unlike
+// NewSystem's full sidebar+panes view, it renders in place and leaves its final
+// frame in the scrollback on exit. stepNames are the install steps; title is the
+// header line (e.g. "install · my-context"). It consumes the same Send* messages
+// as the other views, so callers drive it with SetStatus / SendLog unchanged.
+func NewStatus(stepNames []string, title string) *Program {
+	m := newStatusModel(stepNames, title)
+	// No tea.WithAltScreen: the status view is a normal CLI block that updates
+	// in place, so the completed checklist stays in the terminal afterward.
+	p := tea.NewProgram(m)
 	return &Program{
 		p:     p,
 		queue: make(chan tea.Msg, preRunQueueSize),

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -93,7 +94,7 @@ func registerInstallFlags(cmd *cobra.Command, o *installOpts) {
 	f.BoolVar(&o.skipPreflight, "skip-preflight", false, "Skip the cluster readiness checks.")
 	f.BoolVar(&o.dryRun, "dry-run", false, "Print the plan (objects + diffs) without changing the cluster.")
 	f.StringVarP(&o.output, "output", "o", "", "Output format: empty prints the human plan; 'yaml' emits the full manifest set to stdout (implies no apply) for GitOps/audit.")
-	f.BoolVar(&o.tui, "tui", true, "Render the bring-up in an interactive TUI (auto-disabled when stdout isn't a TTY).")
+	f.BoolVar(&o.tui, "tui", true, "Render the bring-up as a live status view with toggleable per-step logs (auto-disabled when stdout isn't a TTY).")
 	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "Per-wait timeout (cm/workers Available, API discoverable).")
 	f.DurationVar(&o.readyInterval, "ready-interval", 2*time.Second, "Polling interval for the readiness gate.")
 }
@@ -291,7 +292,10 @@ func applyControlPlane(ctx context.Context, a controlPlaneApply) error {
 	// the worker set.
 	objs := append(append(append([]client.Object{}, certObjs...),
 		install.BuildControllerManager(p)...), install.BuildWorkerPool(p)...)
-	plans := install.BuildPlan(ctx, a.cl, "clrk-install", objs)
+	var plans []install.ResourcePlan
+	withSpinner("Computing changes (server-side dry-run)", 1200*time.Millisecond, func() {
+		plans = install.BuildPlan(ctx, a.cl, "clrk-install", objs)
+	})
 	renderPlan(plans, a.rc.Context(), a.crdModeLabel)
 
 	if o.dryRun {
@@ -354,32 +358,52 @@ func applyControlPlane(ctx context.Context, a controlPlaneApply) error {
 	return nil
 }
 
-// runInstallTUI drives the bring-up inside the devtui system-only progress view:
-// a step-list sidebar with status glyphs and a per-step streaming-log pane. The
-// orchestration runs in a goroutine; the TUI renders on the main goroutine and
-// stays up after completion so the operator can review, then quits on `q`.
-// stderr is redirected to a file for the TUI's lifetime so stray library writes
-// don't corrupt the alt-screen.
+// runInstallTUI drives the bring-up inside the compact devtui status view: an
+// inline step checklist with a spinner on the in-flight step, its latest log
+// line (including pod-failure reasons) shown beneath it, and a per-step log tail
+// the operator can toggle with `l`. The orchestration runs in a goroutine; the
+// view renders on the main goroutine, updates in place, and stays up after
+// completion so the operator can review, then quits on `q`. stderr is
+// redirected to a file for the view's lifetime so stray library writes don't
+// corrupt the in-place redraw.
 func runInstallTUI(ctx context.Context, contextName string, orch install.Orchestration) error {
 	if restore, err := redirectStderrToFile(filepath.Join(clrkDir, "install.stderr.log")); err == nil {
 		defer restore()
 	}
 
-	// current is set by the step logger on "start" and read by the log sink;
-	// both run on the orchestration goroutine, so no synchronization is needed.
-	var current string
+	// current is the step the log sink attributes lines to. The step logger sets
+	// it on "start" (orchestration goroutine); orch.Log reads it — and is now
+	// also called from runWithPodDiagnostics' background diagnoser — so guard it
+	// with a mutex rather than rely on the diagnoser happening to be joined
+	// within its step.
+	var (
+		mu      sync.Mutex
+		current string
+	)
 	var prog *devtui.Program
+	setCurrent := func(name string) {
+		mu.Lock()
+		current = name
+		mu.Unlock()
+	}
 	orch.Log = func(line string) {
-		if current != "" {
-			prog.SendLog(current, line, devtui.StreamStdout)
+		mu.Lock()
+		c := current
+		mu.Unlock()
+		if c != "" {
+			prog.SendLog(c, line, devtui.StreamStdout)
 		}
 	}
 
-	// Build the steps (with Log wired) and seed the sidebar from them so the
-	// component list matches what actually runs (e.g. the conditional
-	// serving-cert step).
+	// Build the steps (with Log wired) and seed the checklist from them so the
+	// step list matches what actually runs (e.g. the conditional serving-cert
+	// step).
 	steps := orch.Steps()
-	prog = devtui.NewSystem(install.StepNames(steps), "install · "+contextName)
+	verb := "install"
+	if orch.Upgrade {
+		verb = "upgrade"
+	}
+	prog = devtui.NewStatus(install.StepNames(steps), verb+" · "+contextName)
 
 	// Route slog (e.g. crds.Install's progress) into the cli pane while the TUI
 	// owns the screen, then restore.
@@ -390,7 +414,7 @@ func runInstallTUI(ctx context.Context, contextName string, orch install.Orchest
 	logger := func(step install.Step, status string, err error) {
 		switch status {
 		case "start":
-			current = step.Name
+			setCurrent(step.Name)
 			prog.SetStatus(step.Name, devtui.StatusStarting)
 			prog.SendLog(step.Name, "why: "+step.Why, devtui.StreamClrk)
 		case "done":
@@ -407,9 +431,9 @@ func runInstallTUI(ctx context.Context, contextName string, orch install.Orchest
 	go func() {
 		err := install.RunSteps(runCtx, steps, logger)
 		if err != nil {
-			prog.SendLog(devtui.ClrkSource, "install failed: "+err.Error()+" — press q to exit", devtui.StreamStderr)
+			prog.SendLog(devtui.ClrkSource, verb+" failed: "+err.Error(), devtui.StreamStderr)
 		} else {
-			prog.SendLog(devtui.ClrkSource, "install complete — press q to exit", devtui.StreamClrk)
+			prog.SendLog(devtui.ClrkSource, verb+" complete", devtui.StreamClrk)
 		}
 		errCh <- err
 	}()
@@ -536,8 +560,11 @@ func runPreflight(ctx context.Context, rc *install.RemoteCluster, p install.Prof
 	if err != nil {
 		return err
 	}
+	var results []install.PreflightResult
+	withSpinner("Running preflight checks", 1500*time.Millisecond, func() {
+		results = install.Preflight(ctx, cl, disco, p, upgrade)
+	})
 	fmt.Fprintln(os.Stderr, "Preflight:")
-	results := install.Preflight(ctx, cl, disco, p, upgrade)
 	var fails, warns int
 	for _, r := range results {
 		label := levelStyle(r.Level).Render(fmt.Sprintf("%-4s", r.Level))

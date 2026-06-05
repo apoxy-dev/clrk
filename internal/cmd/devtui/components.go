@@ -85,6 +85,26 @@ func (c *component) joined() string {
 	return strings.Join(parts, "\n")
 }
 
+// tail returns the last n buffered lines in chronological order, joined. Used
+// by the compact status view's toggleable per-step log peek.
+func (c *component) tail(n int) string {
+	if c.size == 0 || n <= 0 {
+		return ""
+	}
+	var parts []string
+	if c.head == 0 {
+		parts = c.buf[:c.size]
+	} else {
+		parts = make([]string, c.size)
+		k := copy(parts, c.buf[c.head:])
+		copy(parts[k:], c.buf[:c.head])
+	}
+	if len(parts) > n {
+		parts = parts[len(parts)-n:]
+	}
+	return strings.Join(parts, "\n")
+}
+
 // glyph returns the single-rune status indicator for the sidebar.
 func (c *component) glyph() string {
 	switch c.status {
