@@ -110,40 +110,51 @@ restart policy.
 
 ## FAQ
 
-**Does my agent need to use a specific framework or SDK?**
+### Does my agent need to use a specific framework or SDK?
+
 No. CLRK intercepts at the network and process boundary, so any agent that makes
 HTTP/TLS calls works. The provided examples use the OpenAI and Gemini SDKs, plain
 shell tools, and MCP clients.
 
-**Where do API keys live?**
+### Where do API keys live?
+
 Not in the agent. Credentials are injected by the egress MITM at request time via a
 credential-injection policy — never in pod env, mounts, or args. A compromised
 sandbox has no secrets to leak.
 
-**How is the sandbox isolated?**
+### How is the sandbox isolated?
+
 Sandboxes run via [gVisor](https://gvisor.dev) (`runsc`) for a stronger syscall
 boundary, each in its own network namespace with all egress forced through the
 interception path.
 
-**Can I run it locally or do I need a Kubernetes cluster?**
+### Can I run it locally or do I need a Kubernetes cluster?
+
 All batteries included! `clrk dev` brings up a local cluster and dev loop. This can
 also be used to run CLRK without a Kubernetes cluster nearby. `clrk install` /
 `clrk upgrade` manage a Kubernetes-based deployment.
 
-**Why are `api/` and `client/` licensed differently from the rest?**
+### Why are `api/` and `client/` licensed differently from the rest?
+
 So you can build against the API and use the generated client without AGPL copyleft
 obligations. See [License](#license).
 
-**Where is CONTRIBUTING.md?**
-Currently, external contributions are not accepted. If you encounter a bug or have a feature request, please open an issue on the [GitHub repository](https://github.com/clrk-ai/clrk).
+### Where is CONTRIBUTING.md?
 
-**Was this tested? I can't find any tests!**
-We have tests, we swear! Currently they are coupled with our private build/test infrastructure
-and are not publicly available. We try to maintain minimum 70% unit test coverage and have
-integration tests for the public API.
+Currently, external contributions are not accepted. If you encounter a bug or have a
+feature request, please open an issue on the
+[GitHub repository](https://github.com/clrk-ai/clrk).
 
-**Was this vibe-coded?**
-We rely on AI-assist but every output line is carefully reviewed and tested before being committed.
+### Was this tested? I can't find any tests!
+
+We have tests, we swear! Currently they are coupled with our private build/test
+infrastructure and are not publicly available. We try to maintain minimum 70% unit
+test coverage and have integration tests for the public API.
+
+### Was this vibe-coded?
+
+We rely on AI-assist but every output line is carefully reviewed and tested before
+being committed.
 
 ## License
 
