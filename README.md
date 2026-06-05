@@ -1,7 +1,7 @@
 # CLRK
 
 CLRK is a Kubernetes-native runtime for LLM agents. It runs each agent in a
-gVisor sandbox and transparently intercepts all egress — LLM APIs, MCP, tool
+gVisor sandbox and transparently intercepts all egress - LLM APIs, MCP, tool
 calls - without modifying agent code. That interception point gives you
 observability, policy enforcement, and routing-based cost control over agents
 you don't otherwise get to see inside.
@@ -12,15 +12,15 @@ you don't otherwise get to see inside.
 ## How it works
 
 CLRK runs untrusted, framework-agnostic agent workloads in [gVisor](https://gvisor.dev/)
-sandboxes. You describe an agent declaratively — a container image, a trigger, an egress
-policy — and CLRK schedules it onto a warm pool of sandbox workers. It also
+sandboxes. You describe an agent declaratively - a container image, a trigger, an egress
+policy - and CLRK schedules it onto a warm pool of sandbox workers. It also
 brings its own scheduler, so agent startup isn't gated on pod-creation
 latency. Every byte in or out of the sandbox passes through a transparent proxy
 CLRK controls, so the platform sees and governs all LLM API calls, MCP traffic,
 and outbound tool calls without the agent code being aware of it. That includes
 TLS-encrypted connections.
 
-The agent inside can be anything that makes HTTP(S) calls — a Python script
+The agent inside can be anything that makes HTTP(S) calls - a Python script
 using the OpenAI or Anthropic SDK, a Node MCP client, a shell one-liner. There
 is no required agent library; CLRK intercepts at the network and process
 boundary. See [`_examples/`](_examples) for runnable agents (`openai-bot`,
@@ -54,21 +54,21 @@ a compromised sandbox cannot exfiltrate them.
 
 CLRK ships two long-running binaries plus a CLI:
 
-- **`cmd/controller-manager`** — the control plane. Runs the
+- **`cmd/controller-manager`** - the control plane. Runs the
   controller-runtime reconcilers for the CRDs below and embeds an aggregated API
   server for the `clrk.apoxy.dev` group. Deployed as a Deployment on Kubernetes but
   can be run standalone.
 
-- **`cmd/worker`** — Manages sandbox lifecycle via [gVisor](https://gvisor.dev)/`runsc`,
+- **`cmd/worker`** - Manages sandbox lifecycle via [gVisor](https://gvisor.dev)/`runsc`,
   sets up per-sandbox network interception via our custom [sentrystack plugin](https://pkg.go.dev/gvisor.dev/gvisor/pkg/sentry/socket/plugin/stack) to be
   routed through the interception path. Linux-only (`//go:build linux`, CGO).
 
-- **`cmd/clrk`** — the operator/developer CLI: `install`, `upgrade`, `dev`,
+- **`cmd/clrk`** - the operator/developer CLI: `install`, `upgrade`, `dev`,
   `apply`, `get`, `logs`, `traces`, `status`, `run-task`, context management, and a
   local-cluster dev loop.
 
 **Egress interception.** Outbound traffic is captured transparently and sent through
-an `EgressGateway` — an Envoy-based data plane with TLS termination (MITM) and a
+an `EgressGateway` - an Envoy-based data plane with TLS termination (MITM) and a
 custom filter. This is where telemetry is recorded, credentials are injected,
 and routing/governance policies (`EgressL4Route`, `MCPRoute`, `AIProviderRoute`,
 egress/credential/logging/rate-limit policies) are applied.
@@ -119,7 +119,7 @@ shell tools, and MCP clients.
 ### Where do API keys live?
 
 Not in the agent. Credentials are injected by the egress MITM at request time via a
-credential-injection policy — never in pod env, mounts, or args. A compromised
+credential-injection policy - never in pod env, mounts, or args. A compromised
 sandbox has no secrets to leak.
 
 ### How is the sandbox isolated?
@@ -143,7 +143,7 @@ obligations. See [License](#license).
 
 Currently, external contributions are not accepted. If you encounter a bug or have a
 feature request, please open an issue on the
-[GitHub repository](https://github.com/clrk-ai/clrk).
+[GitHub repository](https://github.com/apoxy-dev/clrk/issues).
 
 ### Was this tested? I can't find any tests!
 
