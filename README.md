@@ -1,30 +1,23 @@
 # CLRK
 
-CLRK is a Kubernetes-native runtime for LLM agents. It runs each agent in a
-gVisor sandbox and transparently intercepts all egress - LLM APIs, MCP, tool
-calls - without modifying agent code. That interception point gives you
-observability, policy enforcement, and routing-based cost control over agents
-you don't otherwise get to see inside.
-
-- **Module**: `github.com/apoxy-dev/clrk`
-- **API group**: `clrk.apoxy.dev/v1alpha1`
+CLRK (we pronounce it as "clerk") is a Kubernetes-native runtime for LLM agents. It runs each agent
+in a gVisor sandbox and transparently intercepts all egress - LLM APIs, MCP, tool calls - without
+modifying agent code. That interception point gives you observability, policy enforcement, and
+routing-based cost control over agents you don't otherwise get to see inside.
 
 ## How it works
 
-CLRK runs untrusted, framework-agnostic agent workloads in [gVisor](https://gvisor.dev/)
-sandboxes. You describe an agent declaratively - a container image, a trigger, an egress
-policy - and CLRK schedules it onto a warm pool of sandbox workers. It also
-brings its own scheduler, so agent startup isn't gated on pod-creation
-latency. Every byte in or out of the sandbox passes through a transparent proxy
-CLRK controls, so the platform sees and governs all LLM API calls, MCP traffic,
-and outbound tool calls without the agent code being aware of it. That includes
-TLS-encrypted connections.
+CLRK runs untrusted, framework-agnostic agent workloads in [gVisor](https://gvisor.dev/) sandboxes.
+You describe an agent declaratively - a container image + a trigger + an egress policy - and CLRK
+schedules it onto a pool of sandbox workers. It brings its own scheduler, so agent startup isn't
+gated on pod-creation latency. Every byte in or out of the sandbox passes through a transparent
+proxy CLRK controls, so the platform sees and governs all LLM API calls, MCP traffic, and outbound
+tool calls without the agent code being aware of it. Yes, that includes TLS-encrypted connections.
 
-The agent inside can be anything that makes HTTP(S) calls - a Python script
-using the OpenAI or Anthropic SDK, a Node MCP client, a shell one-liner. There
-is no required agent library; CLRK intercepts at the network and process
-boundary. See [`_examples/`](_examples) for runnable agents (`openai-bot`,
-`gemini-bot`, `cron-bot`, `jq-bot`, MITM variants, …).
+The agent inside can be anything that makes HTTP(S) calls - a Python script using the OpenAI or
+Anthropic SDK, a Node MCP client, a shell one-liner. There is no required agent library; CLRK
+intercepts at the network and process boundary. See [`_examples/`](_examples) for runnable agents
+(`openai-bot`, `gemini-bot`, `cron-bot`, `jq-bot`, MITM variants, ...).
 
 ## Motivation
 
@@ -74,8 +67,8 @@ and routing/governance policies (`EgressL4Route`, `MCPRoute`, `AIProviderRoute`,
 egress/credential/logging/rate-limit policies) are applied.
 
 **Telemetry storage and export.** Intercepted I/O becomes `Invocation` records
-backed by ClickHouse (columnar, via the `ch-go` driver) and is exported over
-OpenTelemetry.
+backed by ClickHouse (via the `ch-go` driver) and can be consumed using `/logs` and
+`/traces` subresources as well as re-exported over OpenTelemetry sink.
 
 **`TaskAgent` vs `DaemonAgent`**
 `TaskAgent` is for triggered, run-to-completion work (HTTP request or cron) multiplexed
