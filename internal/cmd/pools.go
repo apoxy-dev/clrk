@@ -3,15 +3,12 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-)
 
-var workerPoolGVR = schema.GroupVersionResource{Group: "clrk.apoxy.dev", Version: "v1alpha1", Resource: "workerpools"}
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+)
 
 // newPoolsCmd is `clrk pools` with `list` (default) and `get` subcommands.
 func newPoolsCmd() *cobra.Command {
@@ -36,20 +33,20 @@ func newPoolsListCmd() *cobra.Command {
 		Short:   "List WorkerPools",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, dyn, ns, err := kube.clients(namespace, allNamespaces)
+			cs, ns, err := kube.clrkClient(namespace, allNamespaces)
 			if err != nil {
 				return err
 			}
-			items, err := listResource(cmd.Context(), dyn, workerPoolGVR, ns, allNamespaces)
+			list, err := cs.ClrkV1alpha1().WorkerPools(ns).List(cmd.Context(), metav1.ListOptions{})
 			if err != nil {
 				return fmt.Errorf("listing WorkerPools: %w", err)
 			}
-			if len(items) == 0 {
+			sortByNamespaceName(list.Items)
+			if len(list.Items) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), namespaceMsg("No WorkerPools found", ns, allNamespaces))
 				return nil
 			}
-			printWorkerPoolTable(cmd.OutOrStdout(), items, allNamespaces)
-			return nil
+			return convertAndPrint(cmd.Context(), cmd.OutOrStdout(), list, allNamespaces)
 		},
 	}
 	addReadFlags(cmd, &namespace, &allNamespaces)
@@ -63,11 +60,11 @@ func newPoolsGetCmd() *cobra.Command {
 		Short: "Show details for a single WorkerPool",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, dyn, ns, err := kube.clients(namespace, false)
+			cs, ns, err := kube.clrkClient(namespace, false)
 			if err != nil {
 				return err
 			}
-			wp, err := dyn.Resource(workerPoolGVR).Namespace(ns).Get(cmd.Context(), args[0], metav1.GetOptions{})
+			wp, err := cs.ClrkV1alpha1().WorkerPools(ns).Get(cmd.Context(), args[0], metav1.GetOptions{})
 			if err != nil {
 				return fmt.Errorf("getting WorkerPool %s/%s: %w", ns, args[0], err)
 			}
@@ -78,52 +75,34 @@ func newPoolsGetCmd() *cobra.Command {
 	return cmd
 }
 
-func printWorkerPoolTable(out io.Writer, items []unstructured.Unstructured, allNS bool) {
-	tw := newTableWriter(out)
-	headers := []string{"NAME", "REPLICAS", "READY", "ACTIVE", "AGE"}
-	if allNS {
-		headers = append([]string{"NAMESPACE"}, headers...)
+func printWorkerPoolDetail(out io.Writer, wp *clrkv1alpha1.WorkerPool) error {
+	fmt.Fprintf(out, "Kind:         WorkerPool\n")
+	fmt.Fprintf(out, "Name:         %s\n", wp.Name)
+	fmt.Fprintf(out, "Namespace:    %s\n", wp.Namespace)
+	fmt.Fprintf(out, "Replicas:     %d desired / %d ready\n", workerPoolReplicas(wp), wp.Status.ReadyReplicas)
+	if wp.Spec.MaxExecutionsPerWorker != nil && *wp.Spec.MaxExecutionsPerWorker != 0 {
+		fmt.Fprintf(out, "Max/Worker:   %d\n", *wp.Spec.MaxExecutionsPerWorker)
 	}
-	fmt.Fprintln(tw, strings.Join(headers, "\t"))
-	for _, item := range items {
-		spec := nestedMap(item.Object, "spec")
-		status := nestedMap(item.Object, "status")
-		row := []string{
-			item.GetName(),
-			intStr(spec, "replicas"),
-			intStr(status, "readyReplicas"),
-			intStr(status, "activeExecutions"),
-			ageOf(item),
-		}
-		if allNS {
-			row = append([]string{item.GetNamespace()}, row...)
-		}
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
+	if wp.Spec.WarmPool != nil && *wp.Spec.WarmPool != 0 {
+		fmt.Fprintf(out, "WarmPool:     %d\n", *wp.Spec.WarmPool)
 	}
-	tw.Flush()
+	fmt.Fprintf(out, "Age:          %s\n", ageString(wp.CreationTimestamp))
+	fmt.Fprintln(out, "Status:")
+	fmt.Fprintf(out, "  ActiveExecutions:    %d\n", wp.Status.ActiveExecutions)
+	capacity := wp.Status.Capacity
+	if capacity.MaxExecutions != 0 || capacity.AvailableExecutions != 0 {
+		fmt.Fprintf(out, "  Capacity:            %d available / %d max\n",
+			capacity.AvailableExecutions, capacity.MaxExecutions)
+	}
+	printConditions(out, wp.Status.Conditions)
+	return nil
 }
 
-func printWorkerPoolDetail(out io.Writer, wp *unstructured.Unstructured) error {
-	spec := nestedMap(wp.Object, "spec")
-	status := nestedMap(wp.Object, "status")
-	capacity := nestedMap(status, "capacity")
-	fmt.Fprintf(out, "Kind:         WorkerPool\n")
-	fmt.Fprintf(out, "Name:         %s\n", wp.GetName())
-	fmt.Fprintf(out, "Namespace:    %s\n", wp.GetNamespace())
-	fmt.Fprintf(out, "Replicas:     %s desired / %s ready\n", intStr(spec, "replicas"), intStr(status, "readyReplicas"))
-	if v := intStr(spec, "maxExecutionsPerWorker"); v != "0" {
-		fmt.Fprintf(out, "Max/Worker:   %s\n", v)
+// workerPoolReplicas returns the desired replica count, treating an unset
+// (nil) value as 0 to match the historical column output.
+func workerPoolReplicas(wp *clrkv1alpha1.WorkerPool) int32 {
+	if wp.Spec.Replicas != nil {
+		return *wp.Spec.Replicas
 	}
-	if v := intStr(spec, "warmPool"); v != "0" {
-		fmt.Fprintf(out, "WarmPool:     %s\n", v)
-	}
-	fmt.Fprintf(out, "Age:          %s\n", ageOf(*wp))
-	fmt.Fprintln(out, "Status:")
-	fmt.Fprintf(out, "  ActiveExecutions:    %s\n", intStr(status, "activeExecutions"))
-	if len(capacity) > 0 {
-		fmt.Fprintf(out, "  Capacity:            %s available / %s max\n",
-			intStr(capacity, "availableExecutions"), intStr(capacity, "maxExecutions"))
-	}
-	printConditions(out, status)
-	return nil
+	return 0
 }

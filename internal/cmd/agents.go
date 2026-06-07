@@ -10,13 +10,21 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/duration"
-	"k8s.io/client-go/dynamic"
+
+	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	clrkclient "github.com/apoxy-dev/clrk/client/versioned"
 )
 
+// daemonAgentGVR/taskAgentGVR drive the parent-kind resolution and per-parent
+// subresource paths in the logs/traces/invocations/run-task commands, which use
+// the dynamic and raw REST clients (the typed clientset has no verb for a
+// list-subresource). The list/get commands here use the typed clientset.
 var (
 	daemonAgentGVR = schema.GroupVersionResource{Group: "clrk.apoxy.dev", Version: "v1alpha1", Resource: "daemonagents"}
 	taskAgentGVR   = schema.GroupVersionResource{Group: "clrk.apoxy.dev", Version: "v1alpha1", Resource: "taskagents"}
@@ -50,11 +58,11 @@ func newAgentsListCmd() *cobra.Command {
 		Short:   "List DaemonAgents and TaskAgents",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, dyn, ns, err := kube.clients(namespace, allNamespaces)
+			cs, ns, err := kube.clrkClient(namespace, allNamespaces)
 			if err != nil {
 				return err
 			}
-			return listAgents(cmd.Context(), cmd.OutOrStdout(), dyn, ns, allNamespaces)
+			return listAgents(cmd.Context(), cmd.OutOrStdout(), cs, ns, allNamespaces)
 		},
 	}
 	addReadFlags(cmd, &namespace, &allNamespaces)
@@ -68,47 +76,53 @@ func newAgentsGetCmd() *cobra.Command {
 		Short: "Show details for a single DaemonAgent or TaskAgent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, dyn, ns, err := kube.clients(namespace, false)
+			cs, ns, err := kube.clrkClient(namespace, false)
 			if err != nil {
 				return err
 			}
-			return getAgent(cmd.Context(), cmd.OutOrStdout(), dyn, ns, args[0])
+			return getAgent(cmd.Context(), cmd.OutOrStdout(), cs, ns, args[0])
 		},
 	}
 	addReadFlags(cmd, &namespace, nil)
 	return cmd
 }
 
-func listAgents(ctx context.Context, out io.Writer, dyn dynamic.Interface, ns string, allNS bool) error {
-	das, err := listResource(ctx, dyn, daemonAgentGVR, ns, allNS)
+func listAgents(ctx context.Context, out io.Writer, cs clrkclient.Interface, ns string, allNS bool) error {
+	daList, err := cs.ClrkV1alpha1().DaemonAgents(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing DaemonAgents: %w", err)
 	}
-	tas, err := listResource(ctx, dyn, taskAgentGVR, ns, allNS)
+	taList, err := cs.ClrkV1alpha1().TaskAgents(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing TaskAgents: %w", err)
 	}
-	if len(das) == 0 && len(tas) == 0 {
+	sortByNamespaceName(daList.Items)
+	sortByNamespaceName(taList.Items)
+	if len(daList.Items) == 0 && len(taList.Items) == 0 {
 		fmt.Fprintln(out, namespaceMsg("No agents found", ns, allNS))
 		return nil
 	}
-	if len(das) > 0 {
+	if len(daList.Items) > 0 {
 		fmt.Fprintln(out, "DAEMONAGENTS")
-		printDaemonAgentTable(out, das, allNS)
+		if err := convertAndPrint(ctx, out, daList, allNS); err != nil {
+			return err
+		}
 	}
-	if len(tas) > 0 {
-		if len(das) > 0 {
+	if len(taList.Items) > 0 {
+		if len(daList.Items) > 0 {
 			fmt.Fprintln(out)
 		}
 		fmt.Fprintln(out, "TASKAGENTS")
-		printTaskAgentTable(out, tas, allNS)
+		if err := convertAndPrint(ctx, out, taList, allNS); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func getAgent(ctx context.Context, out io.Writer, dyn dynamic.Interface, ns, name string) error {
-	da, daErr := dyn.Resource(daemonAgentGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-	ta, taErr := dyn.Resource(taskAgentGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+func getAgent(ctx context.Context, out io.Writer, cs clrkclient.Interface, ns, name string) error {
+	da, daErr := cs.ClrkV1alpha1().DaemonAgents(ns).Get(ctx, name, metav1.GetOptions{})
+	ta, taErr := cs.ClrkV1alpha1().TaskAgents(ns).Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case daErr == nil && taErr == nil:
 		return fmt.Errorf("name %q matches both a DaemonAgent and a TaskAgent in namespace %s; this should not happen", name, ns)
@@ -121,189 +135,140 @@ func getAgent(ctx context.Context, out io.Writer, dyn dynamic.Interface, ns, nam
 	}
 }
 
-func printDaemonAgentTable(out io.Writer, items []unstructured.Unstructured, allNS bool) {
-	tw := newTableWriter(out)
-	headers := []string{"NAME", "POOL", "LATEST READY", "PHASE", "RESTARTS", "AGE"}
-	if allNS {
-		headers = append([]string{"NAMESPACE"}, headers...)
-	}
-	fmt.Fprintln(tw, strings.Join(headers, "\t"))
-	for _, item := range items {
-		spec := nestedMap(item.Object, "spec")
-		status := nestedMap(item.Object, "status")
-		row := []string{
-			item.GetName(),
-			stringField(spec, "workerPoolRef"),
-			stringField(status, "latestReadyRevisionName"),
-			defaultDash(stringField(status, "phase")),
-			intStr(status, "restartCount"),
-			ageOf(item),
-		}
-		if allNS {
-			row = append([]string{item.GetNamespace()}, row...)
-		}
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
-	}
-	tw.Flush()
+// tableConverter is implemented by the typed list objects (via the API package's
+// resourcestrategy.TableConverter methods), so the renderer is generic over kind.
+type tableConverter interface {
+	ConvertToTable(ctx context.Context, tableOptions runtime.Object) (*metav1.Table, error)
 }
 
-func printTaskAgentTable(out io.Writer, items []unstructured.Unstructured, allNS bool) {
-	tw := newTableWriter(out)
-	headers := []string{"NAME", "POOL", "LATEST READY", "ACTIVE", "AGE"}
-	if allNS {
-		headers = append([]string{"NAMESPACE"}, headers...)
+// convertAndPrint asks the typed object for its server-defined columns (the same
+// metav1.Table `kubectl get` would render) and prints it.
+func convertAndPrint(ctx context.Context, out io.Writer, obj tableConverter, allNS bool) error {
+	table, err := obj.ConvertToTable(ctx, &metav1.TableOptions{})
+	if err != nil {
+		return err
 	}
-	fmt.Fprintln(tw, strings.Join(headers, "\t"))
-	for _, item := range items {
-		spec := nestedMap(item.Object, "spec")
-		status := nestedMap(item.Object, "status")
-		row := []string{
-			item.GetName(),
-			stringField(spec, "workerPoolRef"),
-			stringField(status, "latestReadyRevisionName"),
-			intStr(status, "activeExecutions"),
-			ageOf(item),
-		}
-		if allNS {
-			row = append([]string{item.GetNamespace()}, row...)
-		}
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
-	}
-	tw.Flush()
+	return printResourceTable(out, table, allNS)
 }
 
-func printDaemonAgentDetail(out io.Writer, da *unstructured.Unstructured) error {
-	spec := nestedMap(da.Object, "spec")
-	status := nestedMap(da.Object, "status")
-	template := nestedMap(spec, "template", "spec")
+// printResourceTable renders a metav1.Table via tabwriter. The column headers
+// and cells come from the API package's ConvertToTable, so the layout matches
+// `kubectl get`. The NAMESPACE column is the printer's job (it is absent from
+// the converter), prepended from each row's object metadata under -A.
+func printResourceTable(out io.Writer, table *metav1.Table, allNS bool) error {
+	tw := newTableWriter(out)
+	headers := make([]string, 0, len(table.ColumnDefinitions)+1)
+	if allNS {
+		headers = append(headers, "NAMESPACE")
+	}
+	for _, c := range table.ColumnDefinitions {
+		headers = append(headers, strings.ToUpper(c.Name))
+	}
+	fmt.Fprintln(tw, strings.Join(headers, "\t"))
+	for _, row := range table.Rows {
+		cells := make([]string, 0, len(row.Cells)+1)
+		if allNS {
+			ns := ""
+			if acc, err := meta.Accessor(row.Object.Object); err == nil {
+				ns = acc.GetNamespace()
+			}
+			cells = append(cells, ns)
+		}
+		for _, c := range row.Cells {
+			cells = append(cells, fmt.Sprintf("%v", c))
+		}
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	return tw.Flush()
+}
+
+func printDaemonAgentDetail(out io.Writer, da *clrkv1alpha1.DaemonAgent) error {
 	fmt.Fprintf(out, "Kind:         DaemonAgent\n")
-	fmt.Fprintf(out, "Name:         %s\n", da.GetName())
-	fmt.Fprintf(out, "Namespace:    %s\n", da.GetNamespace())
-	fmt.Fprintf(out, "Pool:         %s\n", stringField(spec, "workerPoolRef"))
-	fmt.Fprintf(out, "Image:        %s\n", stringField(template, "image"))
-	if rp := stringField(spec, "restartPolicy"); rp != "" {
-		fmt.Fprintf(out, "Restart:      %s\n", rp)
+	fmt.Fprintf(out, "Name:         %s\n", da.Name)
+	fmt.Fprintf(out, "Namespace:    %s\n", da.Namespace)
+	fmt.Fprintf(out, "Pool:         %s\n", da.Spec.WorkerPoolRef)
+	fmt.Fprintf(out, "Image:        %s\n", da.Spec.Template.Spec.Image)
+	if da.Spec.RestartPolicy != "" {
+		fmt.Fprintf(out, "Restart:      %s\n", string(da.Spec.RestartPolicy))
 	}
-	fmt.Fprintf(out, "Age:          %s\n", ageOf(*da))
+	fmt.Fprintf(out, "Age:          %s\n", ageString(da.CreationTimestamp))
 	fmt.Fprintln(out, "Status:")
-	fmt.Fprintf(out, "  Phase:                       %s\n", defaultDash(stringField(status, "phase")))
-	fmt.Fprintf(out, "  RestartCount:                %s\n", intStr(status, "restartCount"))
-	fmt.Fprintf(out, "  LatestCreatedRevisionName:   %s\n", stringField(status, "latestCreatedRevisionName"))
-	fmt.Fprintf(out, "  LatestReadyRevisionName:     %s\n", stringField(status, "latestReadyRevisionName"))
-	if up := stringField(status, "upSince"); up != "" {
-		fmt.Fprintf(out, "  UpSince:                     %s\n", up)
+	fmt.Fprintf(out, "  Phase:                       %s\n", defaultDash(string(da.Status.Phase)))
+	fmt.Fprintf(out, "  RestartCount:                %d\n", da.Status.RestartCount)
+	fmt.Fprintf(out, "  LatestCreatedRevisionName:   %s\n", da.Status.LatestCreatedRevisionName)
+	fmt.Fprintf(out, "  LatestReadyRevisionName:     %s\n", da.Status.LatestReadyRevisionName)
+	if da.Status.UpSince != nil {
+		// UTC to match the old path, which printed the raw JSON timestamp
+		// (Kubernetes serializes metav1.Time in UTC with a Z suffix); a bare
+		// Format renders in the host's local zone and would drift the output.
+		fmt.Fprintf(out, "  UpSince:                     %s\n", da.Status.UpSince.UTC().Format(time.RFC3339))
 	}
-	printEgressRefs(out, spec)
-	printConditions(out, status)
+	printEgressRefs(out, da.Spec.EgressRefs)
+	printConditions(out, da.Status.Conditions)
 	return nil
 }
 
-func printTaskAgentDetail(out io.Writer, ta *unstructured.Unstructured) error {
-	spec := nestedMap(ta.Object, "spec")
-	status := nestedMap(ta.Object, "status")
-	template := nestedMap(spec, "template", "spec")
+func printTaskAgentDetail(out io.Writer, ta *clrkv1alpha1.TaskAgent) error {
 	fmt.Fprintf(out, "Kind:         TaskAgent\n")
-	fmt.Fprintf(out, "Name:         %s\n", ta.GetName())
-	fmt.Fprintf(out, "Namespace:    %s\n", ta.GetNamespace())
-	fmt.Fprintf(out, "Pool:         %s\n", stringField(spec, "workerPoolRef"))
-	fmt.Fprintf(out, "Image:        %s\n", stringField(template, "image"))
-	if sched := stringField(spec, "schedule"); sched != "" {
-		fmt.Fprintf(out, "Schedule:     %s\n", sched)
+	fmt.Fprintf(out, "Name:         %s\n", ta.Name)
+	fmt.Fprintf(out, "Namespace:    %s\n", ta.Namespace)
+	fmt.Fprintf(out, "Pool:         %s\n", ta.Spec.WorkerPoolRef)
+	fmt.Fprintf(out, "Image:        %s\n", ta.Spec.Template.Spec.Image)
+	if ta.Spec.Schedule != nil && *ta.Spec.Schedule != "" {
+		fmt.Fprintf(out, "Schedule:     %s\n", *ta.Spec.Schedule)
 	}
-	fmt.Fprintf(out, "Age:          %s\n", ageOf(*ta))
+	fmt.Fprintf(out, "Age:          %s\n", ageString(ta.CreationTimestamp))
 	fmt.Fprintln(out, "Status:")
-	fmt.Fprintf(out, "  ActiveExecutions:            %s\n", intStr(status, "activeExecutions"))
-	fmt.Fprintf(out, "  LatestCreatedRevisionName:   %s\n", stringField(status, "latestCreatedRevisionName"))
-	fmt.Fprintf(out, "  LatestReadyRevisionName:     %s\n", stringField(status, "latestReadyRevisionName"))
-	printEgressRefs(out, spec)
-	printConditions(out, status)
+	fmt.Fprintf(out, "  ActiveExecutions:            %d\n", ta.Status.ActiveExecutions)
+	fmt.Fprintf(out, "  LatestCreatedRevisionName:   %s\n", ta.Status.LatestCreatedRevisionName)
+	fmt.Fprintf(out, "  LatestReadyRevisionName:     %s\n", ta.Status.LatestReadyRevisionName)
+	printEgressRefs(out, ta.Spec.EgressRefs)
+	printConditions(out, ta.Status.Conditions)
 	return nil
 }
 
-func printEgressRefs(out io.Writer, spec map[string]interface{}) {
-	refs, _, _ := unstructured.NestedSlice(spec, "egressRefs")
+func printEgressRefs(out io.Writer, refs []clrkv1alpha1.AgentEgressRef) {
 	if len(refs) == 0 {
 		return
 	}
 	fmt.Fprintln(out, "EgressRefs:")
-	for _, raw := range refs {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		fmt.Fprintf(out, "  - %s\n", stringField(m, "gatewayRef"))
+	for _, r := range refs {
+		fmt.Fprintf(out, "  - %s\n", r.GatewayRef)
 	}
 }
 
-func printConditions(out io.Writer, status map[string]interface{}) {
-	conds, _, _ := unstructured.NestedSlice(status, "conditions")
+func printConditions(out io.Writer, conds []metav1.Condition) {
 	if len(conds) == 0 {
 		return
 	}
 	fmt.Fprintln(out, "Conditions:")
 	tw := newTableWriter(out)
 	fmt.Fprintln(tw, "  TYPE\tSTATUS\tREASON\tMESSAGE")
-	for _, raw := range conds {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-			stringField(m, "type"),
-			stringField(m, "status"),
-			stringField(m, "reason"),
-			stringField(m, "message"),
-		)
+	for _, c := range conds {
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", c.Type, string(c.Status), c.Reason, c.Message)
 	}
 	tw.Flush()
 }
 
-func listResource(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, ns string, allNS bool) ([]unstructured.Unstructured, error) {
-	var (
-		list *unstructured.UnstructuredList
-		err  error
-	)
-	if allNS {
-		list, err = dyn.Resource(gvr).List(ctx, metav1.ListOptions{})
-	} else {
-		list, err = dyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
-	}
-	if err != nil {
-		return nil, err
-	}
-	items := list.Items
+// sortByNamespaceName orders typed list items by (namespace, name) for stable
+// output, matching the order the dynamic-client list path used to produce. The
+// pointer constraint lets it read the promoted ObjectMeta accessors off value
+// elements.
+func sortByNamespaceName[T any, PT interface {
+	*T
+	metav1.Object
+}](items []T) {
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].GetNamespace() != items[j].GetNamespace() {
-			return items[i].GetNamespace() < items[j].GetNamespace()
+		a, b := PT(&items[i]), PT(&items[j])
+		if a.GetNamespace() != b.GetNamespace() {
+			return a.GetNamespace() < b.GetNamespace()
 		}
-		return items[i].GetName() < items[j].GetName()
+		return a.GetName() < b.GetName()
 	})
-	return items, nil
 }
 
 func newTableWriter(out io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-}
-
-func nestedMap(obj map[string]interface{}, fields ...string) map[string]interface{} {
-	m, _, _ := unstructured.NestedMap(obj, fields...)
-	if m == nil {
-		return map[string]interface{}{}
-	}
-	return m
-}
-
-func stringField(m map[string]interface{}, key string) string {
-	v, _, _ := unstructured.NestedString(m, key)
-	return v
-}
-
-func intStr(m map[string]interface{}, key string) string {
-	v, ok, _ := unstructured.NestedInt64(m, key)
-	if !ok {
-		return "0"
-	}
-	return fmt.Sprintf("%d", v)
 }
 
 func defaultDash(s string) string {
@@ -313,12 +278,19 @@ func defaultDash(s string) string {
 	return s
 }
 
-func ageOf(item unstructured.Unstructured) string {
-	ct := item.GetCreationTimestamp()
-	if ct.IsZero() {
+// ageString renders an object's age (human duration since creation) for the
+// detail views; the table column comes from the API package's ConvertToTable.
+func ageString(t metav1.Time) string {
+	if t.IsZero() {
 		return "<unknown>"
 	}
-	return duration.HumanDuration(time.Since(ct.Time))
+	return duration.HumanDuration(time.Since(t.Time))
+}
+
+// ageOf is the unstructured-input age helper still used by the REST-backed
+// invocations command, which reads the per-parent subresource as unstructured.
+func ageOf(item unstructured.Unstructured) string {
+	return ageString(item.GetCreationTimestamp())
 }
 
 func namespaceMsg(prefix, ns string, allNS bool) string {

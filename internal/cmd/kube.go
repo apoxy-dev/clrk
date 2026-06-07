@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	clrkclient "github.com/apoxy-dev/clrk/client/versioned"
 	"github.com/apoxy-dev/clrk/internal/install"
 )
 
@@ -150,6 +151,33 @@ func (f kubeFlags) clients(explicitNS string, allNamespaces bool) (*rest.Config,
 		return nil, nil, "", err
 	}
 	return cfg, dyn, ns, nil
+}
+
+// clrkClient resolves the global flags into the generated typed clrk clientset
+// plus the namespace to operate in: explicit -n, else the context default; an
+// empty namespace under allNamespaces (a cluster-wide list, like `clients`).
+// The read commands (`clrk agents`, `clrk pools`) use this so they work against
+// typed clrk objects rather than the dynamic client — apply, secrets, and the
+// install/upgrade RemoteCluster stay dynamic, and the per-parent subresource
+// reads (logs/traces/invocations/run-task) stay on the raw REST client because
+// the typed clientset has no verb for them.
+func (f kubeFlags) clrkClient(explicitNS string, allNamespaces bool) (clrkclient.Interface, string, error) {
+	cfg, cc, err := f.liveConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	cs, err := clrkclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("clrk client: %w", err)
+	}
+	if allNamespaces {
+		return cs, "", nil
+	}
+	ns, err := namespaceOrContext(cc, explicitNS)
+	if err != nil {
+		return nil, "", err
+	}
+	return cs, ns, nil
 }
 
 // remoteCluster bridges the global flags to the installer's cluster handle for

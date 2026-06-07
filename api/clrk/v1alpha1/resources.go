@@ -38,6 +38,8 @@ var (
 	_ resourcestrategy.Defaulter           = &TaskAgent{}
 	_ resourcestrategy.Validater           = &TaskAgent{}
 	_ resourcestrategy.ValidateUpdater     = &TaskAgent{}
+	_ resourcestrategy.TableConverter      = &TaskAgent{}
+	_ resourcestrategy.TableConverter      = &TaskAgentList{}
 
 	_ runtime.Object                       = &DaemonAgent{}
 	_ resource.Object                      = &DaemonAgent{}
@@ -47,6 +49,8 @@ var (
 	_ resourcestrategy.Defaulter           = &DaemonAgent{}
 	_ resourcestrategy.Validater           = &DaemonAgent{}
 	_ resourcestrategy.ValidateUpdater     = &DaemonAgent{}
+	_ resourcestrategy.TableConverter      = &DaemonAgent{}
+	_ resourcestrategy.TableConverter      = &DaemonAgentList{}
 
 	_ runtime.Object                       = &WorkerPool{}
 	_ resource.Object                      = &WorkerPool{}
@@ -56,6 +60,8 @@ var (
 	_ resourcestrategy.Defaulter           = &WorkerPool{}
 	_ resourcestrategy.Validater           = &WorkerPool{}
 	_ resourcestrategy.ValidateUpdater     = &WorkerPool{}
+	_ resourcestrategy.TableConverter      = &WorkerPool{}
+	_ resourcestrategy.TableConverter      = &WorkerPoolList{}
 
 	_ runtime.Object                       = &AgentSandboxRevision{}
 	_ resource.Object                      = &AgentSandboxRevision{}
