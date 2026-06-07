@@ -25,9 +25,9 @@ import (
 type secretSpec struct {
 	Name      string
 	Namespace string
-	Key       string  // data key inside the Secret
-	Value     []byte  // resolved bytes (base64-encoded into data[key])
-	EnvVar    string  // for diagnostics; empty when --from-literal/--from-file
+	Key       string // data key inside the Secret
+	Value     []byte // resolved bytes (base64-encoded into data[key])
+	EnvVar    string // for diagnostics; empty when --from-literal/--from-file
 }
 
 // parseDevSecretFlag accepts the `clrk dev --secret name=ENVVAR[:key]`
@@ -72,13 +72,13 @@ func parseDevSecretFlag(raw string) (secretSpec, error) {
 // into one Secret with multiple data keys. The field manager is
 // `clrk-dev` (matches applyManifests) so a later --apply pass with the
 // same field manager doesn't fight us for ownership of the data block.
-func applySecretSpecs(ctx context.Context, kubeconfig string, specs []secretSpec, defaultNamespace string) error {
+func applySecretSpecs(ctx context.Context, cc clientcmd.ClientConfig, specs []secretSpec, defaultNamespace string) error {
 	if len(specs) == 0 {
 		return nil
 	}
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	cfg, err := restFromClientConfig(cc)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig %s: %w", kubeconfig, err)
+		return err
 	}
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {

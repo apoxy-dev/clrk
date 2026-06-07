@@ -30,6 +30,10 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error).")
 	RootCmd.PersistentFlags().StringVar(&clrkDir, "clrk-dir", defaultClrkDir(), "State directory for clrk.")
 
+	// Cluster-targeting flags are global so every command resolves a cluster the
+	// same kubectl-compatible way. The flags and all resolution live in kube.go.
+	registerKubeFlags(RootCmd)
+
 	RootCmd.AddCommand(newDevCmd())
 	RootCmd.AddCommand(newInstallCmd())
 	RootCmd.AddCommand(newUpgradeCmd())
@@ -37,7 +41,6 @@ func init() {
 	RootCmd.AddCommand(newSecretCmd())
 	RootCmd.AddCommand(newAgentsCmd())
 	RootCmd.AddCommand(newPoolsCmd())
-	RootCmd.AddCommand(newConfigCmd())
 }
 
 func defaultClrkDir() string {

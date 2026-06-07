@@ -18,22 +18,22 @@ import (
 )
 
 // applyManifests server-side-applies every YAML/JSON document found under
-// paths against the cluster pointed at by kubeconfig. Defaults the
+// paths against the cluster the ClientConfig resolves. Defaults the
 // namespace on namespaced resources from the kubeconfig context (or
 // "default") so manifests that omit metadata.namespace work the same way
 // `kubectl apply` handles them. Used by `clrk dev --apply` and
-// `clrk apply --local`.
-func applyManifests(ctx context.Context, kubeconfig string, paths []string, recursive bool) error {
+// `clrk apply`.
+func applyManifests(ctx context.Context, cc clientcmd.ClientConfig, paths []string, recursive bool) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		return fmt.Errorf("loading kubeconfig %s: %w", kubeconfig, err)
-	}
-	defaultNS, err := contextNamespace(kubeconfig)
+	cfg, err := restFromClientConfig(cc)
 	if err != nil {
 		return err
+	}
+	defaultNS, _, err := cc.Namespace()
+	if err != nil {
+		return fmt.Errorf("resolving namespace: %w", err)
 	}
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
@@ -73,20 +73,6 @@ func applyManifests(ctx context.Context, kubeconfig string, paths []string, recu
 		return fmt.Errorf("apply: %d/%d documents failed", failed, applied+failed)
 	}
 	return nil
-}
-
-// contextNamespace returns the kubeconfig's current-context namespace,
-// falling back to "default" — the same defaulting kubectl applies when
-// neither -n nor a context namespace is set.
-func contextNamespace(kubeconfig string) (string, error) {
-	raw, err := clientcmd.LoadFromFile(kubeconfig)
-	if err != nil {
-		return "", fmt.Errorf("loading kubeconfig %s: %w", kubeconfig, err)
-	}
-	if ctx, ok := raw.Contexts[raw.CurrentContext]; ok && ctx.Namespace != "" {
-		return ctx.Namespace, nil
-	}
-	return "default", nil
 }
 
 // defaultNamespace patches doc to set metadata.namespace = ns when the

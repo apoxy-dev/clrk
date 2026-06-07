@@ -15,7 +15,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/ports"
@@ -47,8 +46,6 @@ func (e *exitCodeError) ExitCode() int { return e.code }
 func newAgentsRunTaskCmd() *cobra.Command {
 	var (
 		namespace   string
-		local       bool
-		kubeconfig  string
 		input       string
 		request     string
 		headers     []string
@@ -67,19 +64,9 @@ func newAgentsRunTaskCmd() *cobra.Command {
 			if input != "" && request != "" {
 				return fmt.Errorf("--input and --request are mutually exclusive")
 			}
-			kc, err := resolveKubeconfig(kubeconfig, local)
+			cfg, ns, err := kube.restConfig(namespace)
 			if err != nil {
 				return err
-			}
-			cfg, err := clientcmd.BuildConfigFromFlags("", kc)
-			if err != nil {
-				return fmt.Errorf("loading kubeconfig %s: %w", kc, err)
-			}
-			ns := namespace
-			if ns == "" {
-				if ns, err = contextNamespace(kc); err != nil {
-					return err
-				}
 			}
 			return runTask(cmd.Context(), cmd.OutOrStdout(), cfg, ns, args[0], runTaskOpts{
 				input:       input,
@@ -102,8 +89,6 @@ func newAgentsRunTaskCmd() *cobra.Command {
 	cmd.Flags().StringVar(&contentType, "content-type", "application/json", "Content-Type for the --input body.")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second, "Deadline for the run to reach a terminal phase.")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	return cmd
 }
 

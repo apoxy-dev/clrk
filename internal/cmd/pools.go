@@ -29,8 +29,6 @@ func newPoolsListCmd() *cobra.Command {
 	var (
 		namespace     string
 		allNamespaces bool
-		local         bool
-		kubeconfig    string
 	)
 	cmd := &cobra.Command{
 		Use:     "list",
@@ -38,7 +36,7 @@ func newPoolsListCmd() *cobra.Command {
 		Short:   "List WorkerPools",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dyn, ns, err := agentsClient(kubeconfig, local, namespace, allNamespaces)
+			_, dyn, ns, err := kube.clients(namespace, allNamespaces)
 			if err != nil {
 				return err
 			}
@@ -54,22 +52,18 @@ func newPoolsListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	addReadFlags(cmd, &namespace, &allNamespaces, &local, &kubeconfig)
+	addReadFlags(cmd, &namespace, &allNamespaces)
 	return cmd
 }
 
 func newPoolsGetCmd() *cobra.Command {
-	var (
-		namespace  string
-		local      bool
-		kubeconfig string
-	)
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "get NAME",
 		Short: "Show details for a single WorkerPool",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dyn, ns, err := agentsClient(kubeconfig, local, namespace, false)
+			_, dyn, ns, err := kube.clients(namespace, false)
 			if err != nil {
 				return err
 			}
@@ -80,7 +74,7 @@ func newPoolsGetCmd() *cobra.Command {
 			return printWorkerPoolDetail(cmd.OutOrStdout(), wp)
 		},
 	}
-	addReadFlags(cmd, &namespace, nil, &local, &kubeconfig)
+	addReadFlags(cmd, &namespace, nil)
 	return cmd
 }
 

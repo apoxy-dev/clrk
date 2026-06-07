@@ -26,8 +26,6 @@ import (
 )
 
 type installOpts struct {
-	kubeconfig      string
-	context         string
 	namespace       string
 	workerNamespace string
 	controllerImage string
@@ -74,8 +72,6 @@ func newInstallCmd() *cobra.Command {
 // upgrade` onto cmd.
 func registerInstallFlags(cmd *cobra.Command, o *installOpts) {
 	f := cmd.Flags()
-	f.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to the kubeconfig (defaults to $KUBECONFIG, then ~/.kube/config).")
-	f.StringVar(&o.context, "context", "", "Kubeconfig context to target (defaults to the current-context).")
 	f.StringVar(&o.namespace, "namespace", install.DefaultNamespace, "Namespace for the control plane.")
 	f.StringVar(&o.workerNamespace, "worker-namespace", "", "Namespace for worker pods (defaults to --namespace).")
 	f.StringVar(&o.controllerImage, "controller-image", drivers.DefaultControllerManagerImage, "Controller-manager image ref.")
@@ -164,7 +160,10 @@ func runInstall(ctx context.Context, o *installOpts) error {
 // controller-runtime client, and the resolved serving-TLS mode. Shared by
 // install and upgrade.
 func resolveTarget(ctx context.Context, o *installOpts) (*install.RemoteCluster, client.Client, install.TLSMode, error) {
-	rc, err := install.NewRemoteCluster(o.kubeconfig, o.context)
+	// install/upgrade target your standard kubeconfig via the shared global flags
+	// (--kubeconfig/--context), or the running `clrk dev` session via --local. The
+	// flags->cluster bridge lives in kube.go; they consult no clrk-side context store.
+	rc, err := kube.remoteCluster()
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -352,6 +351,13 @@ func applyControlPlane(ctx context.Context, a controlPlaneApply) error {
 		if err := install.RunSteps(ctx, orch.Steps(), plainStepLogger); err != nil {
 			return err
 		}
+	}
+
+	// clrk writes no kubeconfig state: it targets your standard kubeconfig like
+	// kubectl. Tell the operator how to reach this cluster + namespace, mirroring
+	// the exact targeting flags they used (see kube.targetingHint).
+	for _, line := range kube.targetingHint(p.Namespace, a.rc.Context()) {
+		fmt.Fprintf(os.Stderr, "%s\n", mutedSt.Render(line))
 	}
 
 	fmt.Fprintf(os.Stderr, "\n%s %s\n", passStyle.Render("OK"), a.okMessage)

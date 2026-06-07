@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 // newAgentsInvocationsCmd is `clrk agents invocations <name>` — lists the
@@ -19,37 +18,21 @@ import (
 // server-side against the ClickHouse-backed read model rather than by
 // fetching every invocation in the namespace and filtering client-side.
 func newAgentsInvocationsCmd() *cobra.Command {
-	var (
-		namespace  string
-		local      bool
-		kubeconfig string
-	)
+	var namespace string
 	cmd := &cobra.Command{
 		Use:     "invocations NAME",
 		Short:   "List Invocation lifecycle records for a TaskAgent",
 		Aliases: []string{"invs", "inv"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			kc, err := resolveKubeconfig(kubeconfig, local)
+			cfg, ns, err := kube.restConfig(namespace)
 			if err != nil {
 				return err
-			}
-			cfg, err := clientcmd.BuildConfigFromFlags("", kc)
-			if err != nil {
-				return fmt.Errorf("loading kubeconfig %s: %w", kc, err)
-			}
-			ns := namespace
-			if ns == "" {
-				if ns, err = contextNamespace(kc); err != nil {
-					return err
-				}
 			}
 			return listInvocations(cmd.Context(), cmd.OutOrStdout(), cfg, ns, args[0])
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	return cmd
 }
 

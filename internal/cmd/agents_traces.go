@@ -22,7 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -59,8 +58,6 @@ import (
 func newAgentsTracesCmd() *cobra.Command {
 	var (
 		namespace  string
-		local      bool
-		kubeconfig string
 		follow     bool
 		tailSpans  int
 		components []string
@@ -75,23 +72,9 @@ func newAgentsTracesCmd() *cobra.Command {
 			if color != "auto" && color != "always" && color != "never" {
 				return fmt.Errorf("--color must be auto, always, or never, got %q", color)
 			}
-			kc, err := resolveKubeconfig(kubeconfig, local)
+			cfg, dyn, ns, err := kube.clients(namespace, false)
 			if err != nil {
 				return err
-			}
-			cfg, err := clientcmd.BuildConfigFromFlags("", kc)
-			if err != nil {
-				return fmt.Errorf("loading kubeconfig %s: %w", kc, err)
-			}
-			dyn, err := dynamic.NewForConfig(cfg)
-			if err != nil {
-				return fmt.Errorf("dynamic client: %w", err)
-			}
-			ns := namespace
-			if ns == "" {
-				if ns, err = contextNamespace(kc); err != nil {
-					return err
-				}
 			}
 			src, err := resolveTraceSource(cmd.Context(), dyn, cfg, ns, args[0], components)
 			if err != nil {
@@ -109,8 +92,6 @@ func newAgentsTracesCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow the trace stream (default false).")
 	cmd.Flags().IntVar(&tailSpans, "tail", 0, "Number of most recent spans to fetch (0 = server default, max 1000).")
 	cmd.Flags().StringSliceVar(&components, "component", nil, "Restrict to one or more components, e.g. egress-extproc,worker (default: all).")

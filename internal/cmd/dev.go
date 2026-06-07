@@ -468,12 +468,11 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 	}
 	slog.Info("Cluster API is ready", "kubeconfig", state.cluster.KubeconfigPath())
 
-	// Promote the dev cluster to the current context so subsequent
-	// `clrk apply` / `clrk agents` invocations from any shell target
-	// the live dev cluster without --local. Best-effort.
-	if err := writeDevContext(state.cluster.HostKubeconfigPath()); err != nil {
-		slog.Warn("Failed to register dev context in ~/.clrk/config", "err", err)
-	}
+	// The dev cluster's kubeconfig lives under --clrk-dir, not in your standard
+	// kubeconfig; reach it with --local (e.g. `clrk agents list --local`,
+	// `clrk apply --local -f ...`). clrk writes no context state.
+	slog.Info("Dev cluster ready; target it with --local (e.g. `clrk agents list --local`)",
+		"kubeconfig", state.cluster.HostKubeconfigPath())
 
 	if err := state.cluster.EnsureNamespace(ctx, devClrkNamespace); err != nil {
 		return state, fmt.Errorf("ensuring %q namespace: %w", devClrkNamespace, err)
@@ -522,13 +521,14 @@ func bringUp(ctx context.Context, o *devOpts, prog *devtui.Program) (*devState, 
 		setStatus(prog, workerComponent(i), devtui.StatusReady)
 	}
 
+	devCC := clientConfigForPath(state.cluster.HostKubeconfigPath())
 	if len(o.parsedSecrets) > 0 {
-		if err := applySecretSpecs(ctx, state.cluster.HostKubeconfigPath(), o.parsedSecrets, "default"); err != nil {
+		if err := applySecretSpecs(ctx, devCC, o.parsedSecrets, "default"); err != nil {
 			return state, fmt.Errorf("applying --secret: %w", err)
 		}
 	}
 	if len(o.applyPaths) > 0 {
-		if err := applyManifests(ctx, state.cluster.HostKubeconfigPath(), o.applyPaths, o.applyRecursive); err != nil {
+		if err := applyManifests(ctx, devCC, o.applyPaths, o.applyRecursive); err != nil {
 			return state, fmt.Errorf("applying manifests: %w", err)
 		}
 	}

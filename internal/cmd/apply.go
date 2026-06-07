@@ -2,32 +2,28 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
 
 // newApplyCmd is `clrk apply -f <path>`. A thin wrapper over the same
-// applyManifests engine `clrk dev --apply` uses, with `--local` resolving
-// the kubeconfig of the running `clrk dev` session automatically so users
-// don't have to remember `KUBECONFIG=~/.clrk/kubeconfig.host`.
+// applyManifests engine `clrk dev --apply` uses. Cluster targeting comes from
+// the global --kubeconfig/--context/--local flags (see kube.go).
 func newApplyCmd() *cobra.Command {
 	var (
-		files      []string
-		recursive  bool
-		local      bool
-		kubeconfig string
+		files     []string
+		recursive bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Server-side-apply CRDs against a clrk apiserver",
 		Long: "Reads YAML/JSON manifests and server-side-applies each document " +
-			"against the cluster. Use --local to target the kubeconfig of the " +
-			"running `clrk dev` session under --clrk-dir.",
+			"against the cluster. Targets your standard kubeconfig ($KUBECONFIG, " +
+			"then ~/.kube/config); use --context to pick a context, --kubeconfig for " +
+			"an explicit file, or --local to target the running `clrk dev` session.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			kc, err := resolveKubeconfig(kubeconfig, local)
+			cc, err := kube.clientConfig()
 			if err != nil {
 				return err
 			}
@@ -36,47 +32,11 @@ func newApplyCmd() *cobra.Command {
 			if len(paths) == 0 {
 				return fmt.Errorf("no manifests: pass paths positionally or with -f")
 			}
-			return applyManifests(cmd.Context(), kc, paths, recursive)
+			return applyManifests(cmd.Context(), cc, paths, recursive)
 		},
 	}
 
 	cmd.Flags().StringArrayVarP(&files, "filename", "f", nil, "YAML/JSON file or directory to apply (repeatable; positional args also accepted).")
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories.")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host by default).")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 	return cmd
-}
-
-// resolveKubeconfig picks a kubeconfig in this order: explicit
-// --kubeconfig, --local (clrk dev's host kubeconfig under --clrk-dir),
-// $KUBECONFIG, then the current context's kubeconfig from
-// ~/.clrk/config. The config fall-through is what makes plain
-// `clrk apply` / `clrk agents` work after `clrk dev` has set the
-// `dev` context current.
-func resolveKubeconfig(explicit string, local bool) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	if local {
-		path := filepath.Join(clrkDir, "kubeconfig.host")
-		if _, err := os.Stat(path); err != nil {
-			return "", fmt.Errorf("--local kubeconfig %s not found (is `clrk dev` running?): %w", path, err)
-		}
-		return path, nil
-	}
-	if env := os.Getenv("KUBECONFIG"); env != "" {
-		return env, nil
-	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return "", err
-	}
-	kc, err := cfg.currentKubeconfig()
-	if err != nil {
-		return "", err
-	}
-	if kc != "" {
-		return kc, nil
-	}
-	return "", fmt.Errorf("no kubeconfig: pass --kubeconfig, set KUBECONFIG, run `clrk config set-context`, or use --local")
 }

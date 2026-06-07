@@ -28,8 +28,6 @@ func newSecretSetCmd() *cobra.Command {
 		fromLiteral []string
 		fromFile    []string
 		namespace   string
-		local       bool
-		kubeconfig  string
 	)
 
 	cmd := &cobra.Command{
@@ -37,9 +35,10 @@ func newSecretSetCmd() *cobra.Command {
 		Short: "Apply an Opaque Secret with one or more keys",
 		Long: "Server-side-applies an Opaque Secret with the supplied data " +
 			"keys. Sources are repeatable and merge into the same Secret " +
-			"with field manager `clrk-dev`. --local targets ~/.clrk/" +
-			"kubeconfig.host (the running clrk dev session); otherwise " +
-			"resolution falls back to --kubeconfig and $KUBECONFIG.",
+			"with field manager `clrk-dev`. The cluster is resolved the same " +
+			"way as `clrk apply`: --kubeconfig/--context, then --local (the " +
+			"running clrk dev session), else the standard kubeconfig " +
+			"($KUBECONFIG, then ~/.kube/config).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := strings.TrimSpace(args[0])
@@ -53,24 +52,24 @@ func newSecretSetCmd() *cobra.Command {
 			if len(specs) == 0 {
 				return fmt.Errorf("no sources: pass at least one --from-env, --from-literal, or --from-file")
 			}
-			kc, err := resolveKubeconfig(kubeconfig, local)
+			cc, err := kube.clientConfig()
 			if err != nil {
 				return err
 			}
-			ns := namespace
-			if ns == "" {
-				ns = "default"
+			// Default the namespace to the kubeconfig context's (or "default")
+			// through the same resolver every other clrk command uses.
+			ns, err := namespaceOrContext(cc, namespace)
+			if err != nil {
+				return err
 			}
-			return applySecretSpecs(cmd.Context(), kc, specs, ns)
+			return applySecretSpecs(cmd.Context(), cc, specs, ns)
 		},
 	}
 
 	cmd.Flags().StringArrayVar(&fromEnv, "from-env", nil, "key=ENVVAR — read the value of the named environment variable into the Secret under data[key]. Repeatable.")
 	cmd.Flags().StringArrayVar(&fromLiteral, "from-literal", nil, "key=VALUE — verbatim string into data[key]. Repeatable.")
 	cmd.Flags().StringArrayVar(&fromFile, "from-file", nil, "key=PATH — file contents into data[key]. Repeatable.")
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: \"default\").")
-	cmd.Flags().BoolVar(&local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
 	return cmd
 }
 
@@ -148,4 +147,3 @@ func splitKVFlag(flag, raw string) (string, string, error) {
 	}
 	return key, val, nil
 }
-

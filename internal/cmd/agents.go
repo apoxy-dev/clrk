@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -44,8 +43,6 @@ func newAgentsListCmd() *cobra.Command {
 	var (
 		namespace     string
 		allNamespaces bool
-		local         bool
-		kubeconfig    string
 	)
 	cmd := &cobra.Command{
 		Use:     "list",
@@ -53,36 +50,32 @@ func newAgentsListCmd() *cobra.Command {
 		Short:   "List DaemonAgents and TaskAgents",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dyn, ns, err := agentsClient(kubeconfig, local, namespace, allNamespaces)
+			_, dyn, ns, err := kube.clients(namespace, allNamespaces)
 			if err != nil {
 				return err
 			}
 			return listAgents(cmd.Context(), cmd.OutOrStdout(), dyn, ns, allNamespaces)
 		},
 	}
-	addReadFlags(cmd, &namespace, &allNamespaces, &local, &kubeconfig)
+	addReadFlags(cmd, &namespace, &allNamespaces)
 	return cmd
 }
 
 func newAgentsGetCmd() *cobra.Command {
-	var (
-		namespace  string
-		local      bool
-		kubeconfig string
-	)
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "get NAME",
 		Short: "Show details for a single DaemonAgent or TaskAgent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dyn, ns, err := agentsClient(kubeconfig, local, namespace, false)
+			_, dyn, ns, err := kube.clients(namespace, false)
 			if err != nil {
 				return err
 			}
 			return getAgent(cmd.Context(), cmd.OutOrStdout(), dyn, ns, args[0])
 		},
 	}
-	addReadFlags(cmd, &namespace, nil, &local, &kubeconfig)
+	addReadFlags(cmd, &namespace, nil)
 	return cmd
 }
 
@@ -265,32 +258,6 @@ func printConditions(out io.Writer, status map[string]interface{}) {
 	tw.Flush()
 }
 
-func agentsClient(kubeconfig string, local bool, namespace string, allNamespaces bool) (dynamic.Interface, string, error) {
-	kc, err := resolveKubeconfig(kubeconfig, local)
-	if err != nil {
-		return nil, "", err
-	}
-	cfg, err := clientcmd.BuildConfigFromFlags("", kc)
-	if err != nil {
-		return nil, "", fmt.Errorf("loading kubeconfig %s: %w", kc, err)
-	}
-	dyn, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return nil, "", fmt.Errorf("dynamic client: %w", err)
-	}
-	if allNamespaces {
-		return dyn, "", nil
-	}
-	if namespace != "" {
-		return dyn, namespace, nil
-	}
-	ns, err := contextNamespace(kc)
-	if err != nil {
-		return nil, "", err
-	}
-	return dyn, ns, nil
-}
-
 func listResource(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, ns string, allNS bool) ([]unstructured.Unstructured, error) {
 	var (
 		list *unstructured.UnstructuredList
@@ -361,11 +328,9 @@ func namespaceMsg(prefix, ns string, allNS bool) string {
 	return fmt.Sprintf("%s in namespace %q.", prefix, ns)
 }
 
-func addReadFlags(cmd *cobra.Command, namespace *string, allNamespaces *bool, local *bool, kubeconfig *string) {
+func addReadFlags(cmd *cobra.Command, namespace *string, allNamespaces *bool) {
 	cmd.Flags().StringVarP(namespace, "namespace", "n", "", "Target namespace (default: kubeconfig context).")
 	if allNamespaces != nil {
 		cmd.Flags().BoolVarP(allNamespaces, "all-namespaces", "A", false, "List across all namespaces.")
 	}
-	cmd.Flags().BoolVar(local, "local", false, "Target the kubeconfig of the running 'clrk dev' session (~/.clrk/kubeconfig.host).")
-	cmd.Flags().StringVar(kubeconfig, "kubeconfig", "", "Explicit kubeconfig path (takes precedence over --local and $KUBECONFIG).")
 }
