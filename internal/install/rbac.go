@@ -39,24 +39,34 @@ func controllerManagerRBAC(p Profile) []rbacObject {
 			rule([]string{"gateway.networking.k8s.io"}, []string{"*"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			rule([]string{"gateway.envoyproxy.io"}, []string{"*"}, "get", "list", "watch", "create", "update", "patch", "delete"),
 			// Core objects the reconcilers + EG manage.
-			rule([]string{""}, []string{"secrets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
-			rule([]string{""}, []string{"services"}, "get", "list", "watch", "create", "update", "patch", "delete"),
-			rule([]string{""}, []string{"configmaps"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			// EG's infra manager reconciles its proxy data plane with a
+			// deletecollection-then-create pass, so every kind it provisions
+			// (secrets, services, configmaps, serviceaccounts, the workloads below)
+			// needs deletecollection, not just delete -- otherwise the reconcile
+			// aborts and the Gateway never gets an address (Programmed stays False).
+			rule([]string{""}, []string{"secrets"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
+			rule([]string{""}, []string{"services"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
+			rule([]string{""}, []string{"configmaps"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
 			// EG provisions a per-proxy ServiceAccount via server-side apply, so the
 			// cm (which supervises the EG control plane under this SA) must create/
-			// update them, not just read.
-			rule([]string{""}, []string{"serviceaccounts"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			// update them, not just read. deletecollection is required too: EG tears
+			// down rate-limit infra ServiceAccounts with a collection delete.
+			rule([]string{""}, []string{"serviceaccounts"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
 			rule([]string{""}, []string{"pods"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"endpoints"}, "get", "list", "watch"),
+			// EG's gateway-api provider watches Nodes; without this the informer
+			// cache never syncs and the controller stays "Waiting for controller",
+			// so no Gateway is ever Programmed (no per-TA ingress data plane).
+			rule([]string{""}, []string{"nodes"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"namespaces"}, "get", "list", "watch"),
 			rule([]string{""}, []string{"events"}, "create", "patch"),
 			// Workloads the WorkerPool + EG reconcilers create. EG provisions its
 			// proxy data plane as a Deployment or DaemonSet (with an optional PDB +
 			// HPA), so the cm manages daemonsets/poddisruptionbudgets/
 			// horizontalpodautoscalers too, not only deployments.
-			rule([]string{"apps"}, []string{"deployments", "daemonsets", "replicasets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
-			rule([]string{"policy"}, []string{"poddisruptionbudgets"}, "get", "list", "watch", "create", "update", "patch", "delete"),
-			rule([]string{"autoscaling"}, []string{"horizontalpodautoscalers"}, "get", "list", "watch", "create", "update", "patch", "delete"),
+			rule([]string{"apps"}, []string{"deployments", "daemonsets", "replicasets"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
+			rule([]string{"policy"}, []string{"poddisruptionbudgets"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
+			rule([]string{"autoscaling"}, []string{"horizontalpodautoscalers"}, "get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"),
 			// Endpoint resolution (dispatch IP join).
 			rule([]string{"discovery.k8s.io"}, []string{"endpointslices"}, "get", "list", "watch"),
 			// The cm installs/verifies the Gateway-API + EG CRD bundles.
