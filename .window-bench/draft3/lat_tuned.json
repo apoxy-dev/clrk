@@ -1,0 +1,19 @@
+[
+  {"wss_bytes": 4096, "ns_per_load": 1.3093, "min_ns_per_load": 1.2999},
+  {"wss_bytes": 8192, "ns_per_load": 1.2936, "min_ns_per_load": 1.2872},
+  {"wss_bytes": 16384, "ns_per_load": 1.3057, "min_ns_per_load": 1.3010},
+  {"wss_bytes": 32768, "ns_per_load": 1.3082, "min_ns_per_load": 1.3008},
+  {"wss_bytes": 65536, "ns_per_load": 1.3128, "min_ns_per_load": 1.2972},
+  {"wss_bytes": 131072, "ns_per_load": 1.3131, "min_ns_per_load": 1.3031},
+  {"wss_bytes": 262144, "ns_per_load": 3.8489, "min_ns_per_load": 3.8391},
+  {"wss_bytes": 524288, "ns_per_load": 5.1268, "min_ns_per_load": 5.0273},
+  {"wss_bytes": 1048576, "ns_per_load": 5.7721, "min_ns_per_load": 5.7060},
+  {"wss_bytes": 2097152, "ns_per_load": 6.4874, "min_ns_per_load": 6.3681},
+  {"wss_bytes": 4194304, "ns_per_load": 9.7979, "min_ns_per_load": 9.4348},
+  {"wss_bytes": 8388608, "ns_per_load": 38.5780, "min_ns_per_load": 33.4193},
+  {"wss_bytes": 16777216, "ns_per_load": 91.4730, "min_ns_per_load": 86.6897},
+  {"wss_bytes": 33554432, "ns_per_load": 109.5670, "min_ns_per_load": 107.1375},
+  {"wss_bytes": 67108864, "ns_per_load": 121.8933, "min_ns_per_load": 121.0147},
+  {"wss_bytes": 134217728, "ns_per_load": 131.8723, "min_ns_per_load": 130.9060},
+  {"wss_bytes": 268435456, "ns_per_load": 135.9035, "min_ns_per_load": 133.6523}
+]

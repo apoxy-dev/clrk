@@ -1,0 +1,1 @@
+{"test": "numa", "status": "skipped", "reason": "single NUMA node (need >=2 nodes for remote-memory injection)", "numa_nodes": 1}

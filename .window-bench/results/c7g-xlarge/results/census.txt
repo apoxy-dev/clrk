@@ -1,0 +1,136 @@
+=== uname -r ===
+6.17.0-1017-aws
+=== uname -a ===
+Linux ip-172-31-36-180 6.17.0-1017-aws #17~24.04.1-Ubuntu SMP Tue May 26 21:09:53 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+=== arch ===
+aarch64
+=== getconf PAGESIZE ===
+4096
+=== nproc / online ===
+nproc=4 online=4
+=== lscpu ===
+Architecture:                            aarch64
+CPU op-mode(s):                          32-bit, 64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               ARM
+BIOS Vendor ID:                          AWS
+Model name:                              Neoverse-V1
+BIOS Model name:                         AWS Graviton3 AWS Graviton3 CPU @ 2.6GHz
+BIOS CPU family:                         257
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      4
+Socket(s):                               1
+Stepping:                                r1p1
+BogoMIPS:                                2100.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng
+L1d cache:                               256 KiB (4 instances)
+L1i cache:                               256 KiB (4 instances)
+L2 cache:                                4 MiB (4 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+=== numactl -H ===
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3
+node 0 size: 7757 MB
+node 0 free: 1912 MB
+node distances:
+node   0 
+  0:  10 
+=== governor (cpu0) ===
+(none)
+=== governor set this run ===
+no-cpufreq
+=== turbo state ===
+not-exposed
+=== cpuidle driver ===
+none
+=== cpuidle states (cpu0) ===
+=== /proc/cpuinfo flags ===
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng
+=== /proc/cpuinfo model ===
+CPU implementer	: 0x41
+=== perf list (head) ===
+  branch-instructions OR branches                    [Hardware event]
+  branch-misses                                      [Hardware event]
+  bus-cycles                                         [Hardware event]
+  cache-misses                                       [Hardware event]
+  cache-references                                   [Hardware event]
+  cpu-cycles OR cycles                               [Hardware event]
+  instructions                                       [Hardware event]
+  stalled-cycles-backend OR idle-cycles-backend      [Hardware event]
+  stalled-cycles-frontend OR idle-cycles-frontend    [Hardware event]
+
+cache:
+  L1-dcache-loads OR armv8_pmuv3_0/L1-dcache-loads/
+  L1-dcache-load-misses OR armv8_pmuv3_0/L1-dcache-load-misses/
+  L1-icache-loads OR armv8_pmuv3_0/L1-icache-loads/
+  L1-icache-load-misses OR armv8_pmuv3_0/L1-icache-load-misses/
+  dTLB-loads OR armv8_pmuv3_0/dTLB-loads/
+  dTLB-load-misses OR armv8_pmuv3_0/dTLB-load-misses/
+  iTLB-loads OR armv8_pmuv3_0/iTLB-loads/
+  iTLB-load-misses OR armv8_pmuv3_0/iTLB-load-misses/
+  branch-loads OR armv8_pmuv3_0/branch-loads/
+  branch-load-misses OR armv8_pmuv3_0/branch-load-misses/
+  alarmtimer:alarmtimer_cancel                       [Tracepoint event]
+  alarmtimer:alarmtimer_fired                        [Tracepoint event]
+  alarmtimer:alarmtimer_start                        [Tracepoint event]
+  alarmtimer:alarmtimer_suspend                      [Tracepoint event]
+  avc:selinux_audited                                [Tracepoint event]
+  block:blk_zone_append_update_request_bio           [Tracepoint event]
+  block:blk_zone_wplug_bio                           [Tracepoint event]
+  block:blkdev_zone_mgmt                             [Tracepoint event]
+  block:block_bio_backmerge                          [Tracepoint event]
+  block:block_bio_complete                           [Tracepoint event]
+  block:block_bio_frontmerge                         [Tracepoint event]
+  block:block_bio_queue                              [Tracepoint event]
+  block:block_bio_remap                              [Tracepoint event]
+  block:block_dirty_buffer                           [Tracepoint event]
+  block:block_getrq                                  [Tracepoint event]
+  block:block_io_done                                [Tracepoint event]
+  block:block_io_start                               [Tracepoint event]
+  block:block_plug                                   [Tracepoint event]
+  block:block_rq_complete                            [Tracepoint event]
+  block:block_rq_error                               [Tracepoint event]
+  block:block_rq_insert                              [Tracepoint event]
+  block:block_rq_issue                               [Tracepoint event]
+  block:block_rq_merge                               [Tracepoint event]
+  block:block_rq_remap                               [Tracepoint event]
+  block:block_rq_requeue                             [Tracepoint event]
+  block:block_split                                  [Tracepoint event]
+  block:block_touch_buffer                           [Tracepoint event]
+  block:block_unplug                                 [Tracepoint event]
+  block:disk_zone_wplug_add_bio                      [Tracepoint event]
+  bpf_test_run:bpf_test_finish                       [Tracepoint event]
+  bpf_test_run:bpf_trigger_tp                        [Tracepoint event]
+  bpf_trace:bpf_trace_printk                         [Tracepoint event]
+  bridge:br_fdb_add                                  [Tracepoint event]
+  bridge:br_fdb_external_learn_add                   [Tracepoint event]
+  bridge:br_fdb_update                               [Tracepoint event]
+  bridge:br_mdb_full                                 [Tracepoint event]
+  bridge:fdb_delete                                  [Tracepoint event]
+  capability:cap_capable                             [Tracepoint event]
+  cgroup:cgroup_attach_task                          [Tracepoint event]
+(perf list failed)

@@ -1,0 +1,204 @@
+{
+  "host": "ip-172-31-46-235",
+  "arch": "arm64",
+  "sku": "c7g-metal",
+  "core": "arm-neoverse-v1",
+  "env": {
+    "nominal_ghz": 2.6,
+    "kernel": "6.17.0-1017-aws",
+    "online_cpus": null
+  },
+  "core_boot": {
+    "status": "ok",
+    "p50": 208.329254,
+    "p95": 222.43403415,
+    "n": 50,
+    "gomaxprocs": 4
+  },
+  "tests": {
+    "t1_tma": {
+      "arch": "aarch64",
+      "backend_bound_pct": 27.785,
+      "core_bound_pct": 17.11,
+      "cpu_cycles": 158284885023.0,
+      "cpu_part": "0xd40",
+      "dtlb_walk_pct_cycles": 0.049,
+      "host": "ip-172-31-46-235",
+      "idle_ok": true,
+      "instructions": 284207669000.0,
+      "l1d_tlb_refill_pct_cycles": 0.791,
+      "loadavg_1min": 1.13,
+      "memory_bound_pct": 10.675,
+      "missing_events": [],
+      "notes": [
+        "topdown-tool: could not parse backend_bound_pct",
+        "perf stat exited nonzero but CSV present (workload timeout is expected)",
+        "system-wide counting on a pinned idle box attributes ~all cycles to the boot loop on cores 0-3; not per-process isolation"
+      ],
+      "nproc": 64,
+      "perf_event_paranoid": "-1",
+      "raw_paths": {
+        "perf_raw_csv": "/home/ubuntu/window/perf_raw_arm.csv",
+        "perf_raw_log": "/home/ubuntu/window/perf_raw_arm.log",
+        "topdown_log": "/home/ubuntu/window/topdown.log"
+      },
+      "raw_timeout_s": 60,
+      "slots": {
+        "backend_bound": 0.27785,
+        "core_bound": 0.1711,
+        "memory_bound": 0.10675000000000001,
+        "frontend_bound": null
+      },
+      "stall_backend_mem_pct_cycles": 10.675,
+      "stall_backend_pct_cycles": 27.785,
+      "status": "ok",
+      "test": "pmu_arm",
+      "tool": "topdown-tool+stall_backend_mem",
+      "topdown_timeout_s": 90,
+      "topdown_tool": "/root/telemetry-solution/tools/topdown_tool/topdown-tool"
+    },
+    "t2_freq": {
+      "reason": "no cpufreq sysfs (frequency not settable)",
+      "scaling_available_frequencies_khz": [],
+      "status": "skipped",
+      "test": "freq_sweep"
+    },
+    "t3_numa": {
+      "numa_nodes": 1,
+      "reason": "single NUMA node (need >=2 nodes for remote-memory injection)",
+      "status": "skipped",
+      "test": "numa"
+    },
+    "t3_hugepage": {
+      "cpus": "0-3",
+      "exec_order": [
+        "never",
+        "madvise",
+        "always"
+      ],
+      "hugetlb_1g": {
+        "attempted": true,
+        "nr_reserved_probe": 1,
+        "reason": "1G pages reservable (nr=1, free=1) but Sentry allocator not wired to hugetlbfs in this bench; not measured to avoid fabrication",
+        "reservable": true,
+        "status": "skipped"
+      },
+      "isolates": "TLB/page-walk channel (page size at fixed ROB)",
+      "iters": 30,
+      "madvise_note": "madvise leg == never unless the Sentry issues MADV_HUGEPAGE; included as a control, not an independent page-size point",
+      "original_defrag": "madvise",
+      "original_thp": "madvise",
+      "platform": "systrap",
+      "status": "ok",
+      "test": "hugepage",
+      "thp_sweep": [
+        {
+          "core_boot_p50_ms": 215.338697,
+          "hugepage_verified": "na",
+          "requested_thp": "never",
+          "thp": "never"
+        },
+        {
+          "core_boot_p50_ms": 212.420969,
+          "hugepage_verified": "na",
+          "requested_thp": "madvise",
+          "thp": "madvise"
+        },
+        {
+          "core_boot_p50_ms": null,
+          "hugepage_verified": "no",
+          "note": "THP=always did not back the Sentry heap with huge pages (defrag/khugepaged timing); page-size channel not actually isolated; ",
+          "requested_thp": "always",
+          "thp": "always"
+        }
+      ],
+      "warmup": 5
+    },
+    "t3_prefetch": {
+      "arch": "aarch64",
+      "reason": "not x86 (arch=aarch64); MSR 0x1A4 prefetcher control is Intel-only",
+      "status": "skipped",
+      "test": "prefetch_msr"
+    },
+    "t4_latency": {
+      "status": "ok",
+      "curve": [
+        {
+          "ns_per_load": 1.541,
+          "wss_bytes": 4096
+        },
+        {
+          "ns_per_load": 1.5406,
+          "wss_bytes": 8192
+        },
+        {
+          "ns_per_load": 1.5405,
+          "wss_bytes": 16384
+        },
+        {
+          "ns_per_load": 1.5446,
+          "wss_bytes": 32768
+        },
+        {
+          "ns_per_load": 1.5548,
+          "wss_bytes": 65536
+        },
+        {
+          "ns_per_load": 4.7735,
+          "wss_bytes": 131072
+        },
+        {
+          "ns_per_load": 5.1891,
+          "wss_bytes": 262144
+        },
+        {
+          "ns_per_load": 5.644,
+          "wss_bytes": 524288
+        },
+        {
+          "ns_per_load": 11.9948,
+          "wss_bytes": 1048576
+        },
+        {
+          "ns_per_load": 21.5346,
+          "wss_bytes": 2097152
+        },
+        {
+          "ns_per_load": 28.1274,
+          "wss_bytes": 4194304
+        },
+        {
+          "ns_per_load": 31.3654,
+          "wss_bytes": 8388608
+        },
+        {
+          "ns_per_load": 36.1777,
+          "wss_bytes": 16777216
+        },
+        {
+          "ns_per_load": 53.0539,
+          "wss_bytes": 33554432
+        },
+        {
+          "ns_per_load": 113.4916,
+          "wss_bytes": 67108864
+        },
+        {
+          "ns_per_load": 123.3574,
+          "wss_bytes": 134217728
+        },
+        {
+          "ns_per_load": 125.4705,
+          "wss_bytes": 268435456
+        }
+      ]
+    },
+    "t4_mlp": {
+      "status": "ok",
+      "knee_n": 16,
+      "mlp_knee": 16,
+      "peak_loads_per_ns": 0.14346
+    }
+  },
+  "_rcu_caveat": "metal CORE_BOOT is inflated by the hostmm/RCU membarrier grace-period tax that scales with online CPU count (~+26ms c7i.metal/96c, ~+54ms c7g.metal/64c vs the 4-online xlarge); see hostmm finding. Use xlarge for the ROB correlation."
+}

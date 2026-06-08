@@ -1,0 +1,2 @@
+prefetch_msr: measuring with prefetch ENABLED (MSR 0x1A4=0x0 on cpu0)
+prefetch_msr: measuring with prefetch DISABLED (MSR 0x1A4=0x0 on cpu0)

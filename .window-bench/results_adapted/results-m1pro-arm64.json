@@ -1,0 +1,121 @@
+{
+  "host": "m1pro-local",
+  "arch": "arm64",
+  "sku": "M1 Pro (local)",
+  "core": "apple-firestorm",
+  "env": {
+    "nominal_ghz": 3.2,
+    "kernel": "darwin",
+    "online_cpus": 10
+  },
+  "core_boot": {
+    "status": "ok",
+    "p50": 78.0,
+    "n": null,
+    "gomaxprocs": 4,
+    "source": "BLOG (gVisor is Linux-only; CORE_BOOT not re-measured on macOS)"
+  },
+  "tests": {
+    "t1_tma": {
+      "status": "skipped",
+      "reason": "Apple PMU unavailable to perf",
+      "slots": null
+    },
+    "t2_freq": {
+      "status": "skipped",
+      "reason": "no cpufreq on macOS"
+    },
+    "t3_numa": {
+      "status": "skipped",
+      "reason": "single node"
+    },
+    "t3_hugepage": {
+      "status": "skipped",
+      "reason": "n/a (no gVisor on macOS)"
+    },
+    "t3_prefetch": {
+      "status": "skipped",
+      "reason": "n/a"
+    },
+    "t4_latency": {
+      "status": "ok",
+      "curve": [
+        {
+          "wss_bytes": 4096,
+          "ns_per_load": 1.2859
+        },
+        {
+          "wss_bytes": 8192,
+          "ns_per_load": 1.2729
+        },
+        {
+          "wss_bytes": 16384,
+          "ns_per_load": 1.2804
+        },
+        {
+          "wss_bytes": 32768,
+          "ns_per_load": 1.2764
+        },
+        {
+          "wss_bytes": 65536,
+          "ns_per_load": 1.2817
+        },
+        {
+          "wss_bytes": 131072,
+          "ns_per_load": 1.2943
+        },
+        {
+          "wss_bytes": 262144,
+          "ns_per_load": 5.5623
+        },
+        {
+          "wss_bytes": 524288,
+          "ns_per_load": 5.7045
+        },
+        {
+          "wss_bytes": 1048576,
+          "ns_per_load": 5.8995
+        },
+        {
+          "wss_bytes": 2097152,
+          "ns_per_load": 6.2605
+        },
+        {
+          "wss_bytes": 4194304,
+          "ns_per_load": 8.9131
+        },
+        {
+          "wss_bytes": 8388608,
+          "ns_per_load": 30.9622
+        },
+        {
+          "wss_bytes": 16777216,
+          "ns_per_load": 103.9475
+        },
+        {
+          "wss_bytes": 33554432,
+          "ns_per_load": 122.6053
+        },
+        {
+          "wss_bytes": 67108864,
+          "ns_per_load": 126.5511
+        },
+        {
+          "wss_bytes": 134217728,
+          "ns_per_load": 134.2282
+        },
+        {
+          "wss_bytes": 268435456,
+          "ns_per_load": 135.8929
+        }
+      ]
+    },
+    "t4_mlp": {
+      "status": "ok",
+      "knee_n": 20,
+      "mlp_knee": 20,
+      "peak_loads_per_ns": 0.11802
+    }
+  },
+  "_coreboot_caveat": "M1 CORE_BOOT is the blog's measured 78ms, NOT re-measured here."
+}

@@ -1,0 +1,217 @@
+{
+  "host": "ip-172-31-15-76",
+  "arch": "amd64",
+  "sku": "c7i-metal24xl",
+  "core": "intel-golden-cove",
+  "env": {
+    "nominal_ghz": 3.8,
+    "kernel": "6.17.0-1017-aws",
+    "online_cpus": null
+  },
+  "core_boot": {
+    "status": "ok",
+    "p50": 176.325786,
+    "p95": 190.0295515,
+    "n": 50,
+    "gomaxprocs": 4
+  },
+  "tests": {
+    "t1_tma": {
+      "arch": "x86_64",
+      "backend_bound_pct": 32.8,
+      "core_bound_pct": 15.1,
+      "cycles": 162471133065.0,
+      "cycles_mem_any_pct_cycles": 81.145,
+      "dtlb_walk_active_pct_cycles": 1.986,
+      "host": "ip-172-31-15-76",
+      "idle_ok": true,
+      "instructions": 293514773270.0,
+      "loadavg_1min": 1.48,
+      "memory_bound_pct": null,
+      "missing_events": [],
+      "notes": [
+        "toplev: could not parse memory_bound_pct from CSV",
+        "system-wide counting on a pinned idle box attributes ~all cycles to the boot loop on cores 0-3; not per-process isolation"
+      ],
+      "nproc": 96,
+      "perf_event_paranoid": "-1",
+      "raw_paths": {
+        "perf_raw_csv": "/home/ubuntu/window/perf_raw_intel.csv",
+        "perf_raw_log": "/home/ubuntu/window/perf_raw_intel.log",
+        "toplev_csv": "/home/ubuntu/window/toplev.csv",
+        "toplev_log": "/home/ubuntu/window/toplev.log"
+      },
+      "raw_timeout_s": 60,
+      "slots": {
+        "backend_bound": 0.32799999999999996,
+        "core_bound": 0.151,
+        "memory_bound": 0.17699999999999996,
+        "frontend_bound": null
+      },
+      "stalls_l3_miss_pct_cycles": 0.596,
+      "stalls_total_pct_cycles": 44.311,
+      "status": "ok",
+      "test": "pmu_intel",
+      "tool": "toplev",
+      "toplev_timeout_s": 90,
+      "vendor": "GenuineIntel"
+    },
+    "t2_freq": {
+      "reason": "userspace governor unavailable (cannot pin frequency)",
+      "scaling_available_frequencies_khz": [],
+      "status": "skipped",
+      "test": "freq_sweep"
+    },
+    "t3_numa": {
+      "numa_nodes": 1,
+      "reason": "single NUMA node (need >=2 nodes for remote-memory injection)",
+      "status": "skipped",
+      "test": "numa"
+    },
+    "t3_hugepage": {
+      "cpus": "0-3",
+      "exec_order": [
+        "never",
+        "madvise",
+        "always"
+      ],
+      "hugetlb_1g": {
+        "attempted": true,
+        "nr_reserved_probe": 1,
+        "reason": "1G pages reservable (nr=1, free=1) but Sentry allocator not wired to hugetlbfs in this bench; not measured to avoid fabrication",
+        "reservable": true,
+        "status": "skipped"
+      },
+      "isolates": "TLB/page-walk channel (page size at fixed ROB)",
+      "iters": 30,
+      "madvise_note": "madvise leg == never unless the Sentry issues MADV_HUGEPAGE; included as a control, not an independent page-size point",
+      "original_defrag": "madvise",
+      "original_thp": "madvise",
+      "platform": "systrap",
+      "status": "ok",
+      "test": "hugepage",
+      "thp_sweep": [
+        {
+          "core_boot_p50_ms": 184.202031,
+          "hugepage_verified": "na",
+          "requested_thp": "never",
+          "thp": "never"
+        },
+        {
+          "core_boot_p50_ms": 179.436866,
+          "hugepage_verified": "na",
+          "requested_thp": "madvise",
+          "thp": "madvise"
+        },
+        {
+          "core_boot_p50_ms": null,
+          "hugepage_verified": "no",
+          "note": "THP=always did not back the Sentry heap with huge pages (defrag/khugepaged timing); page-size channel not actually isolated; ",
+          "requested_thp": "always",
+          "thp": "always"
+        }
+      ],
+      "warmup": 5
+    },
+    "t3_prefetch": {
+      "arch": "x86_64",
+      "cpus": "0-3",
+      "delta": {
+        "delta_ms": 0.3887,
+        "delta_pct": 0.214
+      },
+      "disabled_core_boot_p50_ms": 182.082698,
+      "enabled_core_boot_p50_ms": 181.693969,
+      "iters": 30,
+      "msr": "0x1A4",
+      "msr_0x1a4_disabled": "0xf",
+      "msr_0x1a4_enabled": "0x20",
+      "platform": "systrap",
+      "prefetch_cores": "0 1 2 3",
+      "status": "ok",
+      "test": "prefetch_msr",
+      "vendor": "GenuineIntel",
+      "warmup": 5
+    },
+    "t4_latency": {
+      "status": "ok",
+      "curve": [
+        {
+          "ns_per_load": 1.3175,
+          "wss_bytes": 4096
+        },
+        {
+          "ns_per_load": 1.3169,
+          "wss_bytes": 8192
+        },
+        {
+          "ns_per_load": 1.3174,
+          "wss_bytes": 16384
+        },
+        {
+          "ns_per_load": 1.3171,
+          "wss_bytes": 32768
+        },
+        {
+          "ns_per_load": 4.2147,
+          "wss_bytes": 65536
+        },
+        {
+          "ns_per_load": 4.2087,
+          "wss_bytes": 131072
+        },
+        {
+          "ns_per_load": 4.2152,
+          "wss_bytes": 262144
+        },
+        {
+          "ns_per_load": 4.6957,
+          "wss_bytes": 524288
+        },
+        {
+          "ns_per_load": 5.3871,
+          "wss_bytes": 1048576
+        },
+        {
+          "ns_per_load": 13.4611,
+          "wss_bytes": 2097152
+        },
+        {
+          "ns_per_load": 38.2701,
+          "wss_bytes": 4194304
+        },
+        {
+          "ns_per_load": 39.1953,
+          "wss_bytes": 8388608
+        },
+        {
+          "ns_per_load": 40.6142,
+          "wss_bytes": 16777216
+        },
+        {
+          "ns_per_load": 41.8341,
+          "wss_bytes": 33554432
+        },
+        {
+          "ns_per_load": 43.6068,
+          "wss_bytes": 67108864
+        },
+        {
+          "ns_per_load": 68.0968,
+          "wss_bytes": 134217728
+        },
+        {
+          "ns_per_load": 111.0501,
+          "wss_bytes": 268435456
+        }
+      ]
+    },
+    "t4_mlp": {
+      "status": "ok",
+      "knee_n": 6,
+      "mlp_knee": 6,
+      "peak_loads_per_ns": 0.05471
+    }
+  },
+  "_rcu_caveat": "metal CORE_BOOT is inflated by the hostmm/RCU membarrier grace-period tax that scales with online CPU count (~+26ms c7i.metal/96c, ~+54ms c7g.metal/64c vs the 4-online xlarge); see hostmm finding. Use xlarge for the ROB correlation."
+}

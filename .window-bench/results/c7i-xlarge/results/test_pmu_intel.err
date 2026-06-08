@@ -1,0 +1,3 @@
+pmu_intel: cloning pmu-tools to /root/pmu-tools
+pmu_intel: running toplev -l3 -a --no-mux (timeout 90s)
+pmu_intel: running raw perf stat -a (present: cycle_activity.stalls_l3_miss,cycle_activity.stalls_total,cycle_activity.cycles_mem_any,dtlb_load_misses.walk_active,cycles,instructions; timeout 60s)

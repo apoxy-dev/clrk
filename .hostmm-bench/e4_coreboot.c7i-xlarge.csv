@@ -1,0 +1,10 @@
+## E4 coreboot sweep normal
+gp,pin,rcu,min,p50,mean,p95,max
+1,0,normal,200.89,237.42,232.88,251.81,252.07
+2,0-1,normal,151.71,170.16,169.63,196.68,197.82
+4,0-3,normal,135.07,145.90,145.90,155.48,156.97
+## E4 coreboot sweep expedited
+gp,pin,rcu,min,p50,mean,p95,max
+1,0,expedited,159.09,168.91,168.76,178.90,179.44
+2,0-1,expedited,105.96,123.98,119.79,128.02,128.14
+4,0-3,expedited,106.90,109.55,110.12,115.55,115.93

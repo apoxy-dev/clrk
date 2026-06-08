@@ -1,0 +1,8 @@
+# started on Mon Jun  8 03:10:54 2026
+
+968808174,,cycle_activity.stalls_l3_miss,4938155804674,100.00,,
+71992111402,,cycle_activity.stalls_total,4938155713626,100.00,,
+131836964742,,cycle_activity.cycles_mem_any,4938155641412,100.00,,
+3227037035,,dtlb_load_misses.walk_active,4938155557408,100.00,,
+162471133065,,cycles,4938155430597,100.00,,
+293514773270,,instructions,4938155251014,100.00,1.81,insn per cycle

@@ -1,0 +1,8 @@
+apt:build-essential	ok	
+apt:linux-tools-common	ok	
+apt:linux-tools-6.17.0-1017-aws	ok	
+apt:numactl	ok	
+apt:msr-tools	ok	
+apt:python3	ok	
+apt:golang-go	ok	
+pip:topdown-tool	skipped	not an aarch64 host

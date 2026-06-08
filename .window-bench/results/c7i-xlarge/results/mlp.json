@@ -1,0 +1,25 @@
+{
+  "bench": "mlp",
+  "line_bytes": 128,
+  "buf_bytes": 1610612736,
+  "hop_cap": 2097152,
+  "reps": 5,
+  "curve": [
+    {"n": 1, "loads_per_ns": 0.00721},
+    {"n": 2, "loads_per_ns": 0.01205},
+    {"n": 3, "loads_per_ns": 0.01649},
+    {"n": 4, "loads_per_ns": 0.01959},
+    {"n": 6, "loads_per_ns": 0.02714},
+    {"n": 8, "loads_per_ns": 0.03233},
+    {"n": 10, "loads_per_ns": 0.03226},
+    {"n": 12, "loads_per_ns": 0.03736},
+    {"n": 16, "loads_per_ns": 0.04146},
+    {"n": 20, "loads_per_ns": 0.04676},
+    {"n": 24, "loads_per_ns": 0.04727},
+    {"n": 32, "loads_per_ns": 0.04980},
+    {"n": 48, "loads_per_ns": 0.05162},
+    {"n": 64, "loads_per_ns": 0.05140}
+  ],
+  "knee_n": 6,
+  "peak_loads_per_ns": 0.05162
+}

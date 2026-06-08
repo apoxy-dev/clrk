@@ -1,0 +1,60 @@
+## rcu_expedited=0 gp=4 launches=80
+=== (a) membarrier syscall latency by cmd (us) ===
+Attaching 2 probes...
+
+
+
+
+@us_by_cmd[0]: 
+[2, 4)                59 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)                21 |@@@@@@@@@@@@@@@@@@                                  |
+
+@us_by_cmd[16]: 
+[4K, 8K)              53 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)             27 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+
+=== (b) synchronize_rcu latency (us) ===
+Tracing 1 functions for "synchronize_rcu"... Hit Ctrl-C to end.
+
+     usecs               : count     distribution
+         0 -> 1          : 0        |                                        |
+         2 -> 3          : 0        |                                        |
+         4 -> 7          : 0        |                                        |
+         8 -> 15         : 0        |                                        |
+        16 -> 31         : 0        |                                        |
+        32 -> 63         : 0        |                                        |
+        64 -> 127        : 0        |                                        |
+       128 -> 255        : 0        |                                        |
+       256 -> 511        : 0        |                                        |
+       512 -> 1023       : 0        |                                        |
+      1024 -> 2047       : 0        |                                        |
+      2048 -> 4095       : 0        |                                        |
+      4096 -> 8191       : 53       |****************************************|
+      8192 -> 16383      : 27       |********************                    |
+
+avg = 8120 usecs, total: 649673 usecs, count: 80
+
+Detaching...
+=== (c) sync_runqueues_membarrier_state latency (us) ===
+Tracing 1 functions for "sync_runqueues_membarrier_state"... Hit Ctrl-C to end.
+
+     usecs               : count     distribution
+         0 -> 1          : 0        |                                        |
+         2 -> 3          : 0        |                                        |
+         4 -> 7          : 0        |                                        |
+         8 -> 15         : 0        |                                        |
+        16 -> 31         : 0        |                                        |
+        32 -> 63         : 0        |                                        |
+        64 -> 127        : 0        |                                        |
+       128 -> 255        : 0        |                                        |
+       256 -> 511        : 0        |                                        |
+       512 -> 1023       : 0        |                                        |
+      1024 -> 2047       : 0        |                                        |
+      2048 -> 4095       : 0        |                                        |
+      4096 -> 8191       : 53       |****************************************|
+      8192 -> 16383      : 27       |********************                    |
+
+avg = 8126 usecs, total: 650144 usecs, count: 80
+
+Detaching...
+E3 DONE

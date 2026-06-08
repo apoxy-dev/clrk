@@ -1,0 +1,12 @@
+# Kept out of version control:
+#   *.pem        - SSH private keys for the (since-terminated) EC2 hosts.
+#   *.tgz/*.gz   - bulky, rebuildable source/result archives (incl. clrk-src.tar.gz).
+#   sg.id        - ephemeral security-group id of a deleted resource.
+*.pem
+*.tgz
+*.tar.gz
+*.gz
+__pycache__/
+sg.id
+mlp
+latency

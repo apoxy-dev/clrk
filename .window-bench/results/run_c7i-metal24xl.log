@@ -1,0 +1,22 @@
+[run_host c7i-metal24xl] host=ip-172-31-15-76 arch=x86_64 kernel=6.17.0-1017-aws label=c7i-metal24xl root=1
+[run_host c7i-metal24xl] bundle=/home/ubuntu/window results=/home/ubuntu/window/results out=/home/ubuntu/window/results/results-ip-172-31-15-76-x86_64.json
+[run_host c7i-metal24xl] installing toolchain (best effort)
+[run_host c7i-metal24xl] C compiler: cc
+[run_host c7i-metal24xl] go: go
+[run_host c7i-metal24xl] building bench-runsc from /root/clrk-src/cmd/bench-runsc (module /root/clrk-src)
+[run_host c7i-metal24xl] bench-runsc build: ok 
+[run_host c7i-metal24xl] governor=performance turbo=on(intel_pstate no_turbo=0)
+[run_host c7i-metal24xl] CORE_BOOT run: ok 
+[run_host c7i-metal24xl] CORE_BOOT gate: status=ok gomaxprocs=4 rc=0
+[run_host c7i-metal24xl] latency.c: ok 
+[run_host c7i-metal24xl] mlp.c: ok 
+[run_host c7i-metal24xl] census -> /home/ubuntu/window/results/census.txt
+[run_host c7i-metal24xl] test pmu_intel: captured -> /home/ubuntu/window/results/test_pmu_intel.json
+[run_host c7i-metal24xl] test pmu_arm: captured -> /home/ubuntu/window/results/test_pmu_arm.json
+[run_host c7i-metal24xl] test freq_sweep: captured -> /home/ubuntu/window/results/test_freq_sweep.json
+[run_host c7i-metal24xl] test numa_test: captured -> /home/ubuntu/window/results/test_numa_test.json
+[run_host c7i-metal24xl] test hugepage_sweep: captured -> /home/ubuntu/window/results/test_hugepage_sweep.json
+[run_host c7i-metal24xl] test prefetch_msr: captured -> /home/ubuntu/window/results/test_prefetch_msr.json
+[run_host c7i-metal24xl] assembling /home/ubuntu/window/results/results-ip-172-31-15-76-x86_64.json
+wrote /home/ubuntu/window/results/results-ip-172-31-15-76-x86_64.json
+[run_host c7i-metal24xl] DONE -> /home/ubuntu/window/results/results-ip-172-31-15-76-x86_64.json

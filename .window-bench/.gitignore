@@ -1,0 +1,11 @@
+# Kept out of version control:
+#   *.pem        - SSH private keys for the (since-terminated) EC2 hosts.
+#   *.tgz/*.gz   - bulky, rebuildable source/result archives.
+#   mlp/latency  - compiled C microbench binaries; build them from src/*.c.
+*.pem
+*.tgz
+*.tar.gz
+*.gz
+__pycache__/
+mlp
+latency

@@ -1,0 +1,608 @@
+{
+  "census_raw": "=== uname -r ===\n6.17.0-1017-aws\n=== uname -a ===\nLinux ip-172-31-36-180 6.17.0-1017-aws #17~24.04.1-Ubuntu SMP Tue May 26 21:09:53 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\n=== arch ===\naarch64\n=== getconf PAGESIZE ===\n4096\n=== nproc / online ===\nnproc=4 online=4\n=== lscpu ===\nArchitecture:                            aarch64\nCPU op-mode(s):                          32-bit, 64-bit\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               ARM\nBIOS Vendor ID:                          AWS\nModel name:                              Neoverse-V1\nBIOS Model name:                         AWS Graviton3 AWS Graviton3 CPU @ 2.6GHz\nBIOS CPU family:                         257\nModel:                                   1\nThread(s) per core:                      1\nCore(s) per socket:                      4\nSocket(s):                               1\nStepping:                                r1p1\nBogoMIPS:                                2100.00\nFlags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng\nL1d cache:                               256 KiB (4 instances)\nL1i cache:                               256 KiB (4 instances)\nL2 cache:                                4 MiB (4 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; CSV2, BHB\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n=== numactl -H ===\navailable: 1 nodes (0)\nnode 0 cpus: 0 1 2 3\nnode 0 size: 7757 MB\nnode 0 free: 1912 MB\nnode distances:\nnode   0 \n  0:  10 \n=== governor (cpu0) ===\n(none)\n=== governor set this run ===\nno-cpufreq\n=== turbo state ===\nnot-exposed\n=== cpuidle driver ===\nnone\n=== cpuidle states (cpu0) ===\n=== /proc/cpuinfo flags ===\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng\n=== /proc/cpuinfo model ===\nCPU implementer\t: 0x41\n=== perf list (head) ===\n  branch-instructions OR branches                    [Hardware event]\n  branch-misses                                      [Hardware event]\n  bus-cycles                                         [Hardware event]\n  cache-misses                                       [Hardware event]\n  cache-references                                   [Hardware event]\n  cpu-cycles OR cycles                               [Hardware event]\n  instructions                                       [Hardware event]\n  stalled-cycles-backend OR idle-cycles-backend      [Hardware event]\n  stalled-cycles-frontend OR idle-cycles-frontend    [Hardware event]\n\ncache:\n  L1-dcache-loads OR armv8_pmuv3_0/L1-dcache-loads/\n  L1-dcache-load-misses OR armv8_pmuv3_0/L1-dcache-load-misses/\n  L1-icache-loads OR armv8_pmuv3_0/L1-icache-loads/\n  L1-icache-load-misses OR armv8_pmuv3_0/L1-icache-load-misses/\n  dTLB-loads OR armv8_pmuv3_0/dTLB-loads/\n  dTLB-load-misses OR armv8_pmuv3_0/dTLB-load-misses/\n  iTLB-loads OR armv8_pmuv3_0/iTLB-loads/\n  iTLB-load-misses OR armv8_pmuv3_0/iTLB-load-misses/\n  branch-loads OR armv8_pmuv3_0/branch-loads/\n  branch-load-misses OR armv8_pmuv3_0/branch-load-misses/\n  alarmtimer:alarmtimer_cancel                       [Tracepoint event]\n  alarmtimer:alarmtimer_fired                        [Tracepoint event]\n  alarmtimer:alarmtimer_start                        [Tracepoint event]\n  alarmtimer:alarmtimer_suspend                      [Tracepoint event]\n  avc:selinux_audited                                [Tracepoint event]\n  block:blk_zone_append_update_request_bio           [Tracepoint event]\n  block:blk_zone_wplug_bio                           [Tracepoint event]\n  block:blkdev_zone_mgmt                             [Tracepoint event]\n  block:block_bio_backmerge                          [Tracepoint event]\n  block:block_bio_complete                           [Tracepoint event]\n  block:block_bio_frontmerge                         [Tracepoint event]\n  block:block_bio_queue                              [Tracepoint event]\n  block:block_bio_remap                              [Tracepoint event]\n  block:block_dirty_buffer                           [Tracepoint event]\n  block:block_getrq                                  [Tracepoint event]\n  block:block_io_done                                [Tracepoint event]\n  block:block_io_start                               [Tracepoint event]\n  block:block_plug                                   [Tracepoint event]\n  block:block_rq_complete                            [Tracepoint event]\n  block:block_rq_error                               [Tracepoint event]\n  block:block_rq_insert                              [Tracepoint event]\n  block:block_rq_issue                               [Tracepoint event]\n  block:block_rq_merge                               [Tracepoint event]\n  block:block_rq_remap                               [Tracepoint event]\n  block:block_rq_requeue                             [Tracepoint event]\n  block:block_split                                  [Tracepoint event]\n  block:block_touch_buffer                           [Tracepoint event]\n  block:block_unplug                                 [Tracepoint event]\n  block:disk_zone_wplug_add_bio                      [Tracepoint event]\n  bpf_test_run:bpf_test_finish                       [Tracepoint event]\n  bpf_test_run:bpf_trigger_tp                        [Tracepoint event]\n  bpf_trace:bpf_trace_printk                         [Tracepoint event]\n  bridge:br_fdb_add                                  [Tracepoint event]\n  bridge:br_fdb_external_learn_add                   [Tracepoint event]\n  bridge:br_fdb_update                               [Tracepoint event]\n  bridge:br_mdb_full                                 [Tracepoint event]\n  bridge:fdb_delete                                  [Tracepoint event]\n  capability:cap_capable                             [Tracepoint event]\n  cgroup:cgroup_attach_task                          [Tracepoint event]\n(perf list failed)\n",
+  "coreboot": {
+    "build_reason": null,
+    "build_status": "ok",
+    "core_boot_ms": [
+      142.914077,
+      143.914237,
+      145.157309,
+      146.09142,
+      147.056707,
+      147.105505,
+      147.425581,
+      147.892256,
+      148.917575,
+      149.046581,
+      149.290806,
+      149.379864,
+      149.571884,
+      149.664206,
+      149.750109,
+      150.455654,
+      151.083663,
+      151.373632,
+      151.432302,
+      151.580369,
+      152.916302,
+      153.0073,
+      153.012578,
+      153.39051,
+      154.141481,
+      154.533575,
+      154.605039,
+      154.693269,
+      154.735151,
+      154.771717,
+      154.792838,
+      154.82638,
+      154.838075,
+      154.869694,
+      155.099434,
+      155.19818,
+      157.561246,
+      157.757219,
+      157.945359,
+      158.539313,
+      158.887781,
+      160.806294,
+      161.622354,
+      161.814562,
+      163.365099,
+      163.423072,
+      164.07734,
+      164.315005,
+      165.740384,
+      165.80867
+    ],
+    "expected_n": 50,
+    "gomaxprocs": 4,
+    "n": 50,
+    "p50_ms": 154.33752800000002,
+    "p95_ms": 164.20805575,
+    "reason": null,
+    "status": "ok",
+    "timeout_rc": null
+  },
+  "env": {
+    "arch": "aarch64",
+    "governor": "no-cpufreq",
+    "hostname": "ip-172-31-36-180",
+    "installs": {
+      "apt:build-essential": {
+        "reason": "",
+        "status": "ok"
+      },
+      "apt:golang-go": {
+        "reason": "",
+        "status": "ok"
+      },
+      "apt:linux-tools-6.17.0-1017-aws": {
+        "reason": "",
+        "status": "ok"
+      },
+      "apt:linux-tools-common": {
+        "reason": "",
+        "status": "ok"
+      },
+      "apt:msr-tools": {
+        "reason": "apt-get install failed",
+        "status": "failed"
+      },
+      "apt:numactl": {
+        "reason": "",
+        "status": "ok"
+      },
+      "apt:python3": {
+        "reason": "",
+        "status": "ok"
+      },
+      "pip:topdown-tool": {
+        "reason": "pip install topdown-tool failed",
+        "status": "skipped"
+      }
+    },
+    "instance_label": "c7g-xlarge",
+    "kernel": "6.17.0-1017-aws",
+    "pagesize_bytes": 4096,
+    "ran_as_root": true,
+    "turbo": "not-exposed"
+  },
+  "latency_curve": {
+    "curve": [
+      {
+        "ns_per_load": 1.5433,
+        "wss_bytes": 4096
+      },
+      {
+        "ns_per_load": 1.5432,
+        "wss_bytes": 8192
+      },
+      {
+        "ns_per_load": 1.5433,
+        "wss_bytes": 16384
+      },
+      {
+        "ns_per_load": 1.5435,
+        "wss_bytes": 32768
+      },
+      {
+        "ns_per_load": 1.5452,
+        "wss_bytes": 65536
+      },
+      {
+        "ns_per_load": 4.6599,
+        "wss_bytes": 131072
+      },
+      {
+        "ns_per_load": 5.1646,
+        "wss_bytes": 262144
+      },
+      {
+        "ns_per_load": 6.8387,
+        "wss_bytes": 524288
+      },
+      {
+        "ns_per_load": 11.4396,
+        "wss_bytes": 1048576
+      },
+      {
+        "ns_per_load": 20.039,
+        "wss_bytes": 2097152
+      },
+      {
+        "ns_per_load": 25.7905,
+        "wss_bytes": 4194304
+      },
+      {
+        "ns_per_load": 30.253,
+        "wss_bytes": 8388608
+      },
+      {
+        "ns_per_load": 95.8145,
+        "wss_bytes": 16777216
+      },
+      {
+        "ns_per_load": 120.854,
+        "wss_bytes": 33554432
+      },
+      {
+        "ns_per_load": 123.8126,
+        "wss_bytes": 67108864
+      },
+      {
+        "ns_per_load": 125.0258,
+        "wss_bytes": 134217728
+      },
+      {
+        "ns_per_load": 127.226,
+        "wss_bytes": 268435456
+      }
+    ],
+    "line_bytes": 128,
+    "reason": null,
+    "reps": 5,
+    "status": "ok",
+    "target_loads": 67108864
+  },
+  "mlp_curve": {
+    "buf_bytes": 1610612736,
+    "curve": [
+      {
+        "loads_per_ns": 0.00798,
+        "n": 1
+      },
+      {
+        "loads_per_ns": 0.01398,
+        "n": 2
+      },
+      {
+        "loads_per_ns": 0.02036,
+        "n": 3
+      },
+      {
+        "loads_per_ns": 0.02618,
+        "n": 4
+      },
+      {
+        "loads_per_ns": 0.03898,
+        "n": 6
+      },
+      {
+        "loads_per_ns": 0.05091,
+        "n": 8
+      },
+      {
+        "loads_per_ns": 0.06047,
+        "n": 10
+      },
+      {
+        "loads_per_ns": 0.07414,
+        "n": 12
+      },
+      {
+        "loads_per_ns": 0.09677,
+        "n": 16
+      },
+      {
+        "loads_per_ns": 0.10916,
+        "n": 20
+      },
+      {
+        "loads_per_ns": 0.12315,
+        "n": 24
+      },
+      {
+        "loads_per_ns": 0.13969,
+        "n": 32
+      },
+      {
+        "loads_per_ns": 0.14679,
+        "n": 48
+      },
+      {
+        "loads_per_ns": 0.14673,
+        "n": 64
+      }
+    ],
+    "hop_cap": 2097152,
+    "knee_n": 16,
+    "line_bytes": 128,
+    "peak_loads_per_ns": 0.14679,
+    "reason": null,
+    "reps": 5,
+    "status": "ok"
+  },
+  "schema": "window-bench/host-result/v1",
+  "tests": {
+    "freq_sweep": {
+      "reason": "no cpufreq sysfs (frequency not settable)",
+      "scaling_available_frequencies_khz": [],
+      "status": "skipped",
+      "test": "freq_sweep"
+    },
+    "hugepage_sweep": {
+      "cpus": "0-3",
+      "exec_order": [
+        "never",
+        "madvise",
+        "always"
+      ],
+      "hugetlb_1g": {
+        "attempted": true,
+        "reason": "1G hugepages present but could not be reserved (insufficient contiguous memory)",
+        "reservable": false,
+        "status": "skipped"
+      },
+      "isolates": "TLB/page-walk channel (page size at fixed ROB)",
+      "iters": 30,
+      "madvise_note": "madvise leg == never unless the Sentry issues MADV_HUGEPAGE; included as a control, not an independent page-size point",
+      "original_defrag": "madvise",
+      "original_thp": "madvise",
+      "platform": "systrap",
+      "status": "ok",
+      "test": "hugepage",
+      "thp_sweep": [
+        {
+          "core_boot_p50_ms": 155.026489,
+          "hugepage_verified": "na",
+          "requested_thp": "never",
+          "thp": "never"
+        },
+        {
+          "core_boot_p50_ms": 155.420175,
+          "hugepage_verified": "na",
+          "requested_thp": "madvise",
+          "thp": "madvise"
+        },
+        {
+          "core_boot_p50_ms": null,
+          "hugepage_verified": "no",
+          "note": "THP=always did not back the Sentry heap with huge pages (defrag/khugepaged timing); page-size channel not actually isolated; ",
+          "requested_thp": "always",
+          "thp": "always"
+        }
+      ],
+      "warmup": 5
+    },
+    "numa_test": {
+      "numa_nodes": 1,
+      "reason": "single NUMA node (need >=2 nodes for remote-memory injection)",
+      "status": "skipped",
+      "test": "numa"
+    },
+    "pmu_arm": {
+      "arch": "aarch64",
+      "backend_bound_pct": 31.003,
+      "core_bound_pct": 18.907,
+      "cpu_cycles": 145266670116.0,
+      "cpu_part": "0xd40",
+      "dtlb_walk_pct_cycles": 0.043,
+      "host": "ip-172-31-36-180",
+      "idle_ok": true,
+      "instructions": 276194001321.0,
+      "l1d_tlb_refill_pct_cycles": 0.834,
+      "loadavg_1min": 1.07,
+      "memory_bound_pct": 12.096,
+      "missing_events": [],
+      "notes": [
+        "topdown-tool: could not parse backend_bound_pct",
+        "system-wide counting on a pinned idle box attributes ~all cycles to the boot loop on cores 0-3; not per-process isolation"
+      ],
+      "nproc": 4,
+      "perf_event_paranoid": "-1",
+      "raw_paths": {
+        "perf_raw_csv": "/home/ubuntu/window/perf_raw_arm.csv",
+        "perf_raw_log": "/home/ubuntu/window/perf_raw_arm.log",
+        "topdown_log": "/home/ubuntu/window/topdown.log"
+      },
+      "raw_timeout_s": 60,
+      "slots": {
+        "backend_bound": 0.31003,
+        "core_bound": 0.18907,
+        "memory_bound": 0.12096
+      },
+      "stall_backend_mem_pct_cycles": 12.096,
+      "stall_backend_pct_cycles": 31.003,
+      "status": "ok",
+      "test": "pmu_arm",
+      "tool": "topdown-tool+stall_backend_mem",
+      "topdown_timeout_s": 90,
+      "topdown_tool": "/root/telemetry-solution/tools/topdown_tool/topdown-tool"
+    },
+    "pmu_intel": {
+      "arch": "aarch64",
+      "host": "ip-172-31-36-180",
+      "reason": "not x86_64 (uname -m = aarch64); pmu_intel only runs on Intel x86-64",
+      "status": "skipped",
+      "test": "pmu_intel"
+    },
+    "prefetch_msr": {
+      "arch": "aarch64",
+      "reason": "not x86 (arch=aarch64); MSR 0x1A4 prefetcher control is Intel-only",
+      "status": "skipped",
+      "test": "prefetch_msr"
+    },
+    "t1_tma": {
+      "arch": "aarch64",
+      "backend_bound_pct": 31.003,
+      "core_bound_pct": 18.907,
+      "cpu_cycles": 145266670116.0,
+      "cpu_part": "0xd40",
+      "dtlb_walk_pct_cycles": 0.043,
+      "host": "ip-172-31-36-180",
+      "idle_ok": true,
+      "instructions": 276194001321.0,
+      "l1d_tlb_refill_pct_cycles": 0.834,
+      "loadavg_1min": 1.07,
+      "memory_bound_pct": 12.096,
+      "missing_events": [],
+      "notes": [
+        "topdown-tool: could not parse backend_bound_pct",
+        "system-wide counting on a pinned idle box attributes ~all cycles to the boot loop on cores 0-3; not per-process isolation"
+      ],
+      "nproc": 4,
+      "perf_event_paranoid": "-1",
+      "raw_paths": {
+        "perf_raw_csv": "/home/ubuntu/window/perf_raw_arm.csv",
+        "perf_raw_log": "/home/ubuntu/window/perf_raw_arm.log",
+        "topdown_log": "/home/ubuntu/window/topdown.log"
+      },
+      "raw_timeout_s": 60,
+      "slots": {
+        "backend_bound": 0.31003,
+        "core_bound": 0.18907,
+        "memory_bound": 0.12096
+      },
+      "stall_backend_mem_pct_cycles": 12.096,
+      "stall_backend_pct_cycles": 31.003,
+      "status": "ok",
+      "test": "pmu_arm",
+      "tool": "topdown-tool+stall_backend_mem",
+      "topdown_timeout_s": 90,
+      "topdown_tool": "/root/telemetry-solution/tools/topdown_tool/topdown-tool"
+    },
+    "t2_freq": {
+      "reason": "no cpufreq sysfs (frequency not settable)",
+      "scaling_available_frequencies_khz": [],
+      "status": "skipped",
+      "test": "freq_sweep"
+    },
+    "t3_hugepage": {
+      "cpus": "0-3",
+      "exec_order": [
+        "never",
+        "madvise",
+        "always"
+      ],
+      "hugetlb_1g": {
+        "attempted": true,
+        "reason": "1G hugepages present but could not be reserved (insufficient contiguous memory)",
+        "reservable": false,
+        "status": "skipped"
+      },
+      "isolates": "TLB/page-walk channel (page size at fixed ROB)",
+      "iters": 30,
+      "madvise_note": "madvise leg == never unless the Sentry issues MADV_HUGEPAGE; included as a control, not an independent page-size point",
+      "original_defrag": "madvise",
+      "original_thp": "madvise",
+      "platform": "systrap",
+      "status": "ok",
+      "test": "hugepage",
+      "thp_sweep": [
+        {
+          "core_boot_p50_ms": 155.026489,
+          "hugepage_verified": "na",
+          "requested_thp": "never",
+          "thp": "never"
+        },
+        {
+          "core_boot_p50_ms": 155.420175,
+          "hugepage_verified": "na",
+          "requested_thp": "madvise",
+          "thp": "madvise"
+        },
+        {
+          "core_boot_p50_ms": null,
+          "hugepage_verified": "no",
+          "note": "THP=always did not back the Sentry heap with huge pages (defrag/khugepaged timing); page-size channel not actually isolated; ",
+          "requested_thp": "always",
+          "thp": "always"
+        }
+      ],
+      "warmup": 5
+    },
+    "t3_numa": {
+      "numa_nodes": 1,
+      "reason": "single NUMA node (need >=2 nodes for remote-memory injection)",
+      "status": "skipped",
+      "test": "numa"
+    },
+    "t3_prefetch": {
+      "arch": "aarch64",
+      "reason": "not x86 (arch=aarch64); MSR 0x1A4 prefetcher control is Intel-only",
+      "status": "skipped",
+      "test": "prefetch_msr"
+    },
+    "t4_latency": {
+      "bench": "latency",
+      "curve": [
+        {
+          "ns_per_load": 1.5433,
+          "wss_bytes": 4096
+        },
+        {
+          "ns_per_load": 1.5432,
+          "wss_bytes": 8192
+        },
+        {
+          "ns_per_load": 1.5433,
+          "wss_bytes": 16384
+        },
+        {
+          "ns_per_load": 1.5435,
+          "wss_bytes": 32768
+        },
+        {
+          "ns_per_load": 1.5452,
+          "wss_bytes": 65536
+        },
+        {
+          "ns_per_load": 4.6599,
+          "wss_bytes": 131072
+        },
+        {
+          "ns_per_load": 5.1646,
+          "wss_bytes": 262144
+        },
+        {
+          "ns_per_load": 6.8387,
+          "wss_bytes": 524288
+        },
+        {
+          "ns_per_load": 11.4396,
+          "wss_bytes": 1048576
+        },
+        {
+          "ns_per_load": 20.039,
+          "wss_bytes": 2097152
+        },
+        {
+          "ns_per_load": 25.7905,
+          "wss_bytes": 4194304
+        },
+        {
+          "ns_per_load": 30.253,
+          "wss_bytes": 8388608
+        },
+        {
+          "ns_per_load": 95.8145,
+          "wss_bytes": 16777216
+        },
+        {
+          "ns_per_load": 120.854,
+          "wss_bytes": 33554432
+        },
+        {
+          "ns_per_load": 123.8126,
+          "wss_bytes": 67108864
+        },
+        {
+          "ns_per_load": 125.0258,
+          "wss_bytes": 134217728
+        },
+        {
+          "ns_per_load": 127.226,
+          "wss_bytes": 268435456
+        }
+      ],
+      "reason": null,
+      "status": "ok"
+    },
+    "t4_mlp": {
+      "bench": "mlp",
+      "curve": [
+        {
+          "loads_per_ns": 0.00798,
+          "n": 1
+        },
+        {
+          "loads_per_ns": 0.01398,
+          "n": 2
+        },
+        {
+          "loads_per_ns": 0.02036,
+          "n": 3
+        },
+        {
+          "loads_per_ns": 0.02618,
+          "n": 4
+        },
+        {
+          "loads_per_ns": 0.03898,
+          "n": 6
+        },
+        {
+          "loads_per_ns": 0.05091,
+          "n": 8
+        },
+        {
+          "loads_per_ns": 0.06047,
+          "n": 10
+        },
+        {
+          "loads_per_ns": 0.07414,
+          "n": 12
+        },
+        {
+          "loads_per_ns": 0.09677,
+          "n": 16
+        },
+        {
+          "loads_per_ns": 0.10916,
+          "n": 20
+        },
+        {
+          "loads_per_ns": 0.12315,
+          "n": 24
+        },
+        {
+          "loads_per_ns": 0.13969,
+          "n": 32
+        },
+        {
+          "loads_per_ns": 0.14679,
+          "n": 48
+        },
+        {
+          "loads_per_ns": 0.14673,
+          "n": 64
+        }
+      ],
+      "knee_n": 16,
+      "peak_loads_per_ns": 0.14679,
+      "reason": null,
+      "status": "ok"
+    }
+  }
+}

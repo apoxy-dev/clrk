@@ -1,0 +1,1 @@
+{"test": "pmu_intel", "status": "skipped", "reason": "not x86_64 (uname -m = aarch64); pmu_intel only runs on Intel x86-64", "host": "ip-172-31-36-180", "arch": "aarch64"}

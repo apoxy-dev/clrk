@@ -1,0 +1,3 @@
+hugepage_sweep: requested=never applied=never verified=na anonhuge_delta=0kB core_boot_p50=137.822254ms
+hugepage_sweep: requested=madvise applied=madvise verified=na anonhuge_delta=0kB core_boot_p50=141.214256ms
+hugepage_sweep: THP=always but AnonHugePages did not increase (delta=0kB); 2M backing did not take

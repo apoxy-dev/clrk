@@ -1,0 +1,6 @@
+## E2 coreboot GP=4 normal
+gp,pin,rcu,min,p50,mean,p95,max
+4,0-3,normal,172.05,186.39,186.05,198.63,204.00
+## E2 coreboot GP=4 expedited
+gp,pin,rcu,min,p50,mean,p95,max
+4,0-3,expedited,82.39,85.07,85.13,87.62,88.22

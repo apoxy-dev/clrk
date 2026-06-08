@@ -1,0 +1,146 @@
+=== uname -r ===
+6.17.0-1017-aws
+=== uname -a ===
+Linux ip-172-31-15-76 6.17.0-1017-aws #17~24.04.1-Ubuntu SMP Tue May 26 21:30:32 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+=== arch ===
+x86_64
+=== getconf PAGESIZE ===
+4096
+=== nproc / online ===
+nproc=96 online=96
+=== lscpu ===
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           46 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  96
+On-line CPU(s) list:                     0-95
+Vendor ID:                               GenuineIntel
+BIOS Vendor ID:                          Intel(R) Corporation
+Model name:                              Intel(R) Xeon(R) Platinum 8488C
+BIOS Model name:                         Intel(R) Xeon(R) Platinum 8488C  CPU @ 2.4GHz
+BIOS CPU family:                         179
+CPU family:                              6
+Model:                                   143
+Thread(s) per core:                      2
+Core(s) per socket:                      48
+Socket(s):                               1
+Stepping:                                8
+CPU(s) scaling MHz:                      29%
+CPU max MHz:                             3800.0000
+CPU min MHz:                             800.0000
+BogoMIPS:                                4800.00
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 cat_l2 cdp_l3 intel_ppin cdp_l2 ssbd mba ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local split_lock_detect user_shstk avx_vnni avx512_bf16 wbnoinvd dtherm ida arat pln pts hwp hwp_act_window hwp_epp hwp_pkg_req hfi vnmi avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq la57 rdpid bus_lock_detect cldemote movdiri movdir64b enqcmd fsrm md_clear serialize tsxldtrk pconfig arch_lbr ibt amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities
+Virtualization:                          VT-x
+L1d cache:                               2.3 MiB (48 instances)
+L1i cache:                               1.5 MiB (48 instances)
+L2 cache:                                96 MiB (48 instances)
+L3 cache:                                105 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-95
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Vulnerable
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Mitigation; IBPB before exit to userspace
+=== numactl -H ===
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
+node 0 size: 193002 MB
+node 0 free: 179345 MB
+node distances:
+node   0 
+  0:  10 
+=== governor (cpu0) ===
+performance
+=== governor set this run ===
+performance
+=== turbo state ===
+on(intel_pstate no_turbo=0)
+=== cpuidle driver ===
+intel_idle
+=== cpuidle states (cpu0) ===
+state0 name=POLL latency_us=0 residency_us=0 disable=0
+state1 name=C1 latency_us=1 residency_us=1 disable=0
+state2 name=C1E latency_us=2 residency_us=4 disable=0
+state3 name=C6 latency_us=290 residency_us=800 disable=0
+=== /proc/cpuinfo flags ===
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 cat_l2 cdp_l3 intel_ppin cdp_l2 ssbd mba ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local split_lock_detect user_shstk avx_vnni avx512_bf16 wbnoinvd dtherm ida arat pln pts hwp hwp_act_window hwp_epp hwp_pkg_req hfi vnmi avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq la57 rdpid bus_lock_detect cldemote movdiri movdir64b enqcmd fsrm md_clear serialize tsxldtrk pconfig arch_lbr ibt amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities
+=== /proc/cpuinfo model ===
+model name	: Intel(R) Xeon(R) Platinum 8488C
+=== perf list (head) ===
+  branch-instructions OR branches                    [Hardware event]
+  branch-misses                                      [Hardware event]
+  bus-cycles                                         [Hardware event]
+  cache-misses                                       [Hardware event]
+  cache-references                                   [Hardware event]
+  cpu-cycles OR cycles                               [Hardware event]
+  instructions                                       [Hardware event]
+  ref-cycles                                         [Hardware event]
+
+cache:
+  L1-dcache-loads OR cpu/L1-dcache-loads/
+  L1-dcache-load-misses OR cpu/L1-dcache-load-misses/
+  L1-dcache-stores OR cpu/L1-dcache-stores/
+  L1-icache-load-misses OR cpu/L1-icache-load-misses/
+  LLC-loads OR cpu/LLC-loads/
+  LLC-load-misses OR cpu/LLC-load-misses/
+  LLC-stores OR cpu/LLC-stores/
+  LLC-store-misses OR cpu/LLC-store-misses/
+  dTLB-loads OR cpu/dTLB-loads/
+  dTLB-load-misses OR cpu/dTLB-load-misses/
+  dTLB-stores OR cpu/dTLB-stores/
+  dTLB-store-misses OR cpu/dTLB-store-misses/
+  iTLB-load-misses OR cpu/iTLB-load-misses/
+  branch-loads OR cpu/branch-loads/
+  branch-load-misses OR cpu/branch-load-misses/
+  node-loads OR cpu/node-loads/
+  node-load-misses OR cpu/node-load-misses/
+  branch-instructions OR cpu/branch-instructions/    [Kernel PMU event]
+  branch-misses OR cpu/branch-misses/                [Kernel PMU event]
+  bus-cycles OR cpu/bus-cycles/                      [Kernel PMU event]
+  cache-misses OR cpu/cache-misses/                  [Kernel PMU event]
+  cache-references OR cpu/cache-references/          [Kernel PMU event]
+  cpu-cycles OR cpu/cpu-cycles/                      [Kernel PMU event]
+  instructions OR cpu/instructions/                  [Kernel PMU event]
+  mem-loads OR cpu/mem-loads/                        [Kernel PMU event]
+  mem-loads-aux OR cpu/mem-loads-aux/                [Kernel PMU event]
+  mem-stores OR cpu/mem-stores/                      [Kernel PMU event]
+  ref-cycles OR cpu/ref-cycles/                      [Kernel PMU event]
+  slots OR cpu/slots/                                [Kernel PMU event]
+  topdown-bad-spec OR cpu/topdown-bad-spec/          [Kernel PMU event]
+  topdown-be-bound OR cpu/topdown-be-bound/          [Kernel PMU event]
+  topdown-br-mispredict OR cpu/topdown-br-mispredict/[Kernel PMU event]
+  topdown-fe-bound OR cpu/topdown-fe-bound/          [Kernel PMU event]
+  topdown-fetch-lat OR cpu/topdown-fetch-lat/        [Kernel PMU event]
+  topdown-heavy-ops OR cpu/topdown-heavy-ops/        [Kernel PMU event]
+  topdown-mem-bound OR cpu/topdown-mem-bound/        [Kernel PMU event]
+  topdown-retiring OR cpu/topdown-retiring/          [Kernel PMU event]
+  intel_bts//                                        [Kernel PMU event]
+  intel_pt//                                         [Kernel PMU event]
+  msr/aperf/                                         [Kernel PMU event]
+  msr/cpu_thermal_margin/                            [Kernel PMU event]
+  msr/mperf/                                         [Kernel PMU event]
+  msr/smi/                                           [Kernel PMU event]
+  msr/tsc/                                           [Kernel PMU event]
+  alarmtimer:alarmtimer_cancel                       [Tracepoint event]
+  alarmtimer:alarmtimer_fired                        [Tracepoint event]
+  alarmtimer:alarmtimer_start                        [Tracepoint event]
+  alarmtimer:alarmtimer_suspend                      [Tracepoint event]
+  amd_cpu:amd_pstate_epp_perf                        [Tracepoint event]
+  amd_cpu:amd_pstate_perf                            [Tracepoint event]
+(perf list failed)

@@ -1,0 +1,8 @@
+[c7g-metal] pre-seed root go caches
+seeded
+[c7g-metal] waiting for ssh 54.87.204.216 (metal can take several minutes)
+[c7g-metal] ssh up; staging bundle under ~/window
+[c7g-metal] running run_host.sh (label=c7g-metal)
+[c7g-metal] run_host.sh exit=0
+[c7g-metal] pulling results
+[c7g-metal] DONE

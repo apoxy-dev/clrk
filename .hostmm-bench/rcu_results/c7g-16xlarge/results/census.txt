@@ -1,0 +1,46 @@
+=== uname ===
+6.17.0-1017-aws
+=== cpus ===
+nproc=64 online=64
+=== cmdline ===
+BOOT_IMAGE=/vmlinuz-6.17.0-1017-aws root=PARTUUID=835636cc-739d-48a2-ad85-07397deb84ba ro console=tty1 console=ttyS0 nvme_core.io_timeout=4294967295 panic=-1
+=== kernel config (HZ/NOHZ/RCU/PREEMPT) ===
+CONFIG_NO_HZ_COMMON=y
+CONFIG_NO_HZ_FULL=y
+CONFIG_NO_HZ=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_PREEMPT_VOLUNTARY_BUILD=y
+CONFIG_PREEMPT_VOLUNTARY=y
+CONFIG_TREE_RCU=y
+CONFIG_RCU_NOCB_CPU=y
+CONFIG_HZ_1000=y
+CONFIG_HZ=1000
+CONFIG_PREEMPT_NOTIFIERS=y
+=== nohz_full / isolated ===
+nohz_full=                                                          (null)
+isolated=
+=== clocksource ===
+current=arch_sys_counter
+available=arch_sys_counter 
+=== rcutree params ===
+jiffies_till_first_fqs = 3
+jiffies_till_next_fqs = 3
+rcu_kick_kthreads = N
+blimit = 10
+rcu_expedited=0 rcu_normal=0
+=== cpuidle driver + states (cpu0) ===
+driver=none
+=== idle residency snapshot (cpu0, 1s) ===
+=== governor ===
+governor=none
+=== rcu kthreads ===
+rcuo_count=0
+      4 kworker/R-rcu_gp
+     15 rcu_sched
+     97 kworker/13:0-rcu_gp
+    115 kworker/16:0-rcu_gp
+    405 rcu_tasks_rude_kthread
+    406 rcu_tasks_trace_kthread
+   1040 kworker/57:2-rcu_gp
+=== steal/idle (vmstat-ish) ===
+cpu  1983 243 927 1881797 1317 0 3 0 0 0

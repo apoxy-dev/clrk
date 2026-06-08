@@ -1,0 +1,6 @@
+## baseline
+gp,pin,rcu,min,p50,mean,p95,max
+4,0-3,normal,146.64,158.81,158.25,171.73,172.21
+## patched
+gp,pin,rcu,min,p50,mean,p95,max
+4,0-3,normal,122.78,135.47,134.27,142.69,146.53

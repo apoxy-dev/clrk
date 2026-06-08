@@ -1,0 +1,14 @@
+Area,Value,Unit,Description,Sample,Stddev,Multiplex,Bottleneck,Idle
+Frontend_Bound,27.6,% Slots,,frontend_retired.latency_ge_4,0.0,6.0,,
+Backend_Bound.Core_Bound.Serializing_Operation,20.4,% Clocks,,resource_stalls.scoreboard,0.0,6.0,,
+Backend_Bound,32.8,% Slots,,topdown.backend_bound_slots,0.0,12.0,,
+Frontend_Bound.Fetch_Latency,15.4,% Slots,,frontend_retired.latency_ge_16 frontend_retired.latency_ge_8,0.0,12.0,,
+Bad_Speculation.Machine_Clears,0.9,% Slots,,machine_clears.count,0.0,6.0,,
+Backend_Bound.Core_Bound,15.1,% Slots,,,0.0,12.0,<==,
+Frontend_Bound.Fetch_Latency.Branch_Resteers,7.2,% Clocks,,br_misp_retired.all_branches,0.0,6.0,,
+Frontend_Bound.Fetch_Latency.MS_Switches,9.1,% Clocks_est,,idq.ms_switches,0.0,12.0,,
+Backend_Bound.Memory_Bound.L1_Bound,11.5,% Stalls,,mem_load_retired.l1_hit,0.0,6.0,,
+Backend_Bound.Core_Bound.Ports_Utilization,18.3,% Clocks,,,0.0,6.0,,
+Retiring.Heavy_Operations.Microcode_Sequencer,2.0,% Slots,,uops_retired.ms,0.0,6.0,,
+MUX,6.0,%,,,0.0,100.0,,
+# 5.1-full on Intel(R) Xeon(R) Platinum 8488C [spr/sapphire_rapids]

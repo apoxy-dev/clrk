@@ -1,0 +1,14 @@
+[install]
+[build]
+BUILD OK
+NCPU=64
+[A: idle global synchronize_rcu, N=500]
+[B: funclatency synchronize_rcu (idle)]
+[C: FQS passes per grace period (idle)]
+[D: busy global synchronize_rcu, all cores loaded, N=500]
+[E: register full-path (fork/sample), idle, N=100]
+[medians]
+global_idle n=500 p50=9.4552 p5=5.9998 p95=9.9995 max=15.9996
+global_busy n=500 p50=23.9986 p5=17.9970 p95=36.9976 max=54.0002
+register_idle n=100 p50=18.6264 p5=13.6114 p95=23.6129 max=24.6172
+ALL DONE

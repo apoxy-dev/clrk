@@ -1,0 +1,54 @@
+=== uname ===
+6.17.0-1017-aws
+=== cpus ===
+nproc=96 online=96
+=== cmdline ===
+BOOT_IMAGE=/vmlinuz-6.17.0-1017-aws root=PARTUUID=09498292-78d3-4d43-8e2c-ca69f8c3b655 ro console=tty1 console=ttyS0 nvme_core.io_timeout=4294967295 panic=-1
+=== kernel config (HZ/NOHZ/RCU/PREEMPT) ===
+CONFIG_NO_HZ_COMMON=y
+CONFIG_NO_HZ_FULL=y
+CONFIG_NO_HZ=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_PREEMPT_VOLUNTARY_BUILD=y
+CONFIG_PREEMPT_VOLUNTARY=y
+CONFIG_TREE_RCU=y
+CONFIG_RCU_NOCB_CPU=y
+CONFIG_HZ_1000=y
+CONFIG_HZ=1000
+CONFIG_PREEMPT_NOTIFIERS=y
+=== nohz_full / isolated ===
+nohz_full=                                                                                          (null)
+isolated=
+=== clocksource ===
+current=tsc
+available=tsc hpet acpi_pm 
+=== rcutree params ===
+jiffies_till_first_fqs = 3
+jiffies_till_next_fqs = 3
+rcu_kick_kthreads = N
+blimit = 10
+rcu_expedited=0 rcu_normal=0
+=== cpuidle driver + states (cpu0) ===
+driver=intel_idle
+state0 name=POLL latency_us=0 residency_us=0 disable=0
+state1 name=C1 latency_us=1 residency_us=1 disable=0
+state2 name=C1E latency_us=2 residency_us=4 disable=0
+state3 name=C6 latency_us=290 residency_us=800 disable=0
+=== idle residency snapshot (cpu0, 1s) ===
+POLL usage=8 time_us=140
+C1 usage=132 time_us=5252
+C1E usage=7699 time_us=1833345
+C6 usage=6892 time_us=37036161
+=== governor ===
+governor=performance
+=== rcu kthreads ===
+rcuo_count=0
+      4 kworker/R-rcu_gp
+      9 kworker/0:0-rcu_gp
+     15 rcu_sched
+    598 rcu_tasks_rude_kthread
+    599 rcu_tasks_trace_kthread
+    788 kworker/0:3-rcu_gp
+    809 kworker/48:2-rcu_gp
+=== steal/idle (vmstat-ish) ===
+cpu  1630 154 1644 401033 1336 0 12 0 0 0

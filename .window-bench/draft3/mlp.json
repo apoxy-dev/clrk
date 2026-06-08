@@ -1,0 +1,16 @@
+[
+  {"n": 1, "loads_per_ns": 0.00741, "max_loads_per_ns": 0.00744},
+  {"n": 2, "loads_per_ns": 0.01464, "max_loads_per_ns": 0.01475},
+  {"n": 3, "loads_per_ns": 0.02138, "max_loads_per_ns": 0.02217},
+  {"n": 4, "loads_per_ns": 0.02889, "max_loads_per_ns": 0.03008},
+  {"n": 6, "loads_per_ns": 0.03146, "max_loads_per_ns": 0.03189},
+  {"n": 8, "loads_per_ns": 0.05829, "max_loads_per_ns": 0.05865},
+  {"n": 10, "loads_per_ns": 0.04274, "max_loads_per_ns": 0.04523},
+  {"n": 12, "loads_per_ns": 0.04977, "max_loads_per_ns": 0.05221},
+  {"n": 16, "loads_per_ns": 0.06501, "max_loads_per_ns": 0.06539},
+  {"n": 20, "loads_per_ns": 0.05687, "max_loads_per_ns": 0.05741},
+  {"n": 24, "loads_per_ns": 0.06490, "max_loads_per_ns": 0.06563},
+  {"n": 32, "loads_per_ns": 0.06491, "max_loads_per_ns": 0.06560},
+  {"n": 48, "loads_per_ns": 0.06447, "max_loads_per_ns": 0.06569},
+  {"n": 64, "loads_per_ns": 0.06506, "max_loads_per_ns": 0.06573}
+]

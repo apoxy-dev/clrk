@@ -1,0 +1,14 @@
+host=ip-172-31-23-45
+arch=arm64
+uname=6.17.0-1017-aws
+pagesize=4096
+ncpu=4
+model=0x41
+kallsyms_sync_runqueues=1
+kallsyms_register_priv=1
+kallsyms_synchronize_rcu=1
+nohz_full=(null)
+rcu_expedited=0
+rcu_normal=0
+thp_enabled=always [madvise] never
+cmdline=BOOT_IMAGE=/vmlinuz-6.17.0-1017-aws root=PARTUUID=835636cc-739d-48a2-ad85-07397deb84ba ro console=tty1 console=ttyS0 nvme_core.io_timeout=4294967295 panic=-1

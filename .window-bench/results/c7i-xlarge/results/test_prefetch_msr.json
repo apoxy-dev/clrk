@@ -1,0 +1,1 @@
+{"test": "prefetch_msr", "status": "ok", "platform": "systrap", "cpus": "0-3", "iters": 30, "warmup": 5, "arch": "x86_64", "vendor": "GenuineIntel", "msr": "0x1A4", "prefetch_cores": "0 1 2 3", "msr_0x1a4_enabled": "0x0", "msr_0x1a4_disabled": "0x0", "enabled_core_boot_p50_ms": 140.435562, "disabled_core_boot_p50_ms": 140.500528, "delta": {"delta_ms": 0.065, "delta_pct": 0.046}}

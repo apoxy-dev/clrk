@@ -1,0 +1,2 @@
+fqs_sym= gp_sym=rcu_gp_init
+(bpftrace or fqs symbol unavailable)

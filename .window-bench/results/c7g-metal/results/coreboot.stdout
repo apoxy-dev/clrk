@@ -1,0 +1,91 @@
+# Parent GOMAXPROCS=4 NumCPU=4 Threads=7
+# Image: docker.io/library/alpine:3.20
+# Rootfs: /run/clrk/images/45e09956dc667c5eff3583c9d94830261fb1ca0be10a0a7db36266edf5de9e1d/rootfs
+# Pull (cold/cached): 361.51768ms / 401ns
+# Platform: systrap | Network: plugin | Cmd: /bin/true
+# Iters: warmup=5 measured=50 cgroup=""
+[warmup   0] core= 201.5ms create= 137.6ms start=  63.9ms wait=  33.7ms delete=  37.8ms
+[warmup   1] core= 208.4ms create= 139.2ms start=  69.2ms wait=  40.8ms delete=  34.9ms
+[warmup   2] core= 233.7ms create= 166.7ms start=  67.0ms wait=  32.6ms delete=  36.7ms
+[warmup   3] core= 212.6ms create= 147.8ms start=  64.8ms wait=  31.5ms delete=  34.1ms
+[warmup   4] core= 207.2ms create= 142.1ms start=  65.0ms wait=  32.9ms delete=  33.0ms
+[MEASURE  5] core= 209.2ms create= 144.2ms start=  65.1ms wait=  33.1ms delete=  33.6ms
+[MEASURE  6] core= 209.0ms create= 145.1ms start=  63.9ms wait=  35.3ms delete=  39.7ms
+[MEASURE  7] core= 204.8ms create= 139.9ms start=  64.9ms wait=  33.6ms delete=  38.9ms
+[MEASURE  8] core= 202.4ms create= 132.6ms start=  69.8ms wait=  37.6ms delete=  36.9ms
+[MEASURE  9] core= 213.8ms create= 149.9ms start=  63.9ms wait=  35.1ms delete=  39.3ms
+[MEASURE 10] core= 201.9ms create= 136.0ms start=  66.0ms wait=  41.3ms delete=  38.5ms
+[MEASURE 11] core= 199.0ms create= 132.3ms start=  66.7ms wait=  43.3ms delete=  40.0ms
+[MEASURE 12] core= 204.4ms create= 139.5ms start=  64.8ms wait=  39.7ms delete=  35.7ms
+[MEASURE 13] core= 211.7ms create= 147.8ms start=  63.9ms wait=  35.7ms delete=  33.1ms
+[MEASURE 14] core= 223.5ms create= 157.4ms start=  66.1ms wait=  36.3ms delete=  33.7ms
+[MEASURE 15] core= 213.8ms create= 147.1ms start=  66.7ms wait=  42.5ms delete=  35.9ms
+[MEASURE 16] core= 204.5ms create= 139.0ms start=  65.6ms wait=  38.9ms delete=  36.7ms
+[MEASURE 17] core= 201.7ms create= 137.0ms start=  64.7ms wait=  31.5ms delete=  31.8ms
+[MEASURE 18] core= 199.5ms create= 131.9ms start=  67.6ms wait=  43.6ms delete=  44.1ms
+[MEASURE 19] core= 227.1ms create= 159.7ms start=  67.3ms wait=  45.9ms delete=  33.3ms
+[MEASURE 20] core= 204.0ms create= 139.8ms start=  64.2ms wait=  36.4ms delete=  32.1ms
+[MEASURE 21] core= 210.5ms create= 144.6ms start=  65.9ms wait=  45.1ms delete=  38.3ms
+[MEASURE 22] core= 220.8ms create= 155.1ms start=  65.7ms wait=  38.7ms delete=  39.3ms
+[MEASURE 23] core= 201.1ms create= 136.8ms start=  64.3ms wait=  36.3ms delete=  30.9ms
+[MEASURE 24] core= 222.2ms create= 156.5ms start=  65.6ms wait=  33.8ms delete=  38.2ms
+[MEASURE 25] core= 207.0ms create= 141.9ms start=  65.0ms wait=  42.0ms delete=  38.1ms
+[MEASURE 26] core= 212.9ms create= 148.8ms start=  64.1ms wait=  32.7ms delete=  32.7ms
+[MEASURE 27] core= 211.9ms create= 146.9ms start=  65.0ms wait=  38.9ms delete=  37.1ms
+[MEASURE 28] core= 196.2ms create= 129.6ms start=  66.6ms wait=  42.4ms delete=  39.8ms
+[MEASURE 29] core= 212.6ms create= 148.7ms start=  63.9ms wait=  33.0ms delete=  40.7ms
+[MEASURE 30] core= 210.2ms create= 143.9ms start=  66.2ms wait=  36.0ms delete=  31.8ms
+[MEASURE 31] core= 201.1ms create= 136.7ms start=  64.4ms wait=  37.0ms delete=  38.6ms
+[MEASURE 32] core= 203.8ms create= 139.9ms start=  63.9ms wait=  33.9ms delete=  38.9ms
+[MEASURE 33] core= 212.6ms create= 148.6ms start=  64.0ms wait=  39.9ms delete=  37.8ms
+[MEASURE 34] core= 207.9ms create= 139.8ms start=  68.1ms wait=  39.1ms delete=  38.7ms
+[MEASURE 35] core= 213.7ms create= 146.8ms start=  66.9ms wait=  35.7ms delete=  32.8ms
+[MEASURE 36] core= 220.0ms create= 154.7ms start=  65.3ms wait=  39.7ms delete=  40.2ms
+[MEASURE 37] core= 208.8ms create= 142.2ms start=  66.6ms wait=  42.7ms delete=  36.3ms
+[MEASURE 38] core= 201.3ms create= 131.5ms start=  69.7ms wait=  41.5ms delete=  36.7ms
+[MEASURE 39] core= 199.1ms create= 134.1ms start=  65.0ms wait=  41.0ms delete=  38.1ms
+[MEASURE 40] core= 210.8ms create= 146.1ms start=  64.8ms wait=  43.5ms delete=  36.7ms
+[MEASURE 41] core= 198.1ms create= 132.0ms start=  66.1ms wait=  40.2ms delete=  35.9ms
+[MEASURE 42] core= 211.9ms create= 147.2ms start=  64.7ms wait=  34.9ms delete=  34.3ms
+[MEASURE 43] core= 209.2ms create= 144.8ms start=  64.4ms wait=  36.0ms delete=  32.1ms
+[MEASURE 44] core= 205.7ms create= 141.7ms start=  64.0ms wait=  35.5ms delete=  32.7ms
+[MEASURE 45] core= 213.3ms create= 140.8ms start=  72.5ms wait=  33.7ms delete=  38.7ms
+[MEASURE 46] core= 206.5ms create= 140.8ms start=  65.7ms wait=  35.8ms delete=  40.2ms
+[MEASURE 47] core= 200.8ms create= 134.5ms start=  66.3ms wait=  37.3ms delete=  36.7ms
+[MEASURE 48] core= 207.4ms create= 143.9ms start=  63.5ms wait=  32.4ms delete=  32.5ms
+[MEASURE 49] core= 203.7ms create= 136.9ms start=  66.8ms wait=  41.5ms delete=  36.7ms
+[MEASURE 50] core= 222.6ms create= 158.9ms start=  63.7ms wait=  41.9ms delete=  39.5ms
+[MEASURE 51] core= 210.0ms create= 144.3ms start=  65.7ms wait=  39.1ms delete=  33.4ms
+[MEASURE 52] core= 202.9ms create= 138.6ms start=  64.4ms wait=  41.0ms delete=  38.1ms
+[MEASURE 53] core= 218.3ms create= 150.8ms start=  67.4ms wait=  43.2ms delete=  33.9ms
+[MEASURE 54] core= 202.2ms create= 136.7ms start=  65.6ms wait=  38.2ms delete=  37.7ms
+
+================= AGGREGATE (warmups excluded) =================
+phase                 min        p50       mean        p95        max
+alloc_ips           0.00ms      0.00ms      0.00ms      0.00ms      0.00ms
+spec_build          0.00ms      0.00ms      0.01ms      0.01ms      0.02ms
+bundle_write        0.05ms      0.05ms      0.06ms      0.06ms      0.06ms
+initstr             0.00ms      0.00ms      0.00ms      0.01ms      0.01ms
+runsc_create      129.60ms    142.18ms    142.88ms    157.38ms    159.75ms
+runsc_start        63.52ms     65.55ms     65.66ms     69.74ms     72.51ms
+runsc_wait         31.55ms     38.70ms     38.27ms     43.62ms     45.93ms
+runsc_delete       30.87ms     36.94ms     36.55ms     40.21ms     44.09ms
+CORE_BOOT         196.20ms    208.77ms    208.55ms    222.64ms    227.08ms
+WALL_TO_EXIT      233.32ms    245.28ms    246.89ms    261.55ms    273.08ms
+OVERALL           265.07ms    282.09ms    283.43ms    299.98ms    306.40ms
+
+============ DEBUG-LOG BOOT MARKERS (mean across iters) ============
+01_create.start        p50=  1.17ms mean=  1.22ms max=  1.64ms n=50
+02_gofer.started       p50=  2.25ms mean=  2.29ms max=  2.69ms n=50
+03_sandbox.started     p50=  2.93ms mean=  2.98ms max=  3.47ms n=50
+04_seccomp.install     p50= 75.87ms mean= 75.65ms max= 88.16ms n=50
+05_seccomp.done        p50= 79.60ms mean= 79.71ms max= 92.60ms n=50
+06_gofer.serving       p50= 79.62ms mean= 79.73ms max= 92.62ms n=50
+07_loader.cpus         p50= 83.13ms mean= 82.28ms max= 94.19ms n=50
+08_loader.platform     p50=  0.06ms mean=  0.07ms max=  0.21ms n=50
+09_loader.memory       p50=103.96ms mean=104.47ms max=119.34ms n=50
+10_loader.packet       p50=104.04ms mean=104.57ms max=119.43ms n=50
+20_start.connect       p50=139.90ms mean=140.93ms max=156.90ms n=50
+21_start.rpc           p50=140.50ms mean=141.58ms max=157.47ms n=50
+22_start.rpc.recv      p50=141.13ms mean=142.00ms max=157.90ms n=50
+23_start.kernel        p50=169.97ms mean=170.58ms max=186.69ms n=50

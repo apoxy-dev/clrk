@@ -1,0 +1,1 @@
+{"test": "prefetch_msr", "status": "skipped", "reason": "not x86 (arch=aarch64); MSR 0x1A4 prefetcher control is Intel-only", "arch": "aarch64"}

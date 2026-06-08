@@ -1,0 +1,1 @@
+{"test": "freq_sweep", "status": "skipped", "reason": "userspace governor unavailable (cannot pin frequency)", "scaling_available_frequencies_khz": []}

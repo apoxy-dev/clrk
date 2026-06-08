@@ -1,0 +1,12 @@
+Tracing 1 functions for "synchronize_rcu"... Hit Ctrl-C to end.
+
+     msecs               : count     distribution
+         0 -> 1          : 0        |                                        |
+         2 -> 3          : 0        |                                        |
+         4 -> 7          : 0        |                                        |
+         8 -> 15         : 64       |****************************************|
+        16 -> 31         : 1        |                                        |
+
+avg = 10 msecs, total: 656 msecs, count: 65
+
+Detaching...

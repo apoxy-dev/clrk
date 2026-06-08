@@ -1,0 +1,14 @@
+host=ip-172-31-16-110
+arch=amd64
+uname=6.17.0-1017-aws
+pagesize=4096
+ncpu=4
+model=Intel(R) Xeon(R) Platinum 8488C
+kallsyms_sync_runqueues=2
+kallsyms_register_priv=0
+kallsyms_synchronize_rcu=1
+nohz_full=(null)
+rcu_expedited=0
+rcu_normal=0
+thp_enabled=always [madvise] never
+cmdline=BOOT_IMAGE=/vmlinuz-6.17.0-1017-aws root=PARTUUID=09498292-78d3-4d43-8e2c-ca69f8c3b655 ro console=tty1 console=ttyS0 nvme_core.io_timeout=4294967295 panic=-1

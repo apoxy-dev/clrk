@@ -1,0 +1,2 @@
+pmu_arm: running topdown-tool -m Topdown_L1 (timeout 90s)
+pmu_arm: running raw perf stat -a (present: stall_backend,stall_backend_mem,l1d_tlb_refill,dtlb_walk,cpu_cycles,instructions; timeout 60s)

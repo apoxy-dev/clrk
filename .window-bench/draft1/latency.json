@@ -1,0 +1,25 @@
+{
+  "bench": "latency",
+  "line_bytes": 128,
+  "target_loads": 67108864,
+  "reps": 5,
+  "curve": [
+    {"wss_bytes": 4096, "ns_per_load": 1.3296},
+    {"wss_bytes": 8192, "ns_per_load": 1.3015},
+    {"wss_bytes": 16384, "ns_per_load": 1.3087},
+    {"wss_bytes": 32768, "ns_per_load": 1.3075},
+    {"wss_bytes": 65536, "ns_per_load": 1.3131},
+    {"wss_bytes": 131072, "ns_per_load": 1.3295},
+    {"wss_bytes": 262144, "ns_per_load": 5.8749},
+    {"wss_bytes": 524288, "ns_per_load": 5.9506},
+    {"wss_bytes": 1048576, "ns_per_load": 6.1172},
+    {"wss_bytes": 2097152, "ns_per_load": 6.7642},
+    {"wss_bytes": 4194304, "ns_per_load": 11.8036},
+    {"wss_bytes": 8388608, "ns_per_load": 57.3618},
+    {"wss_bytes": 16777216, "ns_per_load": 121.4574},
+    {"wss_bytes": 33554432, "ns_per_load": 125.6336},
+    {"wss_bytes": 67108864, "ns_per_load": 129.6748},
+    {"wss_bytes": 134217728, "ns_per_load": 132.0345},
+    {"wss_bytes": 268435456, "ns_per_load": 137.7476}
+  ]
+}
