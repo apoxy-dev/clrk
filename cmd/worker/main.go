@@ -15,6 +15,8 @@ import (
 	"github.com/apoxy-dev/clrk/internal/config"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/worker"
+	"github.com/apoxy-dev/clrk/internal/worker/reexec"
+	"github.com/apoxy-dev/clrk/internal/worker/sandbox"
 )
 
 var scheme = runtime.NewScheme()
@@ -28,16 +30,16 @@ func main() {
 	// runsc subcommand demux runs before any other setup. Container.Start
 	// re-execs /proc/self/exe with argv[1] like "boot" or "gofer"; those
 	// invocations must reach gVisor's runsc main, not the controller-
-	// runtime manager. tryDispatchRunsc returns only if argv doesn't
+	// runtime manager. TryDispatchRunsc returns only if argv doesn't
 	// match a runsc subcommand.
-	tryDispatchRunsc()
+	reexec.TryDispatchRunsc()
 
 	// Reap orphan zombies. When `runsc create` exits, the Sentry and
 	// gofer it spawned are re-parented to us (we're PID 1 in our
 	// container). Without an explicit reaper they sit as zombies, and
 	// `runsc wait`'s kill(pid, 0) liveness probe sees them as alive for
-	// the full 2-minute waitForStopped backoff. See reaper_linux.go.
-	startChildReaper()
+	// the full 2-minute waitForStopped backoff. See sandbox/reaper_linux.go.
+	sandbox.StartChildReaper()
 
 	// Single logging pipeline: stdlib slog (text) is the default for our
 	// own slog.Info/Error sites; controller-runtime's logr is bridged into

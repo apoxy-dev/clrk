@@ -1,6 +1,14 @@
 //go:build linux
 
-package main
+// Package reexec centralizes the gVisor runsc subcommand dispatch that the
+// worker binary performs on startup. The sandbox Manager drives runsc by
+// re-exec'ing /proc/self/exe with a runsc argv (create/start/boot/gofer/...);
+// every binary that can be that re-exec target — the worker itself AND any
+// test binary that boots a real sandbox — must hand those invocations to
+// gVisor instead of running its normal main. Keeping the dispatch (and its
+// subcommand table) in one place avoids a second copy drifting out of sync
+// with the pinned gVisor commit.
+package reexec
 
 import (
 	"fmt"
@@ -64,15 +72,18 @@ var runscSubcommands = map[string]struct{}{
 	"flags":           {},
 }
 
-// tryDispatchRunsc hands off to gVisor's runsc entrypoint when the
-// process was re-exec'd as a runsc subcommand. The worker-side helpers
-// in internal/worker/runsc_exec_linux.go put runsc-level flags (e.g.
-// --root, --network) BEFORE the subcommand, mirroring the runsc CLI;
-// so scan past leading flag-shaped argv tokens before checking for a
-// known subcommand. maincli.Main never returns (cli.Run terminates
-// via os.Exit), so this function only returns when argv contained no
-// recognized subcommand at all.
-func tryDispatchRunsc() {
+// TryDispatchRunsc hands off to gVisor's runsc entrypoint when the process
+// was re-exec'd as a runsc subcommand. The worker-side helpers in
+// internal/worker/sandbox/runsc_exec.go put runsc-level flags (e.g. --root,
+// --network) BEFORE the subcommand, mirroring the runsc CLI; so scan past
+// leading flag-shaped argv tokens before checking for a known subcommand.
+// maincli.Main never returns (cli.Run terminates via os.Exit), so this
+// function only returns when argv contained no recognized subcommand at all.
+//
+// Call this FIRST in main()/TestMain(), before any other setup: the re-exec'd
+// invocation must reach gVisor, not the controller-runtime manager or the Go
+// test runner.
+func TryDispatchRunsc() {
 	for _, a := range os.Args[1:] {
 		if len(a) > 0 && a[0] == '-' {
 			continue
@@ -82,7 +93,7 @@ func tryDispatchRunsc() {
 		}
 		if sentrystack.Singleton() == nil {
 			fmt.Fprintf(os.Stderr,
-				"worker: runsc subcommand %q invoked but sentrystack PluginStack not registered\n", a)
+				"reexec: runsc subcommand %q invoked but sentrystack PluginStack not registered\n", a)
 			os.Exit(1)
 		}
 		maincli.Main()
