@@ -277,7 +277,11 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Instance, err
 		Sandbox:   req.Sandbox,
 		Resources: req.Resources,
 		Identity:  req.Identity,
-		CreatedAt: time.Now(),
+		// Set before buildSandboxInitStr below so the sealed initStr carries
+		// the inbound listen addr + fd index; a value arriving after Create
+		// would never reach the Sentry's PreInit. Empty = egress-only.
+		InboundListenAddr: req.InboundListenAddr,
+		CreatedAt:         time.Now(),
 	}
 
 	if err := wireSandboxStdio(sb, req.Stdio); err != nil {
@@ -396,6 +400,17 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	sb.Phase = SandboxRunning
 	m.stdLogs[id] = sandboxLogs{stdout: stdoutLog, stderr: stderrLog, file: logFile}
 	m.mu.Unlock()
+
+	// Ingress readiness gate: hold Start open until the resident server is
+	// actually accepting through the inbound forwarder, so a caller that gets
+	// a successful Start can route traffic immediately. Egress-only sandboxes
+	// skip this entirely. On timeout the sandbox is left Running for the
+	// caller to Delete — Start's contract is "ready or error".
+	if sb.InboundListenAddr != "" {
+		if err := waitInboundReady(ctx, sb.InboundSockPath, inboundReadyTimeout); err != nil {
+			return fmt.Errorf("inbound readiness: %w", err)
+		}
+	}
 
 	log.Info("Sandbox started")
 	return nil

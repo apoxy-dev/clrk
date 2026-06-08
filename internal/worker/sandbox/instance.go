@@ -43,6 +43,16 @@ type CreateRequest struct {
 	// Attempt is the restart-attempt counter (daemons); 0 for
 	// TaskAgent invocations.
 	Attempt int32
+	// InboundListenAddr opts the sandbox into the ingress path: the
+	// in-sandbox "ip:port" a resident server listens on (e.g.
+	// "127.0.0.1:8080"). It must be set here, not on the returned
+	// Instance, because Create seals the sentrystack initStr
+	// (InboundListenAddr + InboundFDIndex) before returning — a value
+	// set post-Create never reaches the Sentry, so the inbound forwarder
+	// would never install. Empty keeps the sandbox egress-only (the
+	// historical default). The production caller that populates this in a
+	// serving path is APO-696; today only the ingress roundtrip test sets it.
+	InboundListenAddr string
 }
 
 // Instance tracks the state of a single sandbox container.
@@ -94,9 +104,11 @@ type Instance struct {
 	// the Sentry (which installs the inbound forwarder), and records the
 	// socket path in InboundSockPath. Empty keeps the sandbox egress-only.
 	//
-	// NOTE (spike): set directly on the Instance to drive the APO-694
-	// mechanism. The customer-facing surface (a Worker/AgentSandbox API field
-	// or CreateRequest option) is M1 — see docs/workerd-runtime-mvp.md.
+	// Populated from CreateRequest.InboundListenAddr at Create (before the
+	// initStr is sealed), NOT set on the returned Instance — see that field's
+	// doc for why post-Create assignment is too late. The customer-facing
+	// surface (an AgentSandbox/Service API field) is M1; see
+	// docs/workerd-runtime-mvp.md.
 	InboundListenAddr string
 
 	// InboundSockPath is the host filesystem path of the AF_UNIX listening
