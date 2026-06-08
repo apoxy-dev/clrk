@@ -118,6 +118,27 @@ type InitStr struct {
 	// would mean dialing through the host netns — workable but not
 	// the intended path).
 	DNSResolvers []string `json:"dns_resolvers,omitempty"`
+
+	// InboundListenAddr is the in-sandbox "ip:port" a RESIDENT server
+	// (workerd, or a spike stub) listens on, e.g. "127.0.0.1:8080".
+	// When set together with InboundFDIndex, the Sentry installs an
+	// inbound forwarder that accepts host-originated connections off the
+	// passed fd and dials this address inside the in-Sentry stack,
+	// splicing the two — the reverse of the egress forwarder. Empty
+	// leaves the sandbox egress-only (the historical behavior). The dial
+	// reaches the resident listener rather than the egress catch-all
+	// forwarder because a bound listening endpoint shadows the global TCP
+	// handler (proven in inbound_demux_test.go).
+	InboundListenAddr string `json:"inbound_listen_addr,omitempty"`
+
+	// InboundFDIndex is the file-descriptor number, inside the runsc-start
+	// subprocess, of the host AF_UNIX listening socket the worker handed
+	// off via cmd.ExtraFiles. PreInit surfaces this fd in its []int return
+	// so runsc ships it (FilePayload → InitStackArgs.FDs) into the Sentry,
+	// where the inbound forwarder accepts on it. Zero (the default) means
+	// no inbound fd was passed. See runscStart for why the fd rides the
+	// start subprocess and not create.
+	InboundFDIndex int `json:"inbound_fd_index,omitempty"`
 }
 
 // Encode serializes an InitStr. Empty SandboxID is allowed in Phase 1.

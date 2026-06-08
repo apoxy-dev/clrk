@@ -165,24 +165,38 @@ func readLogTail(path string, n int64) string {
 	return string(buf[:read])
 }
 
+// inboundExtraFileFD is the file-descriptor number, inside the runsc-start
+// subprocess, of the host AF_UNIX inbound listening socket the worker hands
+// off via cmd.ExtraFiles. os/exec maps ExtraFiles[0] to fd 3 — stdin/stdout/
+// stderr occupy 0/1/2 (defaulting to /dev/null here, since the start
+// subprocess is stdio-less). runscStart passes exactly one ExtraFile, so the
+// index is constant; sentrystack PreInit reads it back from
+// InitStr.InboundFDIndex and surfaces it for the FilePayload → Init.FDs hop.
+const inboundExtraFileFD = 3
+
 // runRunsc runs `/proc/self/exe --root=<rootDir> <args...>` and returns
 // its stdout. On *exec.ExitError, stderr is folded into the returned
 // error message — runsc prints diagnostics there. Used for the
 // stdio-less runsc subcommands (start, kill, delete, wait, state, list).
 func runRunsc(ctx context.Context, rootDir string, args ...string) ([]byte, error) {
-	return runRunscEnv(ctx, rootDir, nil, args...)
+	return runRunscEnv(ctx, rootDir, nil, nil, args...)
 }
 
 // runRunscEnv is runRunsc plus extra env vars layered on top of the
-// worker's os.Environ(). Used by runscStart, which must inject
+// worker's os.Environ() and optional extra files donated to the
+// subprocess. Used by runscStart, which must inject
 // CLRK_SENTRYSTACK_INITSTR so the in-binary plugin-stack PreInit
 // (which gVisor calls from inside `runsc start`, not `runsc create`)
-// can find the per-sandbox payload.
-func runRunscEnv(ctx context.Context, rootDir string, extraEnv []string, args ...string) ([]byte, error) {
+// can find the per-sandbox payload — and, when ingress is enabled, hand
+// the inbound listening socket to that same PreInit via cmd.ExtraFiles.
+func runRunscEnv(ctx context.Context, rootDir string, extraEnv []string, extraFiles []*os.File, args ...string) ([]byte, error) {
 	full := append(commonRunscFlags(rootDir), args...)
 	cmd := exec.CommandContext(ctx, "/proc/self/exe", full...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	if len(extraFiles) > 0 {
+		cmd.ExtraFiles = extraFiles
 	}
 	out, err := outputCmdReapAware(cmd)
 	if err == nil {
@@ -207,10 +221,18 @@ func runRunscEnv(ctx context.Context, rootDir string, extraEnv []string, args ..
 // — the failure mode we most often hit (urpc EOF from
 // containerManager.StartRoot) means the Sentry crashed mid-StartRoot,
 // and the panic frame is in that log.
-func runscStart(ctx context.Context, rootDir, id, initStr string) error {
+func runscStart(ctx context.Context, rootDir, id, initStr string, inboundFile *os.File) error {
 	debugLog := sandboxDebugLog(rootDir, id)
 	extraEnv := []string{sentrystack.InitStrEnv + "=" + initStr}
-	_, err := runRunscEnv(ctx, rootDir, extraEnv,
+	// When ingress is enabled the worker hands the inbound listening socket
+	// to this start subprocess; gVisor's PluginStack.PreInit (which runs
+	// here) surfaces it for the FilePayload → Sentry hop. ExtraFiles[0] lands
+	// at inboundExtraFileFD in the child.
+	var extraFiles []*os.File
+	if inboundFile != nil {
+		extraFiles = []*os.File{inboundFile}
+	}
+	_, err := runRunscEnv(ctx, rootDir, extraEnv, extraFiles,
 		"--debug",
 		"--debug-log="+debugLog,
 		"--panic-log="+debugLog,

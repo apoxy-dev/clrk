@@ -44,6 +44,14 @@ func buildSandboxInitStr(sb *Instance, imdsHostAddr, egressHostAddr string, reso
 	for _, r := range resolvers {
 		is.DNSResolvers = append(is.DNSResolvers, r.String())
 	}
+	// Inbound (ingress) path: when the caller asked for a resident listener,
+	// tell the Sentry where the server listens and at which fd to find the
+	// host listening socket. The fd is constant (inboundExtraFileFD) because
+	// runscStart passes exactly one ExtraFile; see its comment.
+	if sb.InboundListenAddr != "" {
+		is.InboundListenAddr = sb.InboundListenAddr
+		is.InboundFDIndex = inboundExtraFileFD
+	}
 	return is.Encode()
 }
 

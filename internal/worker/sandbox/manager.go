@@ -370,7 +370,25 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	}
 
 	log.Info("Starting sandbox")
-	if err := runscStart(ctx, m.stateDir, string(id), sb.initStr); err != nil {
+
+	// Ingress: when a resident listener was requested, open the host AF_UNIX
+	// socket that fronts it and donate it to the start subprocess so the
+	// Sentry's PluginStack PreInit can wire the inbound forwarder. nil when
+	// inbound is disabled, leaving the sandbox egress-only.
+	var inboundFile *os.File
+	if sb.InboundListenAddr != "" {
+		path := inboundSockPath(m.stateDir, id)
+		f, err := openInboundListener(path)
+		if err != nil {
+			return fmt.Errorf("opening inbound listener: %w", err)
+		}
+		inboundFile = f
+		sb.InboundSockPath = path
+		// The Sentry holds its own dup after start; drop ours either way.
+		defer inboundFile.Close()
+	}
+
+	if err := runscStart(ctx, m.stateDir, string(id), sb.initStr, inboundFile); err != nil {
 		return err
 	}
 
@@ -574,6 +592,7 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 	m.removeAgentCA(id)
 	m.removeSandboxNetConfig(id)
 	m.removeRunscBundleDir(id)
+	removeInboundSock(m.stateDir, id)
 	// removeSandboxDebugLog intentionally NOT called — keep per-sandbox
 	// Sentry logs for post-mortem inspection during the LLM-hang +
 	// start-crash investigation. Re-enable after diagnosis.
@@ -680,6 +699,7 @@ func (m *Manager) Purge(ctx context.Context, id SandboxID) {
 	if err := os.RemoveAll(filepath.Join(m.stateDir, string(id))); err != nil {
 		log.Error(err, "RemoveAll of state dir failed")
 	}
+	removeInboundSock(m.stateDir, id)
 	m.removeRunscBundleDir(id)
 }
 

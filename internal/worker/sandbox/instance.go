@@ -88,6 +88,23 @@ type Instance struct {
 	// where PreInit reads it.
 	initStr string
 
+	// InboundListenAddr, when set, enables the ingress path: the in-sandbox
+	// "ip:port" a resident server listens on (e.g. "127.0.0.1:8080"). At
+	// Start the worker opens a host AF_UNIX listening socket, hands its fd to
+	// the Sentry (which installs the inbound forwarder), and records the
+	// socket path in InboundSockPath. Empty keeps the sandbox egress-only.
+	//
+	// NOTE (spike): set directly on the Instance to drive the APO-694
+	// mechanism. The customer-facing surface (a Worker/AgentSandbox API field
+	// or CreateRequest option) is M1 — see docs/workerd-runtime-mvp.md.
+	InboundListenAddr string
+
+	// InboundSockPath is the host filesystem path of the AF_UNIX listening
+	// socket that fronts the resident server. Callers on the host (the Envoy
+	// MITM, the backplane bridge, or a spike test) dial this path to reach
+	// the in-sandbox listener. Set at Start; empty when inbound is disabled.
+	InboundSockPath string
+
 	CreatedAt time.Time
 }
 
