@@ -13,6 +13,7 @@ func init() {
 		Aliases:   []string{"google"},
 		Hosts:     []string{"generativelanguage.googleapis.com"},
 		Telemetry: telemetryParser{},
+		Codec:     codec{},
 		Capabilities: llmcall.Capabilities{
 			Operations:        []string{"chat", "embeddings"},
 			Tools:             true,
