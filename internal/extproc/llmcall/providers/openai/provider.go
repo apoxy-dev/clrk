@@ -11,6 +11,7 @@ func init() {
 		Name:      "openai",
 		Hosts:     []string{"api.openai.com"},
 		Telemetry: telemetryParser{},
+		Codec:     codec{},
 		Capabilities: llmcall.Capabilities{
 			Operations:        []string{"chat", "text_completion", "embeddings"},
 			Tools:             true,
