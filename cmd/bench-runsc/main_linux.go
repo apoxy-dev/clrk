@@ -69,7 +69,7 @@ func tryDispatchRunsc() {
 const (
 	runscRootDir = "/run/clrk/runsc"
 	imageBaseDir = "/run/clrk/images"
-	runscNetwork  = "plugin"
+	runscNetwork = "plugin"
 )
 
 var runscPlatform = "systrap"
@@ -78,16 +78,16 @@ func main() {
 	tryDispatchRunsc()
 
 	var (
-		iters     = flag.Int("iters", 12, "iterations (excluding warmup)")
-		warmup    = flag.Int("warmup", 2, "warmup iterations (excluded from stats)")
-		image     = flag.String("image", "docker.io/library/alpine:3.20", "OCI image ref")
-		cmdline   = flag.String("cmd", "/bin/true", "command (space-separated) to run inside sandbox")
-		cgroup    = flag.String("cgroup", "", "absolute cgroup v2 path to delegate to runsc subprocess (empty = no CLONE_INTO_CGROUP)")
-		jsonOut   = flag.String("json", "", "if set, append per-iteration JSON rows to this path")
-		quiet     = flag.Bool("quiet", false, "suppress per-iteration log lines")
-		noDebug   = flag.Bool("no-debug", false, "drop --debug --debug-log flags (no internal phase breakdown but lower I/O)")
-		platform  = flag.String("platform", "systrap", "runsc platform (systrap|kvm|ptrace)")
-		probe     = flag.Bool("probe", false, "print effective GOMAXPROCS/NumCPU/Threads then exit 0; for the inittrace harness (E1/E2/E4)")
+		iters    = flag.Int("iters", 12, "iterations (excluding warmup)")
+		warmup   = flag.Int("warmup", 2, "warmup iterations (excluded from stats)")
+		image    = flag.String("image", "docker.io/library/alpine:3.20", "OCI image ref")
+		cmdline  = flag.String("cmd", "/bin/true", "command (space-separated) to run inside sandbox")
+		cgroup   = flag.String("cgroup", "", "absolute cgroup v2 path to delegate to runsc subprocess (empty = no CLONE_INTO_CGROUP)")
+		jsonOut  = flag.String("json", "", "if set, append per-iteration JSON rows to this path")
+		quiet    = flag.Bool("quiet", false, "suppress per-iteration log lines")
+		noDebug  = flag.Bool("no-debug", false, "drop --debug --debug-log flags (no internal phase breakdown but lower I/O)")
+		platform = flag.String("platform", "systrap", "runsc platform (systrap|kvm|ptrace)")
+		probe    = flag.Bool("probe", false, "print effective GOMAXPROCS/NumCPU/Threads then exit 0; for the inittrace harness (E1/E2/E4)")
 	)
 	flag.Parse()
 	runscPlatform = *platform
@@ -102,6 +102,12 @@ func main() {
 	// and exit before any image pull or root requirement.
 	if *probe {
 		fmt.Printf("# GOMAXPROCS=%d NumCPU=%d Threads=%d\n", runtime.GOMAXPROCS(0), runtime.NumCPU(), procThreads())
+		return
+	}
+
+	// Exec-path workerd bench is a separate driver (exec_workerd_linux.go).
+	if *execMode == "exec-workerd" {
+		runExecWorkerdMode()
 		return
 	}
 
@@ -209,9 +215,9 @@ type iterResult struct {
 	RunscStart     time.Duration `json:"runsc_start"`
 	RunscWait      time.Duration `json:"runsc_wait"`
 	RunscDelete    time.Duration `json:"runsc_delete"`
-	CoreBoot       time.Duration `json:"core_boot"`        // runsc create + start
-	WallToExit     time.Duration `json:"wall_to_exit"`     // everything before runsc delete
-	OverallElapsed time.Duration `json:"overall_elapsed"`  // including delete
+	CoreBoot       time.Duration `json:"core_boot"`       // runsc create + start
+	WallToExit     time.Duration `json:"wall_to_exit"`    // everything before runsc delete
+	OverallElapsed time.Duration `json:"overall_elapsed"` // including delete
 
 	// Internal phases parsed from runsc --debug-log (μs precision).
 	// Each is duration from the first log line of the corresponding
@@ -406,10 +412,10 @@ func buildSpec(id, rootfs string, args []string) *specs.Spec {
 				{Type: specs.CgroupNamespace},
 				{Type: specs.NetworkNamespace, Path: "/proc/self/ns/net"},
 			},
-			MaskedPaths: []string{"/proc/kcore", "/sys/firmware"},
+			MaskedPaths:   []string{"/proc/kcore", "/sys/firmware"},
 			ReadonlyPaths: []string{"/proc/sys", "/proc/sysrq-trigger", "/proc/irq", "/proc/bus"},
-			Resources:   &specs.LinuxResources{},
-			CgroupsPath: filepath.Join("/system", id),
+			Resources:     &specs.LinuxResources{},
+			CgroupsPath:   filepath.Join("/system", id),
 		},
 	}
 }
@@ -482,24 +488,24 @@ var bootMarkers = []struct {
 	sub  string
 }{
 	// runsc create CLI (parent of boot+gofer):
-	{"01_create.start", "Create container"},                 // container.go:201 — runsc create entered
-	{"02_gofer.started", "Gofer started, PID"},              // container.go:1552 — gofer fork+exec done
-	{"03_sandbox.started", "Sandbox started, PID"},          // sandbox.go:1331 — sentry fork done
+	{"01_create.start", "Create container"},        // container.go:201 — runsc create entered
+	{"02_gofer.started", "Gofer started, PID"},     // container.go:1552 — gofer fork+exec done
+	{"03_sandbox.started", "Sandbox started, PID"}, // sandbox.go:1331 — sentry fork done
 
 	// boot subprocess re-exec (after applyCaps):
-	{"04_seccomp.install", "Installing seccomp filters"},    // sandbox/seccomp.go:67
-	{"05_seccomp.done", "Seccomp filters installed"},        // sandbox/seccomp.go:87
-	{"06_gofer.serving", "Serving \"/\" mapped"},            // runsc/cmd/gofer.go:339 — gofer serving root
-	{"07_loader.cpus", "CPUs:"},                             // loader.go:519
-	{"08_loader.platform", "Platform: systrap"},             // loader.go:891 (after platform init)
-	{"09_loader.memory", "Setting total memory"},            // loader.go:649
-	{"10_loader.packet", "Packet logging"},                  // loader.go:712
+	{"04_seccomp.install", "Installing seccomp filters"}, // sandbox/seccomp.go:67
+	{"05_seccomp.done", "Seccomp filters installed"},     // sandbox/seccomp.go:87
+	{"06_gofer.serving", "Serving \"/\" mapped"},         // runsc/cmd/gofer.go:339 — gofer serving root
+	{"07_loader.cpus", "CPUs:"},                          // loader.go:519
+	{"08_loader.platform", "Platform: systrap"},          // loader.go:891 (after platform init)
+	{"09_loader.memory", "Setting total memory"},         // loader.go:649
+	{"10_loader.packet", "Packet logging"},               // loader.go:712
 
 	// runsc start CLI:
-	{"20_start.connect", "Connecting to sandbox"},           // sandbox.go:796 — start CLI dials Sentry
-	{"21_start.rpc", "Start root sandbox"},                  // sandbox.go:440 — RPC sent
-	{"22_start.rpc.recv", "containerManager.StartRoot"},     // controller.go:275 — Sentry receives StartRoot
-	{"23_start.kernel", "Process should have started"},      // loader.go:1117 — k.Start has returned
+	{"20_start.connect", "Connecting to sandbox"},       // sandbox.go:796 — start CLI dials Sentry
+	{"21_start.rpc", "Start root sandbox"},              // sandbox.go:440 — RPC sent
+	{"22_start.rpc.recv", "containerManager.StartRoot"}, // controller.go:275 — Sentry receives StartRoot
+	{"23_start.kernel", "Process should have started"},  // loader.go:1117 — k.Start has returned
 }
 
 // runscLogTSLayout: gVisor logs as "Sxxxx HH:MM:SS.uuuuuu" where Sxxxx

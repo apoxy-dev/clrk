@@ -1,0 +1,7 @@
+host=ip-172-31-83-24
+arch=amd64
+uname=6.17.0-1017-aws
+ncpu=2
+mem=3791MB
+model=AMD EPYC 9R14
+workerd_tag=v1.20260606.1

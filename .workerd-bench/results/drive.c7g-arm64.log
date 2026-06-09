@@ -1,0 +1,115 @@
+### [echo] SMOKE (config.capnp)
+# Warm: warmup=0 measured=1 | Cold: measured=0 | Requests/proc: 1
+
+# --- warm-binary sweep (one warm sandbox, 0+1 execs) ---
+[warm   0 ] e2e=  87.0ms dispatch= 43.6ms spawn->listen=  36.6ms listen->1B=  5.4ms (HTTP/1.1 200 OK)
+
+# --- cold-binary sweep (fresh sandbox each, 0 execs) ---
+
+================= WARM-BINARY (reused sandbox, steady state) =================
+n=1
+segment                      min       p50       p90       p99       max
+exec_dispatch            43.60ms   43.60ms   43.60ms   43.60ms   43.60ms
+runner_entry->spawn       1.32ms    1.32ms    1.32ms    1.32ms    1.32ms
+workerd spawn->listen    36.61ms   36.61ms   36.61ms   36.61ms   36.61ms
+listen->first_byte        5.45ms    5.45ms    5.45ms    5.45ms    5.45ms
+workerd spawn->1B        42.06ms   42.06ms   42.06ms   42.06ms   42.06ms
+END-TO-END exec->1B      86.98ms   86.98ms   86.98ms   86.98ms   86.98ms
+
+================= COLD-BINARY (fresh sandbox, workerd faults cold) =================
+(no successful samples)
+
+### [echo] FULL (warm=15 req=500)
+=========== run.c7g-arm64.echo.txt ===========
+# ===== exec-workerd bench =====
+# Image: docker.io/library/node:bookworm-slim (rootfs /run/clrk/images/cef0ae4e4ae8c6b7153a0372640fad4adcf2597ffb8ab9f4fc77efdf6d588e28/rootfs, pull 2.895285191s)
+# Platform: systrap | Network: plugin
+# Stage: /opt/workerd | runner=workerd-runner workerd=workerd config=config.capnp
+# Warm: warmup=3 measured=15 | Cold: measured=0 | Requests/proc: 500
+
+# --- warm-binary sweep (one warm sandbox, 3+15 execs) ---
+[warm   0*] e2e=  66.9ms dispatch= 30.8ms spawn->listen=  33.9ms listen->1B=  2.0ms (HTTP/1.1 200 OK)
+[warm   1*] e2e=  58.0ms dispatch= 26.3ms spawn->listen=  29.7ms listen->1B=  1.8ms (HTTP/1.1 200 OK)
+[warm   2*] e2e=  51.1ms dispatch= 23.7ms spawn->listen=  25.4ms listen->1B=  1.8ms (HTTP/1.1 200 OK)
+[warm   3 ] e2e=  64.7ms dispatch= 35.9ms spawn->listen=  27.0ms listen->1B=  1.6ms (HTTP/1.1 200 OK)
+[warm   4 ] e2e=  63.0ms dispatch= 33.4ms spawn->listen=  26.8ms listen->1B=  2.7ms (HTTP/1.1 200 OK)
+
+# --- cold-binary sweep (fresh sandbox each, 0 execs) ---
+
+================= WARM-BINARY (reused sandbox, steady state) =================
+n=15
+segment                      min       p50       p90       p99       max
+exec_dispatch            23.98ms   26.86ms   33.37ms   35.90ms   35.90ms
+runner_entry->spawn       0.14ms    0.26ms    0.42ms    0.58ms    0.58ms
+workerd spawn->listen    21.55ms   25.46ms   30.62ms   36.57ms   36.57ms
+listen->first_byte        1.32ms    1.96ms    2.67ms    3.24ms    3.24ms
+workerd spawn->1B        22.97ms   27.80ms   33.25ms   38.71ms   38.71ms
+END-TO-END exec->1B      47.64ms   56.48ms   64.58ms   64.66ms   64.66ms
+
+================= COLD-BINARY (fresh sandbox, workerd faults cold) =================
+(no successful samples)
+
+================= REQUEST LATENCY (fresh unix conn/req, dial->first byte) =================
+15 workerd processes; req[0]=cold isolate first request, req[1:]=warm process
+bucket                                   min       p50       p90       p99       max
+first request (cold isolate)         1.298ms   1.926ms   2.588ms   3.046ms   3.046ms  n=15
+warm requests (same process)         0.309ms   0.668ms   1.115ms   2.115ms   3.564ms  n=7485
+
+### [heavy] SMOKE (config-heavy.capnp)
+# Warm: warmup=0 measured=1 | Cold: measured=0 | Requests/proc: 1
+
+# --- warm-binary sweep (one warm sandbox, 0+1 execs) ---
+[warm   0 ] e2e= 214.5ms dispatch= 29.1ms spawn->listen= 122.5ms listen->1B= 62.7ms (HTTP/1.1 200 OK)
+
+# --- cold-binary sweep (fresh sandbox each, 0 execs) ---
+
+================= WARM-BINARY (reused sandbox, steady state) =================
+n=1
+segment                      min       p50       p90       p99       max
+exec_dispatch            29.05ms   29.05ms   29.05ms   29.05ms   29.05ms
+runner_entry->spawn       0.28ms    0.28ms    0.28ms    0.28ms    0.28ms
+workerd spawn->listen   122.45ms  122.45ms  122.45ms  122.45ms  122.45ms
+listen->first_byte       62.69ms   62.69ms   62.69ms   62.69ms   62.69ms
+workerd spawn->1B       185.14ms  185.14ms  185.14ms  185.14ms  185.14ms
+END-TO-END exec->1B     214.47ms  214.47ms  214.47ms  214.47ms  214.47ms
+
+================= COLD-BINARY (fresh sandbox, workerd faults cold) =================
+(no successful samples)
+
+### [heavy] FULL (warm=15 req=500)
+=========== run.c7g-arm64.heavy.txt ===========
+# ===== exec-workerd bench =====
+# Image: docker.io/library/node:bookworm-slim (rootfs /run/clrk/images/cef0ae4e4ae8c6b7153a0372640fad4adcf2597ffb8ab9f4fc77efdf6d588e28/rootfs, pull 2.68304272s)
+# Platform: systrap | Network: plugin
+# Stage: /opt/workerd | runner=workerd-runner workerd=workerd config=config-heavy.capnp
+# Warm: warmup=3 measured=15 | Cold: measured=0 | Requests/proc: 500
+
+# --- warm-binary sweep (one warm sandbox, 3+15 execs) ---
+[warm   0*] e2e= 236.9ms dispatch= 51.0ms spawn->listen= 149.9ms listen->1B= 35.7ms (HTTP/1.1 200 OK)
+[warm   1*] e2e= 153.4ms dispatch= 25.9ms spawn->listen= 109.3ms listen->1B= 17.9ms (HTTP/1.1 200 OK)
+[warm   2*] e2e= 162.5ms dispatch= 27.9ms spawn->listen= 115.5ms listen->1B= 18.8ms (HTTP/1.1 200 OK)
+[warm   3 ] e2e= 163.1ms dispatch= 25.2ms spawn->listen= 117.6ms listen->1B= 19.9ms (HTTP/1.1 200 OK)
+[warm   4 ] e2e= 157.8ms dispatch= 27.3ms spawn->listen= 110.9ms listen->1B= 19.3ms (HTTP/1.1 200 OK)
+
+# --- cold-binary sweep (fresh sandbox each, 0 execs) ---
+
+================= WARM-BINARY (reused sandbox, steady state) =================
+n=15
+segment                      min       p50       p90       p99       max
+exec_dispatch            24.44ms   26.33ms   28.33ms   28.69ms   28.69ms
+runner_entry->spawn       0.21ms    0.35ms    0.44ms    0.47ms    0.47ms
+workerd spawn->listen    97.77ms  105.91ms  117.47ms  117.61ms  117.61ms
+listen->first_byte       17.27ms   18.95ms   19.91ms   20.26ms   20.26ms
+workerd spawn->1B       115.04ms  125.02ms  136.84ms  137.52ms  137.52ms
+END-TO-END exec->1B     143.61ms  152.35ms  163.05ms  163.50ms  163.50ms
+
+================= COLD-BINARY (fresh sandbox, workerd faults cold) =================
+(no successful samples)
+
+================= REQUEST LATENCY (fresh unix conn/req, dial->first byte) =================
+15 workerd processes; req[0]=cold isolate first request, req[1:]=warm process
+bucket                                   min       p50       p90       p99       max
+first request (cold isolate)        17.252ms  18.885ms  19.546ms  19.890ms  19.890ms  n=15
+warm requests (same process)         1.173ms   1.906ms   2.928ms   4.903ms  45.370ms  n=7485
+
+### done

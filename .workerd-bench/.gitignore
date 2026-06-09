@@ -1,0 +1,13 @@
+# Kept out of version control:
+#   *.pem            - SSH private key for the (torn-down) EC2 hosts.
+#   clrk-src.tar.gz  - rebuildable source bundle shipped to the VMs.
+#   workerd-runner   - compiled static binary (build from cmd/workerd-runner).
+#   sg.id            - ephemeral security-group id of a deleted resource.
+*.pem
+clrk-src.tar.gz
+*.tgz
+*.tar.gz
+sg.id
+workerd-runner
+worker/worker-heavy.js
+results/*/results.tgz

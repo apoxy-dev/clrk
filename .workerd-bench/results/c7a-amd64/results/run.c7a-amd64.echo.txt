@@ -1,0 +1,34 @@
+# ===== exec-workerd bench =====
+# Image: docker.io/library/node:bookworm-slim (rootfs /run/clrk/images/3101b78c867e29d6975bd96eac672ef9f1d75efe29973b430231c22ef9d1b47f/rootfs, pull 2.610663677s)
+# Platform: systrap | Network: plugin
+# Stage: /opt/workerd | runner=workerd-runner workerd=workerd config=config.capnp
+# Warm: warmup=3 measured=15 | Cold: measured=0 | Requests/proc: 500
+
+# --- warm-binary sweep (one warm sandbox, 3+15 execs) ---
+[warm   0*] e2e=  67.2ms dispatch= 30.2ms spawn->listen=  35.1ms listen->1B=  1.5ms (HTTP/1.1 200 OK)
+[warm   1*] e2e=  61.1ms dispatch= 26.3ms spawn->listen=  32.7ms listen->1B=  1.5ms (HTTP/1.1 200 OK)
+[warm   2*] e2e=  55.5ms dispatch= 25.5ms spawn->listen=  28.3ms listen->1B=  1.4ms (HTTP/1.1 200 OK)
+[warm   3 ] e2e=  55.6ms dispatch= 26.2ms spawn->listen=  27.9ms listen->1B=  1.4ms (HTTP/1.1 200 OK)
+[warm   4 ] e2e=  52.2ms dispatch= 25.1ms spawn->listen=  25.2ms listen->1B=  1.4ms (HTTP/1.1 200 OK)
+
+# --- cold-binary sweep (fresh sandbox each, 0 execs) ---
+
+================= WARM-BINARY (reused sandbox, steady state) =================
+n=15
+segment                      min       p50       p90       p99       max
+exec_dispatch            22.53ms   26.11ms   30.56ms   31.40ms   31.40ms
+runner_entry->spawn       0.16ms    0.20ms    0.30ms    0.42ms    0.42ms
+workerd spawn->listen    22.59ms   25.24ms   31.36ms   40.12ms   40.12ms
+listen->first_byte        0.79ms    1.37ms    1.87ms    2.00ms    2.00ms
+workerd spawn->1B        23.38ms   26.81ms   33.01ms   41.30ms   41.30ms
+END-TO-END exec->1B      48.32ms   53.20ms   63.71ms   66.46ms   66.46ms
+
+================= COLD-BINARY (fresh sandbox, workerd faults cold) =================
+(no successful samples)
+
+================= REQUEST LATENCY (fresh unix conn/req, dial->first byte) =================
+15 workerd processes; req[0]=cold isolate first request, req[1:]=warm process
+bucket                                   min       p50       p90       p99       max
+first request (cold isolate)         0.770ms   1.245ms   1.655ms   1.980ms   1.980ms  n=15
+warm requests (same process)         0.164ms   0.296ms   0.440ms   0.805ms   3.439ms  n=7485
+
