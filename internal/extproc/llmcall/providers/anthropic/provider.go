@@ -11,6 +11,7 @@ func init() {
 		Name:      "anthropic",
 		Hosts:     []string{"api.anthropic.com"},
 		Telemetry: telemetryParser{},
+		Codec:     codec{},
 		Capabilities: llmcall.Capabilities{
 			Operations:        []string{"chat", "text_completion"},
 			Tools:             true,
