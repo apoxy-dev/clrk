@@ -1,0 +1,46 @@
+# Two clrk Backends an AIProviderRoute rule can re-point traffic to.
+# Both speak the `anthropic` wire schema — backend re-selection is
+# same-schema only: a backend whose schema differs from the rule's
+# provider would need request/response translation, so the route table
+# drops it from the candidate set at build time rather than send it a
+# mismatched body.
+#
+# Backends carry NO credentials. The key injected after a backend is
+# selected comes from a CredentialInjectionPolicy: route-wide CIPs
+# apply to every backend, and a CIP whose route parentRef sets
+# `sectionName: <backend-name>` applies only when that backend wins.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: anthropic-direct
+spec:
+  type: Upstream
+  schema:
+    name: anthropic
+  upstream:
+    host: api.anthropic.com
+    port: 443
+---
+# The "budget" backend. Same upstream host in this demo (so it runs
+# with one API key), but with a model rewrite: any claude-opus-* model
+# ID is remapped to claude-haiku-4-5 on the wire. In a real deployment
+# this would more likely be a different host — a self-hosted gateway,
+# a regional endpoint, or a second account — still speaking the
+# anthropic schema.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: anthropic-budget
+spec:
+  type: Upstream
+  schema:
+    name: anthropic
+  upstream:
+    host: api.anthropic.com
+    port: 443
+  # Ordered list; the first entry whose `from` glob matches the
+  # request's model wins. The agent asks for opus, the upstream serves
+  # haiku — the agent never knows.
+  modelRewrites:
+    - from: claude-opus-*
+      to: claude-haiku-4-5

@@ -1,0 +1,49 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: model-router
+spec:
+  workerPoolRef: default
+  # Always: even after a successful cycle the daemon supervisor
+  # respawns the agent so the demo keeps producing new ext_proc records
+  # in the otel-logs / otel-traces panes. RestartPolicy: OnFailure would
+  # stop after one clean call (k8s-style semantic).
+  restartPolicy: Always
+  egressRefs:
+    - gatewayRef: model-router
+  template:
+    spec:
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Each cycle issues TWO Anthropic POSTs, no x-api-key header —
+          # the proxy injects it via CredentialInjectionPolicy.
+          #
+          # Call 1 asks for an opus-class model. The model-scoped route
+          # rule steers it to the anthropic-budget Backend, whose
+          # modelRewrites remap it to claude-haiku-4-5 before it reaches
+          # the upstream — the response body reports the haiku model the
+          # API actually served, not the opus model the agent asked for.
+          #
+          # Call 2 asks for haiku directly. It falls through to the
+          # catch-all rule and takes the 90/10 weighted split (the pick
+          # is per-invocation-deterministic, so it flips only across
+          # agent respawns).
+          while :; do
+            for model in claude-opus-4-1 claude-haiku-4-5; do
+              curl -sS -o /tmp/resp.json -w 'http %{http_code} %{url_effective}\n' \
+                -X POST https://api.anthropic.com/v1/messages \
+                -H 'content-type: application/json' \
+                -H 'anthropic-version: 2023-06-01' \
+                -d '{
+                  "model": "'"$model"'",
+                  "max_tokens": 64,
+                  "messages": [{"role": "user", "content": "Say hi in three words."}]
+                }'
+              echo "asked for: $model"
+              echo "served:    $(sed -n 's/.*"model":"\([^"]*\)".*/\1/p' /tmp/resp.json)"
+              echo
+              sleep 5
+            done
+          done

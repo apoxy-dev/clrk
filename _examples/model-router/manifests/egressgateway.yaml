@@ -1,0 +1,19 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: model-router
+spec:
+  defaultPolicy: allow-all
+  listeners:
+    - name: egress
+      protocol: TLS
+      tls:
+        mode: Terminate
+  # Body capture is set; the OTLP endpoint is intentionally left empty
+  # so the controller-manager picks the effective sink at runtime:
+  # `clrk dev` injects CLRK_DEV_OTEL_ENDPOINT and the in-process
+  # receiver lights up the TUI's otel-logs/otel-traces panes; in prod,
+  # operators set spec.otlp.endpoint to their real collector.
+  otlp:
+    captureBody:
+      maxBytes: 65536

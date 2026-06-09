@@ -1,0 +1,50 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: AIProviderRoute
+metadata:
+  name: model-router
+spec:
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: EgressGateway
+      name: model-router
+  # Rules are first-hit-wins in spec order. Backend selection runs at
+  # RequestBody end-of-stream (the model lives in the JSON body, so a
+  # model-scoped rule cannot match before the body is buffered).
+  #
+  # ORDERING MATTERS: whether a request is re-selectable at all is
+  # decided at request-HEADERS time by a model-blind match — model-scoped
+  # rules are skipped there. A route whose only matching header-time rule
+  # has no backendRefs never defers selection, and model-scoped rules
+  # below it silently degrade to pass-through. Always pair model-scoped
+  # rules with a model-blind catch-all rule that also declares
+  # backendRefs (rule 2 here) so the defer latch arms.
+  rules:
+    # Rule 1: cost control. Any opus-class request is steered to the
+    # budget backend, whose modelRewrites remap it to haiku on the wire.
+    - matches:
+        - provider: anthropic
+          models:
+            - claude-opus-*
+      backendRefs:
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-budget
+    # Rule 2: catch-all for the rest of the Anthropic traffic, and the
+    # rule that arms re-selection at header time. Two candidates split
+    # by standard Gateway API BackendRef weights (90/10 canary). The
+    # pick is deterministic per invocation — retries of the same agent
+    # run always land on the same backend — so the split is visible
+    # across agent restarts, not within one run.
+    - matches:
+        - provider: anthropic
+          endpoints:
+            - /v1/messages
+      backendRefs:
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-direct
+          weight: 90
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-budget
+          weight: 10
