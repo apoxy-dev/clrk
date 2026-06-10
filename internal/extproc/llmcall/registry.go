@@ -2,6 +2,8 @@ package llmcall
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -164,4 +166,18 @@ func KnownName(name string) bool {
 	}
 	_, ok := providersByName[name]
 	return ok
+}
+
+// KnownNames returns every spelling KnownName accepts — registered
+// canonical names plus (pending) aliases — sorted and deduplicated.
+// Admission validation uses it for actionable NotSupported details.
+func KnownNames() []string {
+	seen := make(map[string]bool, len(providersByName)+len(aliasToName))
+	for name := range providersByName {
+		seen[name] = true
+	}
+	for alias := range aliasToName {
+		seen[alias] = true
+	}
+	return slices.Sorted(maps.Keys(seen))
 }

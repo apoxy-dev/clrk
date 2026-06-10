@@ -662,7 +662,7 @@ func schema_clrk_api_clrk_v1alpha1_AIProviderRouteMatch(ref common.ReferenceCall
 				Properties: map[string]spec.Schema{
 					"provider": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Provider selects the AI API provider.",
+							Description: "Provider selects the AI API provider. Validated against the llmcall provider registry at admission (AIProviderRoute.Validate), not an enum — a new provider plugin extends what is accepted without an API change. \"custom\" opts out of schema awareness for endpoint-only matching.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",

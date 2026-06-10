@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -17,6 +18,11 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
+	// Provider registration: the TranslationUnsupported condition
+	// resolves schemas against the llmcall registry, populated by the
+	// provider plugins' init functions.
+	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/all"
 )
 
 // clrk parentRef / backendRef group + kinds and the controller name this
@@ -73,8 +79,13 @@ func (r *AIProviderRouteStatusReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	// ResolvedRefs is route-wide (it inspects every rule's backendRefs),
-	// so it is computed once and stamped onto every parent.
+	// so it is computed once and stamped onto every parent. So is
+	// TranslationUnsupported.
 	resolved, err := r.resolvedRefsCondition(ctx, &apr)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	translation, err := r.translationCondition(ctx, &apr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -120,6 +131,9 @@ func (r *AIProviderRouteStatusReconciler) Reconcile(ctx context.Context, req ctr
 
 		resolved.ObservedGeneration = apr.Generation
 		meta.SetStatusCondition(&ps.Conditions, resolved)
+
+		translation.ObservedGeneration = apr.Generation
+		meta.SetStatusCondition(&ps.Conditions, translation)
 
 		parents = append(parents, ps)
 	}
@@ -172,6 +186,83 @@ func (r *AIProviderRouteStatusReconciler) resolvedRefsCondition(ctx context.Cont
 	cond.Reason = string(gwapiv1.RouteReasonResolvedRefs)
 	cond.Message = "All backendRefs resolved"
 	return cond, nil
+}
+
+// translationCondition evaluates every (rule match, backendRef) pair
+// for cross-schema servability. The build-time data-plane filter
+// (translatableBackends in extproc) silently drops a cross-schema
+// backend whose schema pair lacks llmcall codecs or whose Backend
+// declares no modelRewrites; this condition is the operator-visible
+// half of that contract. True (with reason UntranslatableBackends)
+// lists the dropped pairs; False means every cross-schema ref is
+// statically servable. Per-request skips (streaming, capability
+// misses, rewrite-doesn't-cover-this-model) are runtime facts and
+// surface on telemetry instead. "custom" matches keep every backend
+// and are never flagged; unresolvable refs are ResolvedRefs' problem.
+func (r *AIProviderRouteStatusReconciler) translationCondition(ctx context.Context, apr *clrkv1alpha1.AIProviderRoute) (metav1.Condition, error) {
+	cond := metav1.Condition{Type: clrkv1alpha1.AIProviderRouteConditionTranslationUnsupported}
+	var bad []string
+	for i, rule := range apr.Spec.Rules {
+		for _, ref := range rule.BackendRefs {
+			group, kind := backendRefGroupKind(ref)
+			if group != routeStatusGroup || kind != routeStatusBackendKind {
+				continue
+			}
+			ns := apr.Namespace
+			if ref.Namespace != nil && *ref.Namespace != "" {
+				ns = string(*ref.Namespace)
+			}
+			var be clrkv1alpha1.Backend
+			err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: string(ref.Name)}, &be)
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return cond, fmt.Errorf("getting Backend %s/%s: %w", ns, ref.Name, err)
+			}
+			if be.Spec.Type == clrkv1alpha1.BackendTypeInferencePool {
+				// Refused by the data plane regardless of schema.
+				continue
+			}
+			schema := llmcall.Canonical(strings.ToLower(string(be.Spec.Schema.Name)))
+			for j, m := range rule.Matches {
+				prov := llmcall.Canonical(strings.ToLower(m.Provider))
+				if prov == "" || prov == "custom" || schema == prov {
+					continue
+				}
+				var why string
+				switch {
+				case !hasCodec(prov):
+					why = fmt.Sprintf("no codec for match provider %q", m.Provider)
+				case !hasCodec(schema):
+					why = fmt.Sprintf("no codec for backend schema %q", be.Spec.Schema.Name)
+				case len(be.Spec.ModelRewrites) == 0:
+					why = "cross-schema backend declares no modelRewrites"
+				default:
+					continue
+				}
+				bad = append(bad, fmt.Sprintf("rules[%d].matches[%d] (%s) -> Backend %s/%s (%s): %s",
+					i, j, m.Provider, ns, ref.Name, be.Spec.Schema.Name, why))
+			}
+		}
+	}
+	if len(bad) > 0 {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = clrkv1alpha1.AIProviderRouteReasonUntranslatableBackends
+		cond.Message = strings.Join(bad, "; ")
+		return cond, nil
+	}
+	cond.Status = metav1.ConditionFalse
+	cond.Reason = clrkv1alpha1.AIProviderRouteReasonTranslationSupported
+	cond.Message = "All backendRefs are servable for their match providers"
+	return cond, nil
+}
+
+// hasCodec reports whether the canonical schema name resolves to a
+// registered provider with an IR codec.
+func hasCodec(system string) bool {
+	p := llmcall.ByName(system)
+	return p != nil && p.Codec != nil
 }
 
 func (r *AIProviderRouteStatusReconciler) SetupWithManager(mgr ctrl.Manager) error {

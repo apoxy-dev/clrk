@@ -27,6 +27,13 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
+	// Provider registration: schema-name validation resolves spellings
+	// against the llmcall registry, which the provider plugins populate
+	// from init. Without this import a binary serving these types would
+	// reject every non-custom schema name.
+	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/all"
 )
 
 // imageRefRegexp is a permissive smoke-test for OCI references. It accepts
@@ -367,4 +374,60 @@ func (wp *WorkerPool) ValidateUpdate(ctx context.Context, old runtime.Object) fi
 		return nil
 	}
 	return wp.Validate(ctx)
+}
+
+// validateProviderSchemaName checks a CRD-supplied provider/schema
+// spelling against the llmcall registry. "custom" is always legal
+// (endpoint-only matching, operator-vouched backends). The registry —
+// not a hardcoded enum — is the source of truth, so a new provider
+// plugin extends what admission accepts without an API change; pending
+// aliases (azure-openai, bedrock) stay legal before their plugins
+// land. Case-insensitive: the data plane lowercases before matching.
+func validateProviderSchemaName(name string, fp *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if name == "" {
+		errs = append(errs, field.Required(fp, "provider schema name is required"))
+		return errs
+	}
+	n := strings.ToLower(name)
+	if n == "custom" || llmcall.KnownName(n) {
+		return nil
+	}
+	errs = append(errs, field.NotSupported(fp, name, append(llmcall.KnownNames(), "custom")))
+	return errs
+}
+
+func (b *Backend) Validate(_ context.Context) field.ErrorList {
+	return validateProviderSchemaName(string(b.Spec.Schema.Name),
+		field.NewPath("spec").Child("schema", "name"))
+}
+
+func (b *Backend) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	// Same status-write skip as WorkerPool: a stored spec that predates
+	// this validator (or whose schema's plugin was unlinked) must not
+	// wedge the status controller.
+	if prev, ok := old.(*Backend); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &b.Spec) {
+		return nil
+	}
+	return b.Validate(ctx)
+}
+
+func (r *AIProviderRoute) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	rules := field.NewPath("spec").Child("rules")
+	for i := range r.Spec.Rules {
+		matches := rules.Index(i).Child("matches")
+		for j := range r.Spec.Rules[i].Matches {
+			errs = append(errs, validateProviderSchemaName(r.Spec.Rules[i].Matches[j].Provider,
+				matches.Index(j).Child("provider"))...)
+		}
+	}
+	return errs
+}
+
+func (r *AIProviderRoute) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*AIProviderRoute); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &r.Spec) {
+		return nil
+	}
+	return r.Validate(ctx)
 }

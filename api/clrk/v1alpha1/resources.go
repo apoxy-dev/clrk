@@ -92,6 +92,8 @@ var (
 	_ resource.Object                      = &AIProviderRoute{}
 	_ resource.ObjectWithStatusSubResource = &AIProviderRoute{}
 	_ rest.SingularNameProvider            = &AIProviderRoute{}
+	_ resourcestrategy.Validater           = &AIProviderRoute{}
+	_ resourcestrategy.ValidateUpdater     = &AIProviderRoute{}
 	_ resource.StatusSubResource           = &AIProviderRouteStatus{}
 
 	_ runtime.Object                       = &Backend{}
@@ -99,6 +101,8 @@ var (
 	_ resource.ObjectWithStatusSubResource = &Backend{}
 	_ rest.SingularNameProvider            = &Backend{}
 	_ resourcestrategy.Defaulter           = &Backend{}
+	_ resourcestrategy.Validater           = &Backend{}
+	_ resourcestrategy.ValidateUpdater     = &Backend{}
 	_ resource.StatusSubResource           = &BackendStatus{}
 
 	_ runtime.Object             = &CredentialInjectionPolicy{}

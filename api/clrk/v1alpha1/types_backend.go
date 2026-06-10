@@ -28,7 +28,10 @@ import (
 // schema through the same parsers.Canonical mapping it already uses for
 // host-derived providers.
 //
-// +kubebuilder:validation:Enum=openai;anthropic;google;azure-openai;bedrock;custom
+// Not an enum: Backend.Validate checks the value against the llmcall
+// provider registry at admission, so a new provider plugin extends what
+// is accepted without an API change. The constants below are the
+// built-in spellings.
 type BackendSchemaName string
 
 const (

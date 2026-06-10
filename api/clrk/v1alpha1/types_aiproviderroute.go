@@ -69,10 +69,35 @@ type AIProviderRouteFilter struct {
 	ExtensionRef *gwapiv1.LocalObjectReference `json:"extensionRef,omitempty"`
 }
 
+// AIProviderRoute status condition types and reasons beyond the
+// standard Gateway API set.
+const (
+	// AIProviderRouteConditionTranslationUnsupported is a route-wide
+	// condition: True when at least one (rule match, backendRef) pair
+	// can never serve cross-schema traffic — the schema pair lacks
+	// llmcall codecs, or the Backend declares no modelRewrites (model
+	// IDs don't transfer across providers). Such backends are dropped
+	// from the candidate set at route-table build time; this condition
+	// is how the operator learns why. Per-request skips (streaming,
+	// capability misses) are runtime facts and surface on telemetry
+	// (clrk.translation.skipped_backends), not here.
+	AIProviderRouteConditionTranslationUnsupported = "TranslationUnsupported"
+
+	// AIProviderRouteReasonUntranslatableBackends is the reason when
+	// TranslationUnsupported is True.
+	AIProviderRouteReasonUntranslatableBackends = "UntranslatableBackends"
+	// AIProviderRouteReasonTranslationSupported is the reason when
+	// TranslationUnsupported is False.
+	AIProviderRouteReasonTranslationSupported = "TranslationSupported"
+)
+
 // AIProviderRouteMatch defines match criteria for AI provider traffic.
 type AIProviderRouteMatch struct {
-	// Provider selects the AI API provider.
-	// +kubebuilder:validation:Enum=openai;anthropic;google;azure-openai;bedrock;custom
+	// Provider selects the AI API provider. Validated against the
+	// llmcall provider registry at admission (AIProviderRoute.Validate),
+	// not an enum — a new provider plugin extends what is accepted
+	// without an API change. "custom" opts out of schema awareness for
+	// endpoint-only matching.
 	Provider string `json:"provider"`
 
 	// Models restricts to specific model IDs. Supports glob: "claude-*".
