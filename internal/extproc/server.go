@@ -438,20 +438,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			provMatch = provisionalMatch(routes, rec.RequestHeaders)
 			deferReselect = provMatch != nil && len(provMatch.backends) > 0
 			if deferReselect {
-				// ModeOverride REPLACES the stream's whole ProcessingMode
-				// rather than merging with the filter's static config
-				// (Envoy ext_proc.cc handleHeadersResponse). A body mode
-				// left at proto zero means NONE, so the static
-				// ResponseBodyMode=BUFFERED must be re-asserted here or
-				// the response body is never sent to ext_proc on
-				// reselected streams — silently breaking response capture
-				// and the cross-schema reverse translation. Header/trailer
-				// modes are safe at zero (DEFAULT keeps the static
-				// behavior).
-				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
-					RequestBodyMode:  extprocfilterv3.ProcessingMode_BUFFERED,
-					ResponseBodyMode: extprocfilterv3.ProcessingMode_BUFFERED,
-				}
+				resp.ModeOverride = modeOverride(
+					extprocfilterv3.ProcessingMode_BUFFERED,
+					extprocfilterv3.ProcessingMode_BUFFERED,
+				)
 			} else if injs := lookupCreds(creds, routes, rec.RequestHeaders); len(injs) > 0 {
 				if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
 					logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
@@ -482,39 +472,69 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// traffic would buffer the whole SSE response before releasing
 			// it downstream. Error responses stay BUFFERED so the capture
 			// path gets the whole error body in one ProcessingRequest.
-			//
-			// Translated streams never promote: the request was committed
-			// non-streaming by construction (streaming is filtered at
-			// selection), so streamRequested can only be the byte-probe's
-			// false positive here, and the response body must arrive
-			// BUFFERED for the reverse translation to run on whole bytes.
 			respIsStreaming := isStreamingContentType(rec.ResponseHeaders["content-type"])
 			if xlate == nil && (streamRequested || respIsStreaming) && rec.ResponseHeaders[":status"] == "200" {
-				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
-					ResponseBodyMode: extprocfilterv3.ProcessingMode_STREAMED,
-				}
+				resp.ModeOverride = modeOverride(
+					extprocfilterv3.ProcessingMode_NONE,
+					extprocfilterv3.ProcessingMode_STREAMED,
+				)
 			}
-			if xlate != nil && !respIsStreaming && rec.ResponseHeaders[":status"] == "200" {
-				// The reverse translation at ResponseBody EOS replaces the
-				// body with differently-sized bytes. Envoy can reconcile
-				// content-length with a mutated body only while the header
-				// phase is still open; by the body phase it instead 500s
-				// with "mismatch between content length and the length of
-				// the mutated body". Drop content-length now — the
-				// translated response is delivered chunked.
-				resp.GetResponseHeaders().GetResponse().HeaderMutation = &extprocv3.HeaderMutation{
-					RemoveHeaders: []string{"content-length"},
+			if xlate != nil && rec.ResponseHeaders[":status"] == "200" {
+				// Committed translation: the body Envoy forwards will not
+				// be the body the upstream sent. Drop content-length while
+				// the header phase is still open — by the body phase Envoy
+				// instead 500s with "mismatch between content length and
+				// the length of the mutated body" — and deliver chunked.
+				// (Streamed responses carry no content-length; removal is
+				// a no-op there.)
+				mut := &extprocv3.HeaderMutation{RemoveHeaders: []string{"content-length"}}
+				resp.GetResponseHeaders().GetResponse().HeaderMutation = mut
+				switch {
+				case xlate.streaming && respIsStreaming:
+					// Arm chunk-by-chunk stream translation: decode the
+					// backend's framing, render the agent's, and promote
+					// to STREAMED — buffering an unbounded stream is not
+					// an option and the agent wants TTFB. Selection
+					// guaranteed both stream codecs exist
+					// (StreamsTranslatable); the nil check is a crash
+					// guard, failing closed like every post-commit error.
+					if xlate.tgt.StreamCodec == nil || xlate.src.StreamCodec == nil {
+						rec.TranslationError = "response: stream codec missing post-commit"
+						resp = translation502(xlate.src.Name, "clrk: cross-schema stream translation failed")
+						break
+					}
+					xlate.dec = xlate.tgt.StreamCodec.NewStreamDecoder(xlate.req)
+					xlate.enc = xlate.src.StreamCodec.NewStreamEncoder(xlate.srcIR)
+					if ct := xlate.enc.ContentType(); !strings.HasPrefix(rec.ResponseHeaders["content-type"], ct) {
+						mut.SetHeaders = []*corev3.HeaderValueOption{{
+							Header: &corev3.HeaderValue{
+								Key:      "content-type",
+								RawValue: []byte(ct),
+							},
+							AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+						}}
+					}
+					resp.ModeOverride = modeOverride(
+						extprocfilterv3.ProcessingMode_NONE,
+						extprocfilterv3.ProcessingMode_STREAMED,
+					)
+				case xlate.streaming:
+					// The agent asked for a stream and the commit sent
+					// stream:true upstream, but the backend answered with
+					// a plain body. The agent's SDK is mid-SSE-parse —
+					// re-framing a whole response as a synthetic stream
+					// would be guesswork. Rare and honest: fail closed.
+					rec.TranslationError = "response: upstream answered a streaming translated request without streaming"
+					resp = translation502(xlate.src.Name, "clrk: upstream did not stream a translated streaming request")
+				case respIsStreaming:
+					// The backend streamed an answer to a request that was
+					// committed non-streaming. The reverse translation
+					// needs whole buffered bytes; buffering an unbounded
+					// SSE stream is not an option. Post-commit failure:
+					// fail closed before any of it reaches the agent.
+					rec.TranslationError = "response: upstream streamed a non-streaming translated request"
+					resp = translation502(xlate.src.Name, "clrk: cross-schema translation does not support streaming responses")
 				}
-			}
-			if xlate != nil && respIsStreaming && rec.ResponseHeaders[":status"] == "200" {
-				// The backend streamed an answer to a request that was
-				// committed non-streaming (selection filters stream:true
-				// from cross-schema candidates). Streaming translation is
-				// APO-743; buffering an unbounded SSE stream to translate
-				// it is not an option. Post-commit failure: fail closed
-				// before any of it reaches the agent.
-				rec.TranslationError = "response: upstream streamed a non-streaming translated request"
-				resp = translation502(xlate.src.Name, "clrk: cross-schema translation does not support streaming responses")
 			}
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
 				respBytesLeft = 0
@@ -633,6 +653,16 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 								reqBody:      fullReqBody,
 							})
 						} else {
+							// Streamed responses must still yield terminal
+							// usage for TokenBudget/telemetry; the opt-in
+							// flag belongs to the TARGET schema, so it is
+							// injected into the translated body (the source
+							// body's flag was already re-encoded away).
+							if xreq.Stream && tgtProv.EnsureStreamUsage != nil {
+								if nb, changed := tgtProv.EnsureStreamUsage(enc.Path, enc.Body); changed {
+									enc.Body = nb
+								}
+							}
 							// Commit: repoint :authority + :path, swap the
 							// body for the target-schema encode, set the
 							// target codec's headers, shed the source
@@ -671,7 +701,13 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 							left := maxCaptureBytes
 							rec.RequestBody, rec.RequestTruncated = appendBounded(nil, enc.Body, &left)
 							rec.RequestBodyRewritten = true
-							xlate = &translationState{src: srcProv, tgt: tgtProv, req: xreq}
+							xlate = &translationState{
+								src:       srcProv,
+								tgt:       tgtProv,
+								req:       xreq,
+								srcIR:     ir,
+								streaming: xreq.Stream,
+							}
 							resp = bodyMutationWithHeaders(true, enc.Body, mut, true)
 							break
 						}
@@ -803,6 +839,20 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			rec.ResponseTruncated = rec.ResponseTruncated || trunc
 			resp = bodyContinue(false)
 			if xlate != nil && rec.ResponseHeaders[":status"] == "200" {
+				if xlate.streaming {
+					// Chunk-by-chunk stream translation, armed at
+					// ResponseHeaders. The captured rec.ResponseBody
+					// (ring-capped above) intentionally keeps the
+					// UPSTREAM stream bytes — telemetry parses them
+					// keyed to SelectedBackendSchema, and the injected
+					// include_usage means they carry usage. dec is nil
+					// only when the header phase already failed the
+					// stream closed; nothing to do then.
+					if xlate.dec != nil {
+						resp = translateStreamChunk(&rec, xlate, m.ResponseBody.GetBody(), m.ResponseBody.GetEndOfStream())
+					}
+					break
+				}
 				// Reverse translation: the upstream answered in the
 				// backend's schema and the agent can only parse the one
 				// it spoke. Decode through the backend codec from the
@@ -1331,9 +1381,45 @@ func headersContinue(isRequest bool) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{ResponseHeaders: r}}
 }
 
+// modeOverride builds a complete ProcessingMode for ModeOverride
+// replies. Envoy REPLACES the stream's whole ProcessingMode rather
+// than merging with the filter's static config (ext_proc.cc
+// handleHeadersResponse): a body mode left at proto zero means NONE,
+// so BOTH directions must be asserted on every override or the
+// unasserted one silently stops reaching ext_proc. Header/trailer
+// modes are safe at zero (DEFAULT keeps the static behavior).
+func modeOverride(req, resp extprocfilterv3.ProcessingMode_BodySendMode) *extprocfilterv3.ProcessingMode {
+	return &extprocfilterv3.ProcessingMode{
+		RequestBodyMode:  req,
+		ResponseBodyMode: resp,
+	}
+}
+
 func bodyContinue(isRequest bool) *extprocv3.ProcessingResponse {
 	r := &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{
 		Status: extprocv3.CommonResponse_CONTINUE,
+	}}
+	if isRequest {
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{ResponseBody: r}}
+}
+
+// bodyMutationStreamed returns a CONTINUE body response whose
+// BodyMutation replaces the current STREAMED chunk. It must NOT use
+// CONTINUE_AND_REPLACE: in streamed mode that halts delivery of every
+// subsequent chunk to ext_proc (Envoy treats it as "replace the whole
+// body, stop processing"), while CONTINUE+BodyMutation swaps just the
+// dequeued chunk and keeps the stream flowing — the envoyproxy/
+// ai-gateway pattern. newBody may be empty (the chunk is consumed
+// without emitting bytes, e.g. a mid-frame fragment or a swallowed
+// post-failure chunk).
+func bodyMutationStreamed(isRequest bool, newBody []byte) *extprocv3.ProcessingResponse {
+	r := &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{
+		Status: extprocv3.CommonResponse_CONTINUE,
+		BodyMutation: &extprocv3.BodyMutation{
+			Mutation: &extprocv3.BodyMutation_Body{Body: newBody},
+		},
 	}}
 	if isRequest {
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{RequestBody: r}}

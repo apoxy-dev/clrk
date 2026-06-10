@@ -23,6 +23,65 @@ type translationState struct {
 	src *llmcall.Provider
 	tgt *llmcall.Provider
 	req *llmcall.Request
+
+	// srcIR is the pristine source decode — the stream encoder's
+	// context (framing choices, model fallback come from what the
+	// agent actually sent, not the translated request).
+	srcIR *llmcall.Request
+
+	// streaming records that the committed translated request has
+	// Stream=true: the response must arrive as a stream and is
+	// translated chunk-by-chunk in STREAMED mode rather than buffered.
+	streaming bool
+
+	// dec/enc are armed at ResponseHeaders once a 200 streaming
+	// response is confirmed: dec consumes the backend's stream, enc
+	// renders the agent's.
+	dec llmcall.StreamDecoder
+	enc llmcall.StreamEncoder
+
+	// failed latches a mid-stream translation failure: a synthesized
+	// source-schema error frame has been sent and every remaining
+	// upstream chunk is swallowed (replaced with an empty mutation).
+	failed bool
+}
+
+// translateStreamChunk converts one STREAMED response chunk from the
+// backend's stream framing to the agent's. Mid-stream failure cannot
+// 502 (response headers are long gone) and must not hand the agent
+// raw foreign-schema bytes or silently truncate: it renders a
+// schema-correct error frame plus the encoder's terminal sequence,
+// latches failed, and swallows the rest of the upstream.
+func translateStreamChunk(rec *Record, x *translationState, chunk []byte, eos bool) *extprocv3.ProcessingResponse {
+	if x.failed {
+		return bodyMutationStreamed(false, nil)
+	}
+	events, derr := x.dec.Decode(chunk, eos)
+	var out []byte
+	var encErr error
+	if len(events) > 0 {
+		out, encErr = x.enc.Encode(events)
+	}
+	if derr == nil && encErr == nil {
+		return bodyMutationStreamed(false, out)
+	}
+	x.failed = true
+	if derr != nil {
+		rec.TranslationError = "stream decode: " + derr.Error()
+	} else {
+		rec.TranslationError = "stream encode: " + encErr.Error()
+	}
+	// Best-effort: the error frame and terminal sequence may
+	// themselves fail to encode; the empty mutation still protects
+	// the agent from foreign bytes.
+	errOut, _ := x.enc.Encode([]llmcall.StreamEvent{
+		{Type: llmcall.StreamEventError, Error: &llmcall.StreamError{
+			Code:    "bad_gateway",
+			Message: "clrk: cross-schema stream translation failed",
+		}},
+		{Type: llmcall.StreamEventDone},
+	})
+	return bodyMutationStreamed(false, append(out, errOut...))
 }
 
 // crossSchemaCandidates reports whether any servable candidate speaks

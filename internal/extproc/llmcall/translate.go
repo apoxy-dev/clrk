@@ -32,12 +32,13 @@ const (
 // The checks compare the features the request actually uses against
 // the target's Capabilities (which are honest to the codec, not the
 // provider's API surface), plus three request-specific gates:
-// streaming (stream codecs are APO-743); unmodeled provider blocks
-// (PartTypeUnknown — their content exists only as source-schema wire
-// bytes, so translation would silently delete it); and tool results
-// through the Gemini schema, whose codec keys results by function name
-// and stashes payloads in codec-private hints — lossy in either
-// direction until Phase 3 models them fully.
+// streaming when either side cannot stream-translate (no stream codec,
+// or a stream framing the codec doesn't cover); unmodeled provider
+// blocks (PartTypeUnknown — their content exists only as source-schema
+// wire bytes, so translation would silently delete it); and tool
+// results through the Gemini schema, whose codec keys results by
+// function name and stashes payloads in codec-private hints — lossy in
+// either direction until they are modeled fully.
 func TranslationBlockers(req *Request, src, tgt *Provider) []string {
 	if req == nil || src == nil || src.Codec == nil || tgt == nil || tgt.Codec == nil {
 		return []string{BlockerNoCodec}
@@ -50,7 +51,7 @@ func TranslationBlockers(req *Request, src, tgt *Provider) []string {
 		}
 	}
 
-	if req.Stream {
+	if req.Stream && !(src.StreamsTranslatable() && tgt.StreamsTranslatable()) {
 		add(BlockerStreaming)
 	}
 	if req.Operation != "" && !slices.Contains(tgt.Capabilities.Operations, req.Operation) {
