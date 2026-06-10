@@ -2,9 +2,9 @@ package parsers
 
 import (
 	"bytes"
-	"strings"
 
 	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
 // streamColonTrue is a cheap byte-scan probe for `"stream":true` (or
@@ -30,33 +30,20 @@ func BodyAdvertisesStream(body []byte) bool {
 	return false
 }
 
-// EnsureIncludeUsage rewrites an OpenAI-shape chat-completion request
-// body so that streaming responses always emit terminal usage. Returns
+// EnsureIncludeUsage rewrites a streamed request body so the response
+// always emits terminal usage, when the provider serving host needs an
+// opt-in for that (OpenAI's stream_options.include_usage). Returns
 // (newBody, true) when the body was mutated and (nil, false) otherwise.
 //
-// OpenAI ships streamed `usage` only when the caller sets
-// `stream_options.include_usage=true` in the request. Without that
-// opt-in, streamed responses produce zero tokens at clrk's parser
-// layer — which silently breaks daily TokenBudget enforcement and
-// cost attribution on the dominant traffic shape (most agent SDKs
-// stream by default for TTFB).
+// Without the opt-in, streamed responses produce zero tokens at clrk's
+// parser layer — silently breaking TokenBudget enforcement and cost
+// attribution on the dominant traffic shape (most agent SDKs stream by
+// default for TTFB). Forcing the flag turns "caller-config gap" into
+// "always instrumented".
 //
-// Forcing the flag here turns "caller-config gap" into "always
-// instrumented": agents don't have to know about the flag, and budget
-// enforcement applies uniformly to streaming and non-streaming.
-//
-// Targets:
-//
-//   - api.openai.com /v1/chat/completions (OpenAI direct).
-//   - generativelanguage.googleapis.com /v1beta/openai/chat/completions
-//     and similar (Gemini OpenAI-compat surface — same wire format).
-//
-// We deliberately don't rewrite when `stream` is false or absent — a
-// non-streamed response carries usage natively and the flag becomes a
-// no-op the upstream may reject as unknown.
-//
-// Caller is responsible for emitting the mutated bytes via ext_proc
-// BodyMutation; Envoy recomputes content-length on the wire.
+// The rewrite itself is provider-owned (Provider.EnsureStreamUsage);
+// this is the host-keyed shim. Caller emits the mutated bytes via
+// ext_proc BodyMutation; Envoy recomputes content-length on the wire.
 func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
 	return EnsureIncludeUsageForSystem(SystemFor(host), path, body)
 }
@@ -66,30 +53,16 @@ func EnsureIncludeUsage(host, path string, body []byte) ([]byte, bool) {
 // when ext_proc re-selected a backend whose wire schema is known
 // directly (the original host is no longer where the request goes).
 func EnsureIncludeUsageForSystem(system, path string, body []byte) ([]byte, bool) {
-	if !shouldRewriteIncludeUsageForSystem(system, path) {
+	p := llmcall.ByName(system)
+	if p == nil || p.EnsureStreamUsage == nil {
 		return nil, false
 	}
 	if !BodyAdvertisesStream(body) {
+		// Cheap byte probe before the hook's full JSON decode — this
+		// shim runs on every request-body EOS.
 		return nil, false
 	}
-	return rewriteIncludeUsage(body)
-}
-
-// shouldRewriteIncludeUsageForSystem decides include_usage rewriting from
-// a canonical gen_ai.system value. shouldRewriteIncludeUsage routes a
-// host through SystemFor first, so adding a new OpenAI-shape upstream
-// (e.g. Azure OpenAI) only needs to register in `hostProviders` once.
-func shouldRewriteIncludeUsageForSystem(system, path string) bool {
-	switch system {
-	case "openai":
-		return strings.HasPrefix(path, "/v1/chat/completions")
-	case "google_genai":
-		// Gemini's OpenAI-compat surface: /v1[beta]/openai/chat/completions.
-		// Native /v1beta/models/...:streamGenerateContent never carries
-		// stream_options — emits usageMetadata cumulatively.
-		return strings.Contains(path, "/openai/chat/completions")
-	}
-	return false
+	return p.EnsureStreamUsage(path, body)
 }
 
 // RequestModel decodes the top-level "model" string from a JSON request
@@ -127,56 +100,6 @@ func RewriteModel(body []byte, to string) ([]byte, bool) {
 	obj["model"] = to
 	out, err := jsonx.Marshal(obj)
 	if err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-// rewriteIncludeUsage decodes body as JSON, ensures
-// stream_options.include_usage=true when stream=true, and returns the
-// re-serialized body. Returns (nil, false) when the body isn't a JSON
-// object, isn't a streamed call, or already opted in.
-//
-// JSON roundtrip via map[string]any preserves every top-level field
-// the upstream cares about; key ordering may shift (JSON has no
-// ordering contract), and integer-valued numbers ride through float64
-// — chat-completion params (temperature, max_tokens, n, ...) are all
-// well within float64 precision.
-func rewriteIncludeUsage(body []byte) ([]byte, bool) {
-	if len(body) == 0 {
-		return nil, false
-	}
-	var obj map[string]any
-	if err := jsonx.Unmarshal(body, &obj); err != nil {
-		return nil, false
-	}
-	if obj == nil {
-		return nil, false
-	}
-	streamRaw, ok := obj["stream"]
-	if !ok {
-		return nil, false
-	}
-	streamOn, _ := streamRaw.(bool)
-	if !streamOn {
-		return nil, false
-	}
-	// stream_options either missing, set to a non-object (caller bug
-	// we don't try to fix — replace), or an object that may or may
-	// not opt in. We only need to leave the call site with a clean
-	// stream_options.include_usage=true.
-	so, ok := obj["stream_options"].(map[string]any)
-	if !ok {
-		obj["stream_options"] = map[string]any{"include_usage": true}
-	} else {
-		if b, _ := so["include_usage"].(bool); b {
-			return nil, false
-		}
-		so["include_usage"] = true
-	}
-	out, err := jsonx.Marshal(obj)
-	if err != nil {
-		// Should never happen for a successfully-decoded map.
 		return nil, false
 	}
 	return out, true

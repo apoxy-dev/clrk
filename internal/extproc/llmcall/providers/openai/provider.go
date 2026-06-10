@@ -8,11 +8,13 @@ import (
 
 func init() {
 	llmcall.Register(llmcall.Provider{
-		Name:        "openai",
-		Hosts:       []string{"api.openai.com"},
-		Telemetry:   telemetryParser{},
-		Codec:       codec{provider: "openai"},
-		AuthHeaders: []string{"authorization"},
+		Name:              "openai",
+		Hosts:             []string{"api.openai.com"},
+		Telemetry:         telemetryParser{},
+		Codec:             codec{provider: "openai"},
+		StreamCodec:       chatStreamCodec{provider: "openai"},
+		EnsureStreamUsage: ensureStreamUsage,
+		AuthHeaders:       []string{"authorization"},
 		ErrorBody: func(msg string) []byte {
 			return []byte(`{"error":{"message":` + llmcall.JSONString(msg) + `,"type":"server_error"}}`)
 		},

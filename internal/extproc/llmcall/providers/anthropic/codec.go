@@ -840,9 +840,15 @@ func anthropicFinish(c llmcall.Choice) string {
 	if c.FinishReasonRaw != "" {
 		return c.FinishReasonRaw
 	}
-	switch c.FinishReason {
-	case llmcall.FinishReasonStop:
-		return "end_turn"
+	return anthropicFinishCanonical(c.FinishReason)
+}
+
+// anthropicFinishCanonical maps a canonical finish reason to
+// Anthropic's vocabulary without a raw fallback — the stream encoder's
+// path, where raw values are source-schema vocabulary that must not
+// leak.
+func anthropicFinishCanonical(fr llmcall.FinishReason) string {
+	switch fr {
 	case llmcall.FinishReasonLength:
 		return "max_tokens"
 	case llmcall.FinishReasonToolCalls:

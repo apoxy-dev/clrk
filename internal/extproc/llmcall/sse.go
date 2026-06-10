@@ -67,6 +67,129 @@ func ScanSSEData(b []byte, fn func(payload []byte)) {
 	flush()
 }
 
+// SSEEvent is one reassembled server-sent event.
+type SSEEvent struct {
+	// Name is the "event:" field; empty for bare data frames.
+	Name string
+	// Data is the "data:" payload, multi-line continuations joined
+	// with '\n' per the SSE spec.
+	Data []byte
+}
+
+// SSEScanner incrementally reassembles SSE events across arbitrary
+// chunk boundaries — a chunk may end mid-line, mid-field, even
+// mid-rune. Feed returns the events the new chunk completed; Flush
+// drains the final unterminated event at end of stream. The zero value
+// is ready to use.
+//
+// Unlike ScanSSEData (whole-buffer, tolerant, telemetry-side), the
+// scanner is strict about frame boundaries so stream codecs never
+// decode a half-received payload.
+type SSEScanner struct {
+	buf      []byte // pending bytes, at most one partial line
+	name     string
+	data     []byte
+	dataSeen bool
+}
+
+// Feed appends chunk and returns the events completed by it. Returned
+// Data slices are owned by the caller (copied out of the buffer).
+func (s *SSEScanner) Feed(chunk []byte) []SSEEvent {
+	s.buf = append(s.buf, chunk...)
+	var out []SSEEvent
+	for {
+		i := bytes.IndexByte(s.buf, '\n')
+		if i < 0 {
+			return out
+		}
+		line := s.buf[:i]
+		s.buf = s.buf[i+1:]
+		if ev := s.line(line); ev != nil {
+			out = append(out, *ev)
+		}
+	}
+}
+
+// Flush returns the final event when the stream ended without the
+// terminating blank line (complete field lines only), plus any
+// leftover partial line — non-empty leftover means the stream was
+// truncated mid-frame.
+func (s *SSEScanner) Flush() (*SSEEvent, []byte) {
+	leftover := s.buf
+	s.buf = nil
+	if !s.dataSeen {
+		return nil, leftover
+	}
+	ev := s.emit()
+	return ev, leftover
+}
+
+// line consumes one complete line and returns a dispatched event when
+// the line is the frame-terminating blank.
+func (s *SSEScanner) line(line []byte) *SSEEvent {
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	if len(line) == 0 {
+		if !s.dataSeen {
+			// Per spec a frame with no data is not dispatched.
+			s.name = ""
+			return nil
+		}
+		return s.emit()
+	}
+	if line[0] == ':' {
+		return nil
+	}
+	field, value, _ := bytes.Cut(line, []byte(":"))
+	if len(value) > 0 && value[0] == ' ' {
+		value = value[1:]
+	}
+	switch string(field) {
+	case "event":
+		s.name = string(value)
+	case "data":
+		if s.dataSeen {
+			s.data = append(s.data, '\n')
+		}
+		s.data = append(s.data, value...)
+		s.dataSeen = true
+	}
+	// id:, retry:, unknown fields: ignored.
+	return nil
+}
+
+func (s *SSEScanner) emit() *SSEEvent {
+	ev := &SSEEvent{Name: s.name, Data: append([]byte(nil), s.data...)}
+	s.name = ""
+	s.data = s.data[:0]
+	s.dataSeen = false
+	return ev
+}
+
+// AppendSSE appends one SSE frame to dst: an optional "event: name"
+// line, then "data:" lines (data newlines become continuations), and
+// the terminating blank line.
+func AppendSSE(dst []byte, name string, data []byte) []byte {
+	if name != "" {
+		dst = append(dst, "event: "...)
+		dst = append(dst, name...)
+		dst = append(dst, '\n')
+	}
+	for {
+		line, rest, more := bytes.Cut(data, []byte("\n"))
+		dst = append(dst, "data: "...)
+		dst = append(dst, line...)
+		dst = append(dst, '\n')
+		if !more {
+			break
+		}
+		data = rest
+	}
+	dst = append(dst, '\n')
+	return dst
+}
+
 // LastJSONLine returns the last newline-delimited byte slice in b that
 // json.Unmarshal accepts into an empty interface. Returns nil if none
 // decode. Used for application/x-ndjson streams where capture is

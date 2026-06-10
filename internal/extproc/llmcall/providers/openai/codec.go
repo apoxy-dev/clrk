@@ -942,7 +942,14 @@ func openaiFinish(c llmcall.Choice) string {
 	if c.FinishReasonRaw != "" {
 		return c.FinishReasonRaw
 	}
-	switch c.FinishReason {
+	return openaiFinishCanonical(c.FinishReason)
+}
+
+// openaiFinishCanonical maps a canonical finish reason to OpenAI's
+// vocabulary without a raw fallback — the stream encoder's path, where
+// raw values are source-schema vocabulary that must not leak.
+func openaiFinishCanonical(fr llmcall.FinishReason) string {
+	switch fr {
 	case llmcall.FinishReasonLength:
 		return "length"
 	case llmcall.FinishReasonToolCalls:

@@ -10,11 +10,11 @@ import (
 )
 
 // codec implements llmcall.Codec for the native Gemini generateContent
-// surface. Phase 1 scope: non-streaming :generateContent only — the
-// OAI-compat layer, :streamGenerateContent, embeddings, and streamed
-// framings return ErrUnsupported. Unlike the body-borne schemas, the
-// model rides in the URL; DecodeRequest lifts it from the path and
-// EncodeRequest synthesizes the path back.
+// surface: :generateContent and :streamGenerateContent?alt=sse — the
+// OAI-compat layer, embeddings, and the non-SSE streamed framing (a
+// streamed JSON array no SDK requests) return ErrUnsupported. Unlike
+// the body-borne schemas, the model rides in the URL; DecodeRequest
+// lifts it from the path and EncodeRequest synthesizes the path back.
 type codec struct{}
 
 func malformed(detail string, err error) error {
@@ -26,11 +26,22 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 		return nil, fmt.Errorf("openai-compat path %q: %w", in.Path, llmcall.ErrUnsupported)
 	}
 	model, method := googlePathModelMethod(in.Path)
-	if method != "generateContent" {
+	stream := false
+	switch method {
+	case "generateContent":
+	case "streamGenerateContent":
+		// The wire carries no stream flag — the method IS the flag.
+		// Only the SSE framing is modeled; the bare-method streamed
+		// JSON array (which no SDK requests) stays unsupported.
+		if !strings.Contains(in.Path, "alt=sse") {
+			return nil, fmt.Errorf("non-SSE streamGenerateContent %q: %w", in.Path, llmcall.ErrUnsupported)
+		}
+		stream = true
+	default:
 		return nil, fmt.Errorf("path %q: %w", in.Path, llmcall.ErrUnsupported)
 	}
 
-	req := &llmcall.Request{Provider: "google_genai", Operation: "chat", Model: model}
+	req := &llmcall.Request{Provider: "google_genai", Operation: "chat", Model: model, Stream: stream}
 	req.Wire.Raw = json.RawMessage(in.Body)
 	req.Wire.Path = in.Path
 
@@ -590,6 +601,9 @@ func (c codec) EncodeRequest(req *llmcall.Request, opts llmcall.EncodeOptions) (
 		out.Body = fresh
 	}
 	out.Path = "/v1beta/models/" + req.Model + ":generateContent"
+	if req.Stream {
+		out.Path = "/v1beta/models/" + req.Model + ":streamGenerateContent?alt=sse"
+	}
 	if mode == llmcall.ModePreserve && w.Path != "" {
 		out.Path = w.Path
 	}
@@ -956,7 +970,14 @@ func googleFinish(c llmcall.Choice) string {
 	if c.FinishReasonRaw != "" {
 		return c.FinishReasonRaw
 	}
-	switch c.FinishReason {
+	return googleFinishCanonical(c.FinishReason)
+}
+
+// googleFinishCanonical maps a canonical finish reason to Gemini's
+// vocabulary without a raw fallback — the stream encoder's path, where
+// raw values are source-schema vocabulary that must not leak.
+func googleFinishCanonical(fr llmcall.FinishReason) string {
+	switch fr {
 	case llmcall.FinishReasonLength:
 		return "MAX_TOKENS"
 	case llmcall.FinishReasonContentFilter:

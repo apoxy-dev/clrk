@@ -12,6 +12,7 @@ func init() {
 		Hosts:       []string{"api.anthropic.com"},
 		Telemetry:   telemetryParser{},
 		Codec:       codec{},
+		StreamCodec: streamCodec{},
 		AuthHeaders: []string{"x-api-key", "authorization"},
 		ErrorBody: func(msg string) []byte {
 			return []byte(`{"type":"error","error":{"type":"api_error","message":` + llmcall.JSONString(msg) + `}}`)

@@ -42,6 +42,20 @@ type Provider struct {
 	// cross-schema backend selection.
 	Capabilities Capabilities
 
+	// StreamCodec converts this provider's streamed response framing
+	// to and from StreamEvents. Nil disables streaming translation for
+	// any pair that includes this provider.
+	StreamCodec StreamCodec
+
+	// EnsureStreamUsage, when set, rewrites a raw request body in this
+	// provider's wire schema so streamed responses always report
+	// terminal usage (OpenAI's stream_options.include_usage). Returns
+	// (newBody, true) only when a rewrite was needed. Nil for schemas
+	// whose streams carry usage unconditionally. The hook decodes the
+	// body — hot-path callers pre-probe with a cheap byte scan
+	// (parsers.BodyAdvertisesStream).
+	EnsureStreamUsage func(path string, body []byte) ([]byte, bool)
+
 	// AuthHeaders are the credential-bearing request headers this
 	// provider's clients send (lowercase). Translated requests shed
 	// the union across all registered providers (AuthHeaderUnion) —
@@ -55,6 +69,15 @@ type Provider struct {
 	// would surface as a second, more confusing error at the call
 	// site. Nil falls back to the OpenAI envelope (see ErrorBodyFor).
 	ErrorBody func(msg string) []byte
+}
+
+// StreamsTranslatable reports whether p can sit on either side of a
+// streaming cross-schema translation: a stream codec exists and the
+// capability bit is on. The bit matters independently of the codec —
+// a future provider may stream in a framing its SSE-based codec does
+// not cover (Bedrock's binary event stream).
+func (p *Provider) StreamsTranslatable() bool {
+	return p != nil && p.StreamCodec != nil && p.Capabilities.Streaming
 }
 
 // pendingAliases maps CRD short names to canonical gen_ai.system values
