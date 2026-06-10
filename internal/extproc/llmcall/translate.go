@@ -3,6 +3,7 @@ package llmcall
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Translation blocker reasons returned by TranslationBlockers. Values
@@ -210,11 +211,43 @@ func StripResponseForTranslation(resp *Response) int {
 	dropped += stripWire(&resp.Usage.Wire)
 	for i := range resp.Choices {
 		ch := &resp.Choices[i]
+		// FinishReasonRaw is SOURCE-schema vocabulary (it exists to
+		// round-trip lossy canonical mappings); every encoder prefers
+		// it over the canonical value, so leaving it set would leak
+		// "end_turn" into an openai finish_reason. Cleared, the target
+		// encoder's canonical->wire map takes over.
+		ch.FinishReasonRaw = ""
 		dropped += stripWire(&ch.Wire)
 		dropped += stripWire(&ch.Message.Wire)
 		ch.Message.Parts, dropped = stripParts(ch.Message.Parts, dropped)
 	}
 	return dropped
+}
+
+// DataURL composes an RFC 2397 data URL from a MIME type and base64
+// payload — the inline-image form OpenAI's image_url accepts.
+func DataURL(mime, dataB64 string) string {
+	return "data:" + mime + ";base64," + dataB64
+}
+
+// SplitDataURL parses a base64 data URL back into its MIME type and
+// payload. ok is false for any other URL shape (including non-base64
+// data URLs), in which case the caller should treat the value as a
+// fetchable reference.
+func SplitDataURL(url string) (mime, dataB64 string, ok bool) {
+	rest, found := strings.CutPrefix(url, "data:")
+	if !found {
+		return "", "", false
+	}
+	meta, payload, found := strings.Cut(rest, ",")
+	if !found {
+		return "", "", false
+	}
+	meta, found = strings.CutSuffix(meta, ";base64")
+	if !found {
+		return "", "", false
+	}
+	return meta, payload, true
 }
 
 // stripWire zeroes one node's bookkeeping, returning how many

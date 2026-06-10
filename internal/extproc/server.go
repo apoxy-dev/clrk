@@ -438,8 +438,19 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			provMatch = provisionalMatch(routes, rec.RequestHeaders)
 			deferReselect = provMatch != nil && len(provMatch.backends) > 0
 			if deferReselect {
+				// ModeOverride REPLACES the stream's whole ProcessingMode
+				// rather than merging with the filter's static config
+				// (Envoy ext_proc.cc handleHeadersResponse). A body mode
+				// left at proto zero means NONE, so the static
+				// ResponseBodyMode=BUFFERED must be re-asserted here or
+				// the response body is never sent to ext_proc on
+				// reselected streams — silently breaking response capture
+				// and the cross-schema reverse translation. Header/trailer
+				// modes are safe at zero (DEFAULT keeps the static
+				// behavior).
 				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
-					RequestBodyMode: extprocfilterv3.ProcessingMode_BUFFERED,
+					RequestBodyMode:  extprocfilterv3.ProcessingMode_BUFFERED,
+					ResponseBodyMode: extprocfilterv3.ProcessingMode_BUFFERED,
 				}
 			} else if injs := lookupCreds(creds, routes, rec.RequestHeaders); len(injs) > 0 {
 				if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
@@ -481,6 +492,18 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if xlate == nil && (streamRequested || respIsStreaming) && rec.ResponseHeaders[":status"] == "200" {
 				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
 					ResponseBodyMode: extprocfilterv3.ProcessingMode_STREAMED,
+				}
+			}
+			if xlate != nil && !respIsStreaming && rec.ResponseHeaders[":status"] == "200" {
+				// The reverse translation at ResponseBody EOS replaces the
+				// body with differently-sized bytes. Envoy can reconcile
+				// content-length with a mutated body only while the header
+				// phase is still open; by the body phase it instead 500s
+				// with "mismatch between content length and the length of
+				// the mutated body". Drop content-length now — the
+				// translated response is delivered chunked.
+				resp.GetResponseHeaders().GetResponse().HeaderMutation = &extprocv3.HeaderMutation{
+					RemoveHeaders: []string{"content-length"},
 				}
 			}
 			if xlate != nil && respIsStreaming && rec.ResponseHeaders[":status"] == "200" {

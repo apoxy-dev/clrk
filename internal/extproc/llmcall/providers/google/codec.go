@@ -721,6 +721,13 @@ func encodePart(p *llmcall.Part, mode llmcall.Mode, dropped *int) (json.RawMessa
 func encodeMediaPart(p *llmcall.Part, mode llmcall.Mode, dropped *int) (json.RawMessage, error) {
 	pw := partMediaWire(p)
 	mime, data, url := mediaFields(p)
+	// A data URL (OpenAI's inline form) unpacks into inlineData —
+	// fileData.fileUri does not accept data: URIs.
+	if url != "" && data == "" {
+		if m, d, ok := llmcall.SplitDataURL(url); ok {
+			mime, data, url = m, d, ""
+		}
+	}
 	emit := map[string]llmcall.FieldEmitter{
 		"inlineData": func(e *llmcall.ObjectEncoder) {
 			if url != "" && data == "" {

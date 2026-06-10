@@ -593,6 +593,14 @@ func encodeMessage(msg *llmcall.Message, mode llmcall.Mode, dropped *int) (json.
 			if mw.Hint("role") == "developer" {
 				role = "developer"
 			}
+			// Tool results must ride a role:"tool" message on this wire
+			// shape. Cross-schema sources carry them in user messages
+			// (anthropic tool_result blocks); openai decodes already
+			// have the tool role, so same-schema round trips are
+			// unchanged.
+			if toolResp != nil {
+				role = string(llmcall.RoleTool)
+			}
 			e.Field("role", role)
 		},
 		"content": func(e *llmcall.ObjectEncoder) {
@@ -698,8 +706,15 @@ func encodeContentParts(parts []llmcall.Part, mode llmcall.Mode, dropped *int) (
 						e.Raw("image_url", raw)
 						return
 					}
+					// Inline images from schemas that carry raw base64
+					// (anthropic, Gemini) re-enter this wire shape as a
+					// data URL — the form image_url accepts inline.
+					url := img.URL
+					if url == "" && img.DataB64 != "" {
+						url = llmcall.DataURL(img.MIMEType, img.DataB64)
+					}
 					inner := llmcall.NewObjectEncoder()
-					inner.Field("url", img.URL)
+					inner.Field("url", url)
 					raw, err := inner.Bytes()
 					if err != nil {
 						e.Fail(err)

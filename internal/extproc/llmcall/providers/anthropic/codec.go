@@ -520,7 +520,16 @@ func encodeMessages(msgs []llmcall.Message, mode llmcall.Mode, dropped *int) (js
 		mw := &msg.Wire
 		emit := map[string]llmcall.FieldEmitter{
 			"role": func(e *llmcall.ObjectEncoder) {
-				e.Field("role", string(msg.Role))
+				role := string(msg.Role)
+				// The Messages API has no tool role — tool results ride
+				// inside user messages. Only cross-schema sources
+				// (OpenAI's role:"tool" result messages) produce it;
+				// anthropic decodes never do, so same-schema round
+				// trips are unchanged.
+				if msg.Role == llmcall.RoleTool {
+					role = string(llmcall.RoleUser)
+				}
+				e.Field("role", role)
 			},
 			"content": func(e *llmcall.ObjectEncoder) {
 				if mw.Hint("content") == "string" {
@@ -658,6 +667,14 @@ func encodeBlock(p *llmcall.Part, mode llmcall.Mode, dropped *int) (json.RawMess
 func encodeImageSource(img *llmcall.ImagePart) (json.RawMessage, error) {
 	e := llmcall.NewObjectEncoder()
 	if img.URL != "" {
+		// A data URL (OpenAI's inline form) unpacks into the base64
+		// source — the Messages API rejects data: URIs in url sources.
+		if mime, data, ok := llmcall.SplitDataURL(img.URL); ok {
+			e.Field("type", "base64")
+			e.Field("media_type", mime)
+			e.Field("data", data)
+			return e.Bytes()
+		}
 		e.Field("type", "url")
 		e.Field("url", img.URL)
 		return e.Bytes()
