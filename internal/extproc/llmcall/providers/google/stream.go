@@ -268,6 +268,7 @@ func (d *streamDecoder) finishStream() []llmcall.StreamEvent {
 // buffered until the block closes), and a terminal frame carrying
 // finishReason + usageMetadata.
 type streamEncoder struct {
+	id     string
 	model  string
 	argBuf map[int][]byte
 	names  map[int]string
@@ -296,6 +297,9 @@ func (e *streamEncoder) event(ev *llmcall.StreamEvent) ([]byte, error) {
 	}
 	switch ev.Type {
 	case llmcall.StreamEventStart:
+		if ev.Start.ID != "" {
+			e.id = ev.Start.ID
+		}
 		if ev.Start.Model != "" {
 			e.model = ev.Start.Model
 		}
@@ -381,8 +385,9 @@ func (e *streamEncoder) event(ev *llmcall.StreamEvent) ([]byte, error) {
 	return nil, nil
 }
 
-// frame renders one GenerateContentResponse SSE frame. terminal frames
-// carry finishReason, usageMetadata, and modelVersion.
+// frame renders one GenerateContentResponse SSE frame. Every frame
+// carries responseId/modelVersion when known (as real Gemini does);
+// terminal frames add finishReason + usageMetadata.
 func (e *streamEncoder) frame(parts []map[string]any, finishReason string, terminal bool) ([]byte, error) {
 	cand := map[string]any{
 		"content": map[string]any{"parts": parts, "role": "model"},
@@ -392,6 +397,12 @@ func (e *streamEncoder) frame(parts []map[string]any, finishReason string, termi
 		cand["finishReason"] = finishReason
 	}
 	payload := map[string]any{"candidates": []any{cand}}
+	if e.id != "" {
+		payload["responseId"] = e.id
+	}
+	if e.model != "" {
+		payload["modelVersion"] = e.model
+	}
 	if terminal {
 		var in, outTok int64
 		if e.usage != nil {
@@ -401,9 +412,6 @@ func (e *streamEncoder) frame(parts []map[string]any, finishReason string, termi
 			"promptTokenCount":     in,
 			"candidatesTokenCount": outTok,
 			"totalTokenCount":      in + outTok,
-		}
-		if e.model != "" {
-			payload["modelVersion"] = e.model
 		}
 	}
 	b, err := llmcall.MarshalCompact(payload)

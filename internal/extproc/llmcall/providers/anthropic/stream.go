@@ -94,13 +94,16 @@ func (d *streamDecoder) payload(data []byte) ([]llmcall.StreamEvent, error) {
 	switch p.Type {
 	case "message_start":
 		d.inputTokens = p.Message.Usage.InputTokens
-		return []llmcall.StreamEvent{
+		out := []llmcall.StreamEvent{
 			{Type: llmcall.StreamEventStart, Start: &llmcall.StreamStart{ID: p.Message.ID, Model: p.Message.Model}},
-			{Type: llmcall.StreamEventUsage, Usage: &llmcall.Usage{
+		}
+		if p.Message.Usage.InputTokens > 0 || p.Message.Usage.OutputTokens > 0 {
+			out = append(out, llmcall.StreamEvent{Type: llmcall.StreamEventUsage, Usage: &llmcall.Usage{
 				InputTokens:  p.Message.Usage.InputTokens,
 				OutputTokens: p.Message.Usage.OutputTokens,
-			}},
-		}, nil
+			}})
+		}
+		return out, nil
 	case "content_block_start":
 		return d.blockStart(p.Index, p.ContentBlock)
 	case "content_block_delta":
@@ -119,6 +122,11 @@ func (d *streamDecoder) payload(data []byte) ([]llmcall.StreamEvent, error) {
 			StopReason string `json:"stop_reason"`
 		}
 		_ = jsonx.Unmarshal(p.Delta, &delta)
+		// Newer API versions echo cumulative input_tokens here; prefer
+		// it over the message_start seed (cache reads can grow it).
+		if p.Usage.InputTokens > 0 {
+			d.inputTokens = p.Usage.InputTokens
+		}
 		var out []llmcall.StreamEvent
 		if delta.StopReason != "" {
 			out = append(out, d.closeOpen()...)
