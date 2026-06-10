@@ -86,8 +86,7 @@ func (p *Provider) StreamsTranslatable() bool {
 // each entry migrates into its provider package when that plugin lands
 // (Register tolerates a plugin re-claiming its pending alias).
 var pendingAliases = map[string]string{
-	"azure-openai": "azure_openai",
-	"bedrock":      "aws_bedrock",
+	"bedrock": "aws_bedrock",
 }
 
 var (
