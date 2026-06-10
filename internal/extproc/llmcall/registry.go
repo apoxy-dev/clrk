@@ -41,6 +41,20 @@ type Provider struct {
 	// Capabilities declare what the schema can express; consumed by
 	// cross-schema backend selection.
 	Capabilities Capabilities
+
+	// AuthHeaders are the credential-bearing request headers this
+	// provider's clients send (lowercase). Translated requests shed
+	// the union across all registered providers (AuthHeaderUnion) —
+	// an agent-supplied credential belongs to the source schema and
+	// must never reach a different upstream.
+	AuthHeaders []string
+
+	// ErrorBody shapes a proxy-generated error payload (translation
+	// failures, fail-closed 502s) in this provider's error envelope —
+	// the client SDK is mid-parse of this schema, and a foreign blob
+	// would surface as a second, more confusing error at the call
+	// site. Nil falls back to the OpenAI envelope (see ErrorBodyFor).
+	ErrorBody func(msg string) []byte
 }
 
 // pendingAliases maps CRD short names to canonical gen_ai.system values
@@ -166,6 +180,38 @@ func KnownName(name string) bool {
 	}
 	_, ok := providersByName[name]
 	return ok
+}
+
+// AuthHeaderUnion returns the sorted union of every registered
+// provider's AuthHeaders. Translated requests shed the whole union
+// rather than just the source schema's headers: SDK defaults mean an
+// agent may attach another provider's credential, and a stale
+// credential reaching a foreign upstream is worse than over-removal.
+func AuthHeaderUnion() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range providersByName {
+		for _, h := range p.AuthHeaders {
+			h = strings.ToLower(h)
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ErrorBodyFor shapes msg in the error envelope of the schema the
+// client speaks. Unknown and envelope-less schemas get the OpenAI
+// envelope — the de-facto shape for compatible gateways.
+func ErrorBodyFor(system, msg string) []byte {
+	if p := ByName(system); p != nil && p.ErrorBody != nil {
+		return p.ErrorBody(msg)
+	}
+	return []byte(`{"error":{"message":` + JSONString(msg) + `,"type":"server_error"}}`)
 }
 
 // KnownNames returns every spelling KnownName accepts — registered

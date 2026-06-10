@@ -8,10 +8,14 @@ import (
 
 func init() {
 	llmcall.Register(llmcall.Provider{
-		Name:      "anthropic",
-		Hosts:     []string{"api.anthropic.com"},
-		Telemetry: telemetryParser{},
-		Codec:     codec{},
+		Name:        "anthropic",
+		Hosts:       []string{"api.anthropic.com"},
+		Telemetry:   telemetryParser{},
+		Codec:       codec{},
+		AuthHeaders: []string{"x-api-key", "authorization"},
+		ErrorBody: func(msg string) []byte {
+			return []byte(`{"type":"error","error":{"type":"api_error","message":` + llmcall.JSONString(msg) + `}}`)
+		},
 		// Capabilities are honest to the codec, not the API surface:
 		// the Messages API accepts document blocks, but the codec does
 		// not model them, so file-bearing requests must not be

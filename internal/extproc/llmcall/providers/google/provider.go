@@ -9,11 +9,15 @@ import (
 
 func init() {
 	llmcall.Register(llmcall.Provider{
-		Name:      "google_genai",
-		Aliases:   []string{"google"},
-		Hosts:     []string{"generativelanguage.googleapis.com"},
-		Telemetry: telemetryParser{},
-		Codec:     codec{},
+		Name:        "google_genai",
+		Aliases:     []string{"google"},
+		Hosts:       []string{"generativelanguage.googleapis.com"},
+		Telemetry:   telemetryParser{},
+		Codec:       codec{},
+		AuthHeaders: []string{"x-goog-api-key", "authorization"},
+		ErrorBody: func(msg string) []byte {
+			return []byte(`{"error":{"code":502,"message":` + llmcall.JSONString(msg) + `,"status":"INTERNAL"}}`)
+		},
 		Capabilities: llmcall.Capabilities{
 			Operations:        []string{"chat", "embeddings"},
 			Tools:             true,

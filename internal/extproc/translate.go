@@ -108,18 +108,14 @@ func translateRequest(tgt *llmcall.Provider, ir *llmcall.Request, model string) 
 	return enc, cp, nil
 }
 
-// providerAuthHeaders are the credential-bearing request headers the
-// built-in provider schemas use. A translated request must shed all of
-// them: the agent-supplied value (if any) belongs to the SOURCE
-// provider and must not reach a different upstream, and the target's
-// credential arrives via CredentialInjectionPolicy.
-var providerAuthHeaders = []string{"authorization", "x-api-key", "x-goog-api-key"}
-
 // sourceHeaderRemovals lists the headers to strip from a translated
-// request: the provider auth set plus whatever request headers the
-// source codec modeled (ir.Wire.Headers — e.g. anthropic-version),
-// minus anything the target codec or credential injection is about to
-// set (Envoy's ordering between SetHeaders and RemoveHeaders is not a
+// request: every registered provider's auth headers (the agent's
+// credential belongs to the SOURCE provider and must not reach a
+// different upstream — the target's credential arrives via
+// CredentialInjectionPolicy) plus whatever request headers the source
+// codec modeled (ir.Wire.Headers — e.g. anthropic-version), minus
+// anything the target codec or credential injection is about to set
+// (Envoy's ordering between SetHeaders and RemoveHeaders is not a
 // contract we want to depend on). Sorted for deterministic mutations.
 func sourceHeaderRemovals(ir *llmcall.Request, enc *llmcall.EncodedRequest, injs []credInjection) []string {
 	keep := make(map[string]bool, len(enc.SetHeaders)+len(injs))
@@ -139,7 +135,7 @@ func sourceHeaderRemovals(ir *llmcall.Request, enc *llmcall.EncodedRequest, injs
 		seen[h] = true
 		out = append(out, h)
 	}
-	for _, h := range providerAuthHeaders {
+	for _, h := range llmcall.AuthHeaderUnion() {
 		add(h)
 	}
 	for _, h := range slices.Sorted(maps.Keys(ir.Wire.Headers)) {
@@ -165,23 +161,6 @@ func removeHeadersMut(existing *extprocv3.HeaderMutation, names []string) *extpr
 	return existing
 }
 
-// errorBodyFor shapes a translation-failure error body for the schema
-// the CLIENT speaks — its SDK is mid-parse of that schema's error
-// envelope, so a clrk-shaped blob would just produce a second, more
-// confusing error at the call site.
-func errorBodyFor(schema, msg string) []byte {
-	switch schema {
-	case "anthropic":
-		return []byte(`{"type":"error","error":{"type":"api_error","message":` + jsonString(msg) + `}}`)
-	case "google_genai":
-		return []byte(`{"error":{"code":502,"message":` + jsonString(msg) + `,"status":"INTERNAL"}}`)
-	default:
-		// OpenAI's envelope, also the de-facto shape for compatible
-		// gateways.
-		return []byte(`{"error":{"message":` + jsonString(msg) + `,"type":"server_error"}}`)
-	}
-}
-
 // translation502 fails a committed-translation stream closed: the
 // request went upstream in the backend's schema, the response cannot
 // be brought back into the client's, and handing the client a body it
@@ -194,7 +173,7 @@ func translation502(clientSchema, msg string) *extprocv3.ProcessingResponse {
 		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extprocv3.ImmediateResponse{
 				Status: &typev3.HttpStatus{Code: typev3.StatusCode_BadGateway},
-				Body:   errorBodyFor(clientSchema, msg),
+				Body:   llmcall.ErrorBodyFor(clientSchema, msg),
 				Headers: &extprocv3.HeaderMutation{
 					SetHeaders: []*corev3.HeaderValueOption{{
 						Header: &corev3.HeaderValue{

@@ -147,6 +147,15 @@ func MarshalCompact(v any) ([]byte, error) {
 	return jsonx.MarshalWire(v)
 }
 
+// JSONString quotes s as a JSON string literal — for hand-assembled
+// wire fragments like provider error envelopes.
+func JSONString(s string) string {
+	// A string marshal cannot fail; invalid UTF-8 is replaced, as in
+	// encoding/json.
+	b, _ := MarshalCompact(s)
+	return string(b)
+}
+
 // CompactJSON returns raw with insignificant whitespace removed. Key
 // order, string escapes, and number literals are untouched — exactly
 // the normalization the preserve-mode passthrough gate needs. Stays on

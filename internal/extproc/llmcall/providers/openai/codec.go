@@ -11,14 +11,26 @@ import (
 
 // codec implements llmcall.Codec for the OpenAI Chat Completions API.
 // Phase 1 scope: non-streaming POST /v1/chat/completions only; every
-// other endpoint and response framing returns ErrUnsupported.
-type codec struct{}
-
-func malformed(detail string, err error) error {
-	return &llmcall.MalformedError{Provider: "openai", Detail: detail, Err: err}
+// other endpoint and response framing returns ErrUnsupported. provider
+// is the IR Provider value the decoders stamp — "openai" for the
+// native surface, the wrapping plugin's name when the codec is shared
+// via NewChatCodec.
+type codec struct {
+	provider string
 }
 
-func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
+// NewChatCodec returns the Chat Completions codec stamping provider as
+// the IR Provider — for plugins that speak OpenAI's wire schema on a
+// different surface (azure_openai).
+func NewChatCodec(provider string) llmcall.Codec {
+	return codec{provider: provider}
+}
+
+func (c codec) malformed(detail string, err error) error {
+	return &llmcall.MalformedError{Provider: c.provider, Detail: detail, Err: err}
+}
+
+func (c codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 	path := in.Path
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
@@ -27,7 +39,7 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 		return nil, fmt.Errorf("path %q: %w", in.Path, llmcall.ErrUnsupported)
 	}
 
-	req := &llmcall.Request{Provider: "openai", Operation: "chat"}
+	req := &llmcall.Request{Provider: c.provider, Operation: "chat"}
 	req.Wire.Raw = json.RawMessage(in.Body)
 	req.Wire.Path = in.Path
 
@@ -77,7 +89,7 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 		},
 	})
 	if err != nil {
-		return nil, malformed("request body", err)
+		return nil, c.malformed("request body", err)
 	}
 	return req, nil
 }
@@ -828,7 +840,7 @@ func encodeToolChoice(e *llmcall.ObjectEncoder, tc *llmcall.ToolChoice) {
 	}
 }
 
-func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*llmcall.Response, error) {
+func (c codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*llmcall.Response, error) {
 	if in.Status != 0 && in.Status != 200 {
 		return nil, fmt.Errorf("status %d: %w", in.Status, llmcall.ErrUnsupported)
 	}
@@ -837,7 +849,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 		return nil, fmt.Errorf("streaming response: %w", llmcall.ErrUnsupported)
 	}
 
-	resp := &llmcall.Response{Provider: "openai"}
+	resp := &llmcall.Response{Provider: c.provider}
 	resp.Wire.Raw = json.RawMessage(in.Body)
 
 	w := &resp.Wire
@@ -866,7 +878,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 		},
 	})
 	if err != nil {
-		return nil, malformed("response body", err)
+		return nil, c.malformed("response body", err)
 	}
 	return resp, nil
 }

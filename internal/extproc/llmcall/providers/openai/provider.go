@@ -8,10 +8,14 @@ import (
 
 func init() {
 	llmcall.Register(llmcall.Provider{
-		Name:      "openai",
-		Hosts:     []string{"api.openai.com"},
-		Telemetry: telemetryParser{},
-		Codec:     codec{},
+		Name:        "openai",
+		Hosts:       []string{"api.openai.com"},
+		Telemetry:   telemetryParser{},
+		Codec:       codec{provider: "openai"},
+		AuthHeaders: []string{"authorization"},
+		ErrorBody: func(msg string) []byte {
+			return []byte(`{"error":{"message":` + llmcall.JSONString(msg) + `,"type":"server_error"}}`)
+		},
 		// Capabilities are honest to the codec, not the API surface:
 		// the Chat Completions API accepts input_audio and file parts,
 		// but the codec models only text and image_url content, so
