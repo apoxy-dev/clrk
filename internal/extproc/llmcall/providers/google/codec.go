@@ -162,7 +162,7 @@ func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 		return llmcall.Part{}, err
 	}
 	switch {
-	case probe["thought"] != nil && probe["text"] != nil:
+	case boolTrue(probe["thought"]) && probe["text"] != nil:
 		p := llmcall.Part{Type: llmcall.PartTypeReasoning, Reasoning: &llmcall.ReasoningPart{}}
 		pw := &p.Reasoning.Wire
 		err := llmcall.DecodeKnown(raw, pw, map[string]func(json.RawMessage) error{
@@ -257,6 +257,15 @@ func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 	default:
 		return llmcall.UnknownPart(raw)
 	}
+}
+
+// boolTrue reports whether raw is the JSON literal true. Gemini marks
+// reasoning output with "thought": true, but SDKs also emit an
+// explicit "thought": false on plain text parts; presence of the key
+// alone must not route a part to the reasoning decoder.
+func boolTrue(raw json.RawMessage) bool {
+	var b bool
+	return json.Unmarshal(raw, &b) == nil && b
 }
 
 func functionCallShadowVal(tc *llmcall.ToolCallPart) string {

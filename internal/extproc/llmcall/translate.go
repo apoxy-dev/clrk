@@ -10,16 +10,17 @@ import (
 // are stable identifiers surfaced on telemetry (skipped-candidate
 // accounting), not user-facing prose.
 const (
-	BlockerNoCodec     = "no_codec"
-	BlockerStreaming   = "streaming"
-	BlockerOperation   = "operation"
-	BlockerTools       = "tools"
-	BlockerToolResults = "tool_results"
-	BlockerImageInput  = "image_input"
-	BlockerAudioInput  = "audio_input"
-	BlockerFileInput   = "file_input"
-	BlockerReasoning   = "reasoning"
-	BlockerSystem      = "system"
+	BlockerNoCodec        = "no_codec"
+	BlockerStreaming      = "streaming"
+	BlockerOperation      = "operation"
+	BlockerTools          = "tools"
+	BlockerToolResults    = "tool_results"
+	BlockerImageInput     = "image_input"
+	BlockerAudioInput     = "audio_input"
+	BlockerFileInput      = "file_input"
+	BlockerReasoning      = "reasoning"
+	BlockerSystem         = "system"
+	BlockerUnknownContent = "unknown_content"
 )
 
 // TranslationBlockers reports why a decoded request cannot be
@@ -30,11 +31,13 @@ const (
 //
 // The checks compare the features the request actually uses against
 // the target's Capabilities (which are honest to the codec, not the
-// provider's API surface), plus two pair-specific gates: streaming
-// (stream codecs are APO-743) and tool results through the Gemini
-// schema, whose codec keys results by function name and stashes
-// payloads in codec-private hints — lossy in either direction until
-// Phase 3 models them fully.
+// provider's API surface), plus three request-specific gates:
+// streaming (stream codecs are APO-743); unmodeled provider blocks
+// (PartTypeUnknown — their content exists only as source-schema wire
+// bytes, so translation would silently delete it); and tool results
+// through the Gemini schema, whose codec keys results by function name
+// and stashes payloads in codec-private hints — lossy in either
+// direction until Phase 3 models them fully.
 func TranslationBlockers(req *Request, src, tgt *Provider) []string {
 	if req == nil || src == nil || src.Codec == nil || tgt == nil || tgt.Codec == nil {
 		return []string{BlockerNoCodec}
@@ -63,6 +66,12 @@ func TranslationBlockers(req *Request, src, tgt *Provider) []string {
 		for i := range parts {
 			p := &parts[i]
 			switch p.Type {
+			case PartTypeUnknown:
+				// Unmodeled provider blocks carry content only the source
+				// schema understands; StripRequestForTranslation would
+				// silently delete them from what the upstream sees.
+				// Refuse the pair rather than corrupt the conversation.
+				add(BlockerUnknownContent)
 			case PartTypeImage:
 				if !tgt.Capabilities.ImageInput {
 					add(BlockerImageInput)
