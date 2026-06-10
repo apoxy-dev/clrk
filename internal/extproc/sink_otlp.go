@@ -213,6 +213,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	attrs = appendGenAIAttrs(attrs, r)
 	attrs = appendAPRAttrs(attrs, r)
 	attrs = appendBackendAttrs(attrs, r)
+	attrs = appendTranslationAttrs(attrs, r)
 	attrs = appendMCPAttrs(attrs, r)
 
 	_, span := s.tracer.Start(parentCtx, spanName,
@@ -287,6 +288,7 @@ func (s *otlpSink) emitLog(r Record, d derived, sc oteltrace.SpanContext) {
 	attrs = appendLogKVs(attrs, genAIAttrs(r))
 	attrs = appendLogKVs(attrs, aprAttrs(r))
 	attrs = appendLogKVs(attrs, backendAttrs(r))
+	attrs = appendLogKVs(attrs, translationAttrs(r))
 	attrs = appendLogKVs(attrs, mcpAttrs(r))
 	rec.AddAttributes(attrs...)
 	s.logger.Emit(context.Background(), rec)
@@ -379,6 +381,34 @@ func backendAttrs(r Record) []attribute.KeyValue {
 
 func appendBackendAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 	return append(dst, backendAttrs(r)...)
+}
+
+// translationAttrs emits the cross-schema translation attributes only
+// when translation applied, skipped candidates, or failed — same
+// zero-drift contract as backendAttrs for untouched traffic.
+func translationAttrs(r Record) []attribute.KeyValue {
+	var out []attribute.KeyValue
+	if r.TranslationApplied {
+		out = append(out,
+			attribute.Bool(otelemit.AttrTranslationApplied, true),
+			attribute.String(otelemit.AttrTranslationFrom, r.TranslationFrom),
+			attribute.String(otelemit.AttrTranslationTo, r.TranslationTo),
+		)
+	}
+	if r.TranslationSkippedBackends > 0 {
+		out = append(out, attribute.Int(otelemit.AttrTranslationSkippedBackends, r.TranslationSkippedBackends))
+	}
+	if r.TranslationDroppedExtras > 0 {
+		out = append(out, attribute.Int(otelemit.AttrTranslationDroppedExtras, r.TranslationDroppedExtras))
+	}
+	if r.TranslationError != "" {
+		out = append(out, attribute.String(otelemit.AttrTranslationError, r.TranslationError))
+	}
+	return out
+}
+
+func appendTranslationAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
+	return append(dst, translationAttrs(r)...)
 }
 
 // mcpAttrs returns the mcp.* + clrk.mcproute.* attribute slice for

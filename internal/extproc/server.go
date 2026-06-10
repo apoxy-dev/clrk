@@ -14,8 +14,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 )
@@ -167,6 +170,23 @@ type Record struct {
 	SelectedBackendName       string
 	SelectedBackendSchema     string
 	SelectedBackendReselected bool
+
+	// Cross-schema translation facts (APO-742). TranslationApplied is
+	// true when the request committed upstream in a different wire
+	// schema than the agent spoke; From/To are the canonical
+	// gen_ai.system names of those schemas. SkippedBackends counts
+	// cross-schema candidates dropped by per-request filtering
+	// (streaming, capability misses, no applicable modelRewrite).
+	// DroppedExtras counts source-schema members not representable in
+	// the target schema (request + response sides). Error carries the
+	// reason translation degraded: a fallback's decode/encode failure,
+	// or the response-side failure behind a fail-closed 502.
+	TranslationApplied         bool
+	TranslationFrom            string
+	TranslationTo              string
+	TranslationSkippedBackends int
+	TranslationDroppedExtras   int
+	TranslationError           string
 }
 
 // ServerOption configures the ext_proc Server.
@@ -317,6 +337,23 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// losing route attribution and silently skipping the TokenBudget
 	// charge.
 	var finalRule *routeRule
+	// fullReqBody accumulates the COMPLETE request body for reselectable
+	// streams, independent of the telemetry capture cap. Re-selection
+	// re-serializes the body (model remap, schema translation), which is
+	// only sound from full bytes — the capture cap exists to bound what we
+	// EMIT, not what we route on. Bounded by Envoy's per-stream buffer
+	// (the BUFFERED mode promotion), so it cannot grow past what Envoy
+	// itself was willing to hold.
+	var fullReqBody []byte
+	// xlate is non-nil once a cross-schema-translated request was
+	// committed upstream. The response phases key off it: the agent
+	// speaks xlate.src's schema, the upstream answers in xlate.tgt's,
+	// and the body must come back through the reverse translation.
+	// fullRespBody is the response-side full-fidelity buffer, mirroring
+	// fullReqBody — reverse translation must run on complete bytes, not
+	// the capped capture.
+	var xlate *translationState
+	var fullRespBody []byte
 
 	for {
 		req, err := stream.Recv()
@@ -434,11 +471,27 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// traffic would buffer the whole SSE response before releasing
 			// it downstream. Error responses stay BUFFERED so the capture
 			// path gets the whole error body in one ProcessingRequest.
+			//
+			// Translated streams never promote: the request was committed
+			// non-streaming by construction (streaming is filtered at
+			// selection), so streamRequested can only be the byte-probe's
+			// false positive here, and the response body must arrive
+			// BUFFERED for the reverse translation to run on whole bytes.
 			respIsStreaming := isStreamingContentType(rec.ResponseHeaders["content-type"])
-			if (streamRequested || respIsStreaming) && rec.ResponseHeaders[":status"] == "200" {
+			if xlate == nil && (streamRequested || respIsStreaming) && rec.ResponseHeaders[":status"] == "200" {
 				resp.ModeOverride = &extprocfilterv3.ProcessingMode{
 					ResponseBodyMode: extprocfilterv3.ProcessingMode_STREAMED,
 				}
+			}
+			if xlate != nil && respIsStreaming && rec.ResponseHeaders[":status"] == "200" {
+				// The backend streamed an answer to a request that was
+				// committed non-streaming (selection filters stream:true
+				// from cross-schema candidates). Streaming translation is
+				// APO-743; buffering an unbounded SSE stream to translate
+				// it is not an option. Post-commit failure: fail closed
+				// before any of it reaches the agent.
+				rec.TranslationError = "response: upstream streamed a non-streaming translated request"
+				resp = translation502(xlate.src.Name, "clrk: cross-schema translation does not support streaming responses")
 			}
 			if !contentTypeIncluded(rec.ResponseHeaders["content-type"], includedTypes) {
 				respBytesLeft = 0
@@ -452,6 +505,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			}
 			rec.RequestBody = body
 			rec.RequestTruncated = rec.RequestTruncated || trunc
+			if deferReselect {
+				fullReqBody = append(fullReqBody, chunk...)
+			}
 			// Probe each chunk so multi-chunk BUFFERED_PARTIAL deliveries
 			// latch as soon as "stream":true appears. Once true, we leave
 			// it.
@@ -469,22 +525,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				reqPath := rec.RequestHeaders[":path"]
 
 				if deferReselect {
-					// A truncated body can't be decoded for the model or
-					// safely re-serialized: fall back to the provisional
-					// match — inject its route-wide credentials so the
-					// request still authenticates, leave :authority on the
-					// header-time host, do not re-select.
-					if rec.RequestTruncated {
-						if mut := injectFallbackCreds(creds, provMatch, rec.RequestHeaders, logger); mut != nil {
-							resp = bodyContinueWithHeaders(true, mut, false)
-						} else {
-							resp = bodyContinue(true)
-						}
-						break
-					}
-
+					// Re-selection works from fullReqBody — the complete
+					// bytes — never the capped capture; a truncated CAPTURE
+					// no longer forces the fallback path.
 					system := parsers.SystemFor(host)
-					model := parsers.RequestModel(rec.RequestBody)
+					model := parsers.RequestModel(fullReqBody)
 					final := routes.match(system, reqPath, model)
 					if final == nil {
 						final = provMatch
@@ -493,27 +538,138 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 					// carries the agent's original system/model — emit-time
 					// re-matching would run against the rewritten body.
 					finalRule = final
-					// Weighted/first pick over the rule's candidate
-					// backendRefs (BackendRef.Weight). The candidate set was
-					// already restricted to the rule provider's wire schema
-					// at route-table build time (sameSchemaBackends), so this
-					// cannot pick a cross-schema backend and send it a
-					// mismatched body — same-schema reselection only;
-					// cross-schema needs translation (APO-572). A
-					// classifier-driven ExtensionRef selector is APO-480 and
-					// will swap a different backendSelector in here.
-					chosen, ok := staticSelector{}.Select(final.backends, selectorInput{
+
+					// Decode the request through the source codec once,
+					// only when the candidate set spans schemas. A decode
+					// failure isn't fatal: cross-schema candidates drop out
+					// at the filter below (ir == nil) and same-schema
+					// reselection proceeds as before. Only malformed bodies
+					// are surfaced — ErrUnsupported just means an endpoint
+					// translation doesn't cover (embeddings, non-chat).
+					var (
+						srcProv *llmcall.Provider
+						ir      *llmcall.Request
+					)
+					if crossSchemaCandidates(final.backends, system) {
+						if srcProv = llmcall.ByName(system); srcProv != nil && srcProv.Codec != nil {
+							decoded, derr := srcProv.Codec.DecodeRequest(llmcall.RequestInput{
+								Method:  rec.RequestHeaders[":method"],
+								Path:    reqPath,
+								Headers: rec.RequestHeaders,
+								Body:    fullReqBody,
+							})
+							switch {
+							case derr == nil:
+								ir = decoded
+							default:
+								var merr *llmcall.MalformedError
+								if errors.As(derr, &merr) {
+									rec.TranslationError = "request decode: " + merr.Detail
+								}
+							}
+						}
+					}
+
+					// Per-request translatability filter: same-schema
+					// candidates always pass; cross-schema ones need a
+					// clean TranslationBlockers verdict (streaming waits
+					// for APO-743, capability misses, Gemini tool results)
+					// and a modelRewrite covering the decoded model.
+					cands, skipped := filterTranslatable(final.backends, system, srcProv, ir)
+					rec.TranslationSkippedBackends = skipped
+
+					// Weighted/first pick over the surviving candidates
+					// (BackendRef.Weight). A classifier-driven ExtensionRef
+					// selector is APO-480 and will swap a different
+					// backendSelector in here.
+					chosen, ok := staticSelector{}.Select(cands, selectorInput{
 						provider:     system,
 						model:        model,
 						path:         reqPath,
 						invocationID: rec.InvocationID,
 						reqHeaders:   rec.RequestHeaders,
-						reqBody:      rec.RequestBody,
+						reqBody:      fullReqBody,
 					})
+
+					// A cross-schema pick translates the request before
+					// anything is committed. An encode failure here is
+					// pre-commit: drop back to the same-schema candidates
+					// and let the usual paths handle whatever remains.
+					if ok && !chosen.refuse && ir != nil && chosen.system != system {
+						tgtProv := llmcall.ByName(chosen.system)
+						newModel, _ := chosen.rewriteModel(ir.Model)
+						enc, xreq, xerr := translateRequest(tgtProv, ir, newModel)
+						if xerr != nil {
+							rec.TranslationError = "request encode: " + xerr.Error()
+							chosen, ok = staticSelector{}.Select(sameSchemaOnly(cands, system), selectorInput{
+								provider:     system,
+								model:        model,
+								path:         reqPath,
+								invocationID: rec.InvocationID,
+								reqHeaders:   rec.RequestHeaders,
+								reqBody:      fullReqBody,
+							})
+						} else {
+							// Commit: repoint :authority + :path, swap the
+							// body for the target-schema encode, set the
+							// target codec's headers, shed the source
+							// schema's modeled + credential headers, inject
+							// the backend's credentials, and ClearRouteCache
+							// so DFP re-derives upstream host + SNI.
+							mut := setHeaderMut(nil, ":authority", net.JoinHostPort(chosen.host, strconv.Itoa(chosen.port)))
+							mut = setHeaderMut(mut, ":path", enc.Path)
+							for _, k := range slices.Sorted(maps.Keys(enc.SetHeaders)) {
+								mut = setHeaderMut(mut, k, enc.SetHeaders[k])
+							}
+							injs := creds.lookupForBackend(final, chosen.name)
+							if len(injs) > 0 {
+								if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
+									logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+										"policies", collisions)
+								}
+								mut = applyInjections(mut, injs)
+							}
+							mut = removeHeadersMut(mut, sourceHeaderRemovals(ir, enc, injs))
+
+							rec.SelectedBackendNamespace = chosen.namespace
+							rec.SelectedBackendName = chosen.name
+							rec.SelectedBackendSchema = chosen.system
+							rec.SelectedBackendReselected = true
+							rec.TranslationApplied = true
+							rec.TranslationFrom = system
+							rec.TranslationTo = chosen.system
+							rec.TranslationDroppedExtras += enc.DroppedExtras
+							// Keep the captured view coherent with what the
+							// upstream receives: the translated path keys
+							// the response parser (Gemini's model rides the
+							// URL) and the translated body is what gen_ai.*
+							// is parsed from, per the APO-689 convention.
+							rec.RequestHeaders[":path"] = enc.Path
+							left := maxCaptureBytes
+							rec.RequestBody, rec.RequestTruncated = appendBounded(nil, enc.Body, &left)
+							rec.RequestBodyRewritten = true
+							xlate = &translationState{src: srcProv, tgt: tgtProv, req: xreq}
+							resp = bodyMutationWithHeaders(true, enc.Body, mut, true)
+							break
+						}
+					}
+
 					if !ok {
-						// No candidate resolved (e.g. all refs dangling).
-						// Fall back to route-wide creds + original host.
-						if mut := injectFallbackCreds(creds, final, rec.RequestHeaders, logger); mut != nil {
+						// Nothing servable for THIS request — no candidate
+						// resolved, or per-request filtering emptied the
+						// set. Fall back to the header-time host with the
+						// rule's route-wide credentials, and still apply
+						// the include-usage rewrite the non-reselectable
+						// path would have: without it, streamed traffic on
+						// an all-cross-schema rule would silently evade
+						// TokenBudget.
+						mut := injectFallbackCreds(creds, final, rec.RequestHeaders, logger)
+						if newBody, changed := parsers.EnsureIncludeUsage(host, reqPath, fullReqBody); changed {
+							left := maxCaptureBytes
+							rec.RequestBody, rec.RequestTruncated = appendBounded(nil, newBody, &left)
+							rec.RequestBodyRewritten = true
+							resp = bodyMutationWithHeaders(true, newBody, mut, false)
+						} else if mut != nil {
 							resp = bodyContinueWithHeaders(true, mut, false)
 						} else {
 							resp = bodyContinue(true)
@@ -534,10 +690,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 						continue
 					}
 
-					// Repoint :authority to the selected backend and inject
-					// its credentials (route-wide + the CIP whose parentRef
-					// sectionName names this backend + gateway), in the
-					// backend's scheme.
+					// Same-schema pick: repoint :authority and inject the
+					// backend's credentials (route-wide + the CIP whose
+					// parentRef sectionName names this backend + gateway),
+					// in the backend's scheme.
 					mut := setHeaderMut(nil, ":authority", net.JoinHostPort(chosen.host, strconv.Itoa(chosen.port)))
 					if injs := creds.lookupForBackend(final, chosen.name); len(injs) > 0 {
 						if collisions := redactInjected(rec.RequestHeaders, injs); len(collisions) > 0 {
@@ -555,8 +711,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 					// include-usage in the backend's schema) and emit the
 					// repoint with ClearRouteCache so DFP re-derives the
 					// upstream host + SNI from the new :authority.
-					if newBody, changed := rewriteRequestBody(rec.RequestBody, reqPath, model, chosen); changed {
-						rec.RequestBody = newBody
+					if newBody, changed := rewriteRequestBody(fullReqBody, reqPath, model, chosen); changed {
+						left := maxCaptureBytes
+						rec.RequestBody, rec.RequestTruncated = appendBounded(nil, newBody, &left)
 						rec.RequestBodyRewritten = true
 						resp = bodyMutationWithHeaders(true, newBody, mut, true)
 					} else {
@@ -622,6 +779,53 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			rec.ResponseBody = body
 			rec.ResponseTruncated = rec.ResponseTruncated || trunc
 			resp = bodyContinue(false)
+			if xlate != nil && rec.ResponseHeaders[":status"] == "200" {
+				// Reverse translation: the upstream answered in the
+				// backend's schema and the agent can only parse the one
+				// it spoke. Decode through the backend codec from the
+				// full-fidelity buffer (the capture above may be capped),
+				// re-encode through the agent's. The captured
+				// rec.ResponseBody intentionally keeps the UPSTREAM
+				// bytes — that is the conversation gen_ai.* is parsed
+				// from (the parser is keyed to SelectedBackendSchema).
+				// Any failure here is post-commit: fail closed with a
+				// 502 shaped for the agent's schema rather than hand it
+				// a body it will misparse. Non-200 responses pass
+				// through untranslated — the status code carries the
+				// signal and error envelopes are provider-specific
+				// anyway.
+				fullRespBody = append(fullRespBody, m.ResponseBody.GetBody()...)
+				if m.ResponseBody.GetEndOfStream() {
+					decoded, derr := xlate.tgt.Codec.DecodeResponse(llmcall.ResponseInput{
+						Status:  200,
+						Headers: rec.ResponseHeaders,
+						Body:    fullRespBody,
+					}, xlate.req)
+					if derr != nil {
+						rec.TranslationError = "response decode: " + derr.Error()
+						resp = translation502(xlate.src.Name, "clrk: cross-schema response translation failed")
+						break
+					}
+					dropped := llmcall.StripResponseForTranslation(decoded)
+					decoded.Provider = xlate.src.Name
+					enc, eerr := xlate.src.Codec.EncodeResponse(decoded, llmcall.EncodeOptions{Mode: llmcall.ModeStrip})
+					if eerr != nil {
+						rec.TranslationError = "response encode: " + eerr.Error()
+						resp = translation502(xlate.src.Name, "clrk: cross-schema response translation failed")
+						break
+					}
+					rec.TranslationDroppedExtras += dropped + enc.DroppedExtras
+					if len(enc.SetHeaders) > 0 {
+						var mut *extprocv3.HeaderMutation
+						for _, k := range slices.Sorted(maps.Keys(enc.SetHeaders)) {
+							mut = setHeaderMut(mut, k, enc.SetHeaders[k])
+						}
+						resp = bodyMutationWithHeaders(false, enc.Body, mut, false)
+					} else {
+						resp = bodyMutation(false, enc.Body)
+					}
+				}
+			}
 		case *extprocv3.ProcessingRequest_RequestTrailers:
 			resp = trailersContinue(true)
 		case *extprocv3.ProcessingRequest_ResponseTrailers:

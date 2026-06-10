@@ -47,6 +47,18 @@ const (
 	AttrBackendNamespace  = "clrk.backend.namespace"
 	AttrBackendSchema     = "clrk.backend.schema"
 
+	// Cross-schema translation attributes (APO-742) — emitted only when
+	// translation applied, skipped candidates, or failed, so records for
+	// same-schema traffic are unchanged. gen_ai.* on a translated record
+	// reflects the UPSTREAM conversation (the `to` schema); these attrs
+	// are how an operator recovers what the agent originally spoke.
+	AttrTranslationApplied         = "clrk.translation.applied"
+	AttrTranslationFrom            = "clrk.translation.from"
+	AttrTranslationTo              = "clrk.translation.to"
+	AttrTranslationSkippedBackends = "clrk.translation.skipped_backends"
+	AttrTranslationDroppedExtras   = "clrk.translation.dropped_extras"
+	AttrTranslationError           = "clrk.translation.error"
+
 	AttrMCPMethod             = "mcp.method"
 	AttrMCPProtocolVersion    = "mcp.protocol.version"
 	AttrMCPToolName           = "mcp.tool.name"

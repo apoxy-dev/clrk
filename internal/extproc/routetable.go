@@ -8,6 +8,7 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 )
 
@@ -146,7 +147,7 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 					endpoints:      append([]string(nil), m.Endpoints...),
 					models:         append([]string(nil), m.Models...),
 					tokenBudget:    budget,
-					backends:       sameSchemaBackends(resolved, prov),
+					backends:       translatableBackends(resolved, prov),
 				})
 			}
 		}
@@ -219,31 +220,51 @@ func resolveBackends(refs []gwapiv1.BackendRef, routeNamespace string, byKey map
 	return out
 }
 
-// sameSchemaBackends restricts a rule's resolved candidate set to backends
-// whose wire schema matches the rule's provider. APO-689 supports
-// same-schema reselection only: a backend speaking a different wire format
-// than the route's provider would need request/response translation
-// (APO-572), so it is dropped from the candidate set rather than silently
-// sent a mismatched body. The rule then degrades to its same-schema
-// candidates, or to pass-through to the original host when none remain — an
-// empty set also clears the re-selectable latch (deferReselect) in
-// server.go, so such a rule keeps today's header-time path verbatim.
+// translatableBackends restricts a rule's resolved candidate set to backends
+// the data plane can actually serve: same-schema candidates as before
+// (APO-689), plus cross-schema candidates the llmcall registry can
+// translate to (APO-742). A cross-schema candidate survives when both the
+// rule's provider and the candidate's schema carry a registered Codec AND
+// the Backend declares modelRewrites — model IDs don't transfer across
+// providers, so a backend with no rewrite table can never be picked and is
+// dropped here rather than dead-weighting selection. Build-time filtering
+// is static-only; the per-request gates (streaming, capability misses,
+// whether a rewrite actually covers the request's model) run at
+// RequestBody EOS in server.go.
+//
+// The rule degrades to pass-through to the original host when nothing
+// remains — an empty set also clears the re-selectable latch
+// (deferReselect) in server.go, so such a rule keeps the header-time path
+// verbatim.
 //
 // A "custom" provider does endpoint-only matching and clrk has no parser
-// for its wire format, so it cannot verify schema parity; those rules keep
-// every candidate and trust the operator's backendRefs (e.g. an
-// OpenAI-compatible gateway reselecting to api.openai.com). refuse
-// (InferencePool) candidates are always kept so selecting one yields a
-// clean 501 rather than a silent fall-through to the original host.
-func sameSchemaBackends(candidates []resolvedBackend, provider string) []resolvedBackend {
+// for its wire format, so it can neither verify schema parity nor
+// translate; those rules keep every candidate and trust the operator's
+// backendRefs (e.g. an OpenAI-compatible gateway reselecting to
+// api.openai.com). refuse (InferencePool) candidates are always kept so
+// selecting one yields a clean 501 rather than a silent fall-through to
+// the original host.
+func translatableBackends(candidates []resolvedBackend, provider string) []resolvedBackend {
 	if provider == "" || provider == "custom" {
 		return candidates
 	}
+	src := llmcall.ByName(provider)
 	out := make([]resolvedBackend, 0, len(candidates))
 	for _, c := range candidates {
 		if c.refuse || c.system == provider {
 			out = append(out, c)
+			continue
 		}
+		if src == nil || src.Codec == nil {
+			continue
+		}
+		if tgt := llmcall.ByName(c.system); tgt == nil || tgt.Codec == nil {
+			continue
+		}
+		if len(c.modelRewrites) == 0 {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out
 }

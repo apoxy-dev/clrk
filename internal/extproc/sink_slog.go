@@ -52,6 +52,22 @@ func (slogSink) Emit(r Record) {
 			"clrk.aiproviderroute.name", r.MatchedRouteName,
 		)
 	}
+	if r.TranslationApplied {
+		attrs = append(attrs,
+			"clrk.translation.applied", true,
+			"clrk.translation.from", r.TranslationFrom,
+			"clrk.translation.to", r.TranslationTo,
+		)
+	}
+	if r.TranslationSkippedBackends > 0 {
+		attrs = append(attrs, "clrk.translation.skipped_backends", r.TranslationSkippedBackends)
+	}
+	if r.TranslationDroppedExtras > 0 {
+		attrs = append(attrs, "clrk.translation.dropped_extras", r.TranslationDroppedExtras)
+	}
+	if r.TranslationError != "" {
+		attrs = append(attrs, "clrk.translation.error", r.TranslationError)
+	}
 	if r.MCP != nil {
 		attrs = append(attrs, "mcp.method", r.MCP.Method)
 		if r.MCP.ProtocolVersion != "" {
