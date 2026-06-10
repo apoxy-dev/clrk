@@ -2,9 +2,9 @@ package openai
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
@@ -77,7 +77,7 @@ func ParseShape(in llmcall.Input, info *llmcall.ProviderInfo) {
 		return
 	}
 	var resp openaiResponse
-	if err := json.Unmarshal(in.RespBody, &resp); err != nil {
+	if err := jsonx.Unmarshal(in.RespBody, &resp); err != nil {
 		return
 	}
 	info.ResponseModel = resp.Model
@@ -102,7 +102,7 @@ func extractOpenAISSEUsage(body []byte, info *llmcall.ProviderInfo) {
 			return
 		}
 		var resp openaiResponse
-		if err := json.Unmarshal(payload, &resp); err != nil {
+		if err := jsonx.Unmarshal(payload, &resp); err != nil {
 			return
 		}
 		if resp.Model != "" {
@@ -134,7 +134,7 @@ func decodeOpenAIModel(body []byte) string {
 		return ""
 	}
 	var r openaiRequest
-	if err := json.Unmarshal(body, &r); err != nil {
+	if err := jsonx.Unmarshal(body, &r); err != nil {
 		return ""
 	}
 	return r.Model

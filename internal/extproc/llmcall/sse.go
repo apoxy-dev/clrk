@@ -2,7 +2,8 @@ package llmcall
 
 import (
 	"bytes"
-	"encoding/json"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 )
 
 // ScanSSEData iterates `data:` payloads in an SSE byte stream, oldest
@@ -95,7 +96,7 @@ func LastJSONLine(b []byte) []byte {
 			continue
 		}
 		var probe any
-		if err := json.Unmarshal(line, &probe); err == nil {
+		if err := jsonx.Unmarshal(line, &probe); err == nil {
 			return line
 		}
 	}

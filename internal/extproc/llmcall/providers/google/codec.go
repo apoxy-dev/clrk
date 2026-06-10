@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
@@ -47,7 +48,7 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 			var env struct {
 				Parts []json.RawMessage `json:"parts"`
 			}
-			if err := json.Unmarshal(v, &env); err != nil {
+			if err := jsonx.Unmarshal(v, &env); err != nil {
 				return err
 			}
 			for _, p := range env.Parts {
@@ -103,7 +104,7 @@ func textPart(s string) llmcall.Part {
 
 func decodeContents(raw json.RawMessage) ([]llmcall.Message, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	msgs := make([]llmcall.Message, 0, len(elems))
@@ -123,7 +124,7 @@ func decodeContent(el json.RawMessage) (llmcall.Message, error) {
 	err := llmcall.DecodeKnown(el, mw, map[string]func(json.RawMessage) error{
 		"role": func(v json.RawMessage) error {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			// Gemini's assistant role is "model"; the mapping is
@@ -137,7 +138,7 @@ func decodeContent(el json.RawMessage) (llmcall.Message, error) {
 		},
 		"parts": func(v json.RawMessage) error {
 			var parts []json.RawMessage
-			if err := json.Unmarshal(v, &parts); err != nil {
+			if err := jsonx.Unmarshal(v, &parts); err != nil {
 				return err
 			}
 			for _, p := range parts {
@@ -158,7 +159,7 @@ func decodeContent(el json.RawMessage) (llmcall.Message, error) {
 // functionCall, functionResponse; anything else is unknown.
 func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	if err := jsonx.Unmarshal(raw, &probe); err != nil {
 		return llmcall.Part{}, err
 	}
 	switch {
@@ -203,7 +204,7 @@ func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 					Name string          `json:"name"`
 					Args json.RawMessage `json:"args"`
 				}
-				if err := json.Unmarshal(v, &fc); err != nil {
+				if err := jsonx.Unmarshal(v, &fc); err != nil {
 					return err
 				}
 				p.ToolCall.Name = fc.Name
@@ -232,7 +233,7 @@ func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 					Name     string          `json:"name"`
 					Response json.RawMessage `json:"response"`
 				}
-				if err := json.Unmarshal(v, &fr); err != nil {
+				if err := jsonx.Unmarshal(v, &fr); err != nil {
 					return err
 				}
 				// Gemini correlates results by function name, not call
@@ -265,7 +266,7 @@ func decodePart(raw json.RawMessage) (llmcall.Part, error) {
 // alone must not route a part to the reasoning decoder.
 func boolTrue(raw json.RawMessage) bool {
 	var b bool
-	return json.Unmarshal(raw, &b) == nil && b
+	return jsonx.Unmarshal(raw, &b) == nil && b
 }
 
 func functionCallShadowVal(tc *llmcall.ToolCallPart) string {
@@ -283,7 +284,7 @@ func decodeInlineData(raw json.RawMessage) (llmcall.Part, error) {
 			Data     string `json:"data"`
 		} `json:"inlineData"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := jsonx.Unmarshal(raw, &env); err != nil {
 		return llmcall.Part{}, err
 	}
 	p := mediaPart(env.InlineData.MimeType)
@@ -309,7 +310,7 @@ func decodeFileData(raw json.RawMessage) (llmcall.Part, error) {
 			FileURI  string `json:"fileUri"`
 		} `json:"fileData"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := jsonx.Unmarshal(raw, &env); err != nil {
 		return llmcall.Part{}, err
 	}
 	p := mediaPart(env.FileData.MimeType)
@@ -433,7 +434,7 @@ func decodeTools(v json.RawMessage, req *llmcall.Request) error {
 			Parameters  json.RawMessage `json:"parameters"`
 		} `json:"functionDeclarations"`
 	}
-	if err := json.Unmarshal(v, &elems); err != nil {
+	if err := jsonx.Unmarshal(v, &elems); err != nil {
 		return err
 	}
 	for _, el := range elems {
@@ -471,7 +472,7 @@ func decodeToolConfig(v json.RawMessage, req *llmcall.Request) error {
 			AllowedFunctionNames []string `json:"allowedFunctionNames"`
 		} `json:"functionCallingConfig"`
 	}
-	if err := json.Unmarshal(v, &env); err != nil {
+	if err := jsonx.Unmarshal(v, &env); err != nil {
 		return err
 	}
 	tc := &llmcall.ToolChoice{}
@@ -903,7 +904,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 
 func decodeCandidates(raw json.RawMessage) ([]llmcall.Choice, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	choices := make([]llmcall.Choice, 0, len(elems))
@@ -918,7 +919,7 @@ func decodeCandidates(raw json.RawMessage) ([]llmcall.Choice, error) {
 			},
 			"finishReason": func(v json.RawMessage) error {
 				var s string
-				if err := json.Unmarshal(v, &s); err != nil {
+				if err := jsonx.Unmarshal(v, &s); err != nil {
 					return err
 				}
 				ch.FinishReasonRaw = s

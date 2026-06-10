@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 )
 
 // ExtraField is one unmodeled JSON object member captured at decode
@@ -142,23 +144,14 @@ func (w *Wire) SetHint(key, value string) {
 // default escaping would silently break byte-identity against provider
 // output, so codecs must not call bare json.Marshal.
 func MarshalCompact(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	b := buf.Bytes()
-	// Encoder.Encode appends a newline; strip it.
-	if n := len(b); n > 0 && b[n-1] == '\n' {
-		b = b[:n-1]
-	}
-	return b, nil
+	return jsonx.MarshalWire(v)
 }
 
 // CompactJSON returns raw with insignificant whitespace removed. Key
 // order, string escapes, and number literals are untouched — exactly
-// the normalization the preserve-mode passthrough gate needs.
+// the normalization the preserve-mode passthrough gate needs. Stays on
+// encoding/json: Compact is a byte-level transform with no value
+// parse, outside jsonx's scope.
 func CompactJSON(raw []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, raw); err != nil {
@@ -171,7 +164,8 @@ func CompactJSON(raw []byte) ([]byte, error) {
 // handing each key and its verbatim value subtree to fn. Returns an
 // error when raw is not a JSON object or fn fails. Duplicate keys are
 // passed through as encountered; fidelity guarantees assume providers
-// don't emit them.
+// don't emit them. Stays on encoding/json: the order-preserving token
+// walk has no std-compatible equivalent in jsonx's engine.
 func DecodeObject(raw []byte, fn func(key string, value json.RawMessage) error) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()

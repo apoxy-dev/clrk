@@ -2,8 +2,9 @@ package parsers
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 )
 
 // streamColonTrue is a cheap byte-scan probe for `"stream":true` (or
@@ -100,7 +101,7 @@ func RequestModel(body []byte) string {
 		return ""
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := jsonx.Unmarshal(body, &obj); err != nil {
 		return ""
 	}
 	m, _ := obj["model"].(string)
@@ -117,14 +118,14 @@ func RewriteModel(body []byte, to string) ([]byte, bool) {
 		return nil, false
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+	if err := jsonx.Unmarshal(body, &obj); err != nil || obj == nil {
 		return nil, false
 	}
 	if _, ok := obj["model"]; !ok {
 		return nil, false
 	}
 	obj["model"] = to
-	out, err := json.Marshal(obj)
+	out, err := jsonx.Marshal(obj)
 	if err != nil {
 		return nil, false
 	}
@@ -146,7 +147,7 @@ func rewriteIncludeUsage(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := jsonx.Unmarshal(body, &obj); err != nil {
 		return nil, false
 	}
 	if obj == nil {
@@ -173,7 +174,7 @@ func rewriteIncludeUsage(body []byte) ([]byte, bool) {
 		}
 		so["include_usage"] = true
 	}
-	out, err := json.Marshal(obj)
+	out, err := jsonx.Marshal(obj)
 	if err != nil {
 		// Should never happen for a successfully-decoded map.
 		return nil, false

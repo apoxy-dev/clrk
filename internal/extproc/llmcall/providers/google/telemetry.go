@@ -1,9 +1,9 @@
 package google
 
 import (
-	"encoding/json"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/openai"
 )
@@ -92,7 +92,7 @@ func (telemetryParser) Parse(in llmcall.Input) *llmcall.ProviderInfo {
 	}
 
 	var resp googleResponse
-	if err := json.Unmarshal(in.RespBody, &resp); err != nil {
+	if err := jsonx.Unmarshal(in.RespBody, &resp); err != nil {
 		return info
 	}
 	info.ResponseModel = resp.ModelVersion
@@ -110,7 +110,7 @@ func extractGoogleSSEUsage(body []byte, info *llmcall.ProviderInfo) {
 	}
 	llmcall.ScanSSEData(body, func(payload []byte) {
 		var resp googleResponse
-		if err := json.Unmarshal(payload, &resp); err != nil {
+		if err := jsonx.Unmarshal(payload, &resp); err != nil {
 			return
 		}
 		applyGoogleResponse(resp, info)
@@ -123,7 +123,7 @@ func extractGoogleNDJSONUsage(body []byte, info *llmcall.ProviderInfo) {
 		return
 	}
 	var resp googleResponse
-	if err := json.Unmarshal(line, &resp); err != nil {
+	if err := jsonx.Unmarshal(line, &resp); err != nil {
 		return
 	}
 	applyGoogleResponse(resp, info)

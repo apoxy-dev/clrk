@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
@@ -72,7 +73,7 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 			return decodeStop(v, req)
 		},
 		"stream": func(v json.RawMessage) error {
-			return json.Unmarshal(v, &req.Stream)
+			return jsonx.Unmarshal(v, &req.Stream)
 		},
 	})
 	if err != nil {
@@ -139,7 +140,7 @@ func decodeToolCalls(v json.RawMessage, mw *llmcall.Wire) ([]llmcall.Part, error
 			Arguments string `json:"arguments"`
 		} `json:"function"`
 	}
-	if err := json.Unmarshal(v, &elems); err != nil {
+	if err := jsonx.Unmarshal(v, &elems); err != nil {
 		return nil, err
 	}
 	parts := make([]llmcall.Part, 0, len(elems))
@@ -164,7 +165,7 @@ func decodeToolCalls(v json.RawMessage, mw *llmcall.Wire) ([]llmcall.Part, error
 
 func decodeMessages(raw json.RawMessage) ([]llmcall.Message, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	msgs := make([]llmcall.Message, 0, len(elems))
@@ -186,7 +187,7 @@ func decodeMessage(el json.RawMessage) (llmcall.Message, error) {
 	err := llmcall.DecodeKnown(el, mw, map[string]func(json.RawMessage) error{
 		"role": func(v json.RawMessage) error {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			// "developer" is the modern spelling of the system role;
@@ -275,7 +276,7 @@ func decodeMessage(el json.RawMessage) (llmcall.Message, error) {
 
 func decodeContentParts(raw json.RawMessage) ([]llmcall.Part, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	parts := make([]llmcall.Part, 0, len(elems))
@@ -309,7 +310,7 @@ func decodeContentParts(raw json.RawMessage) ([]llmcall.Part, error) {
 					var iu struct {
 						URL string `json:"url"`
 					}
-					if err := json.Unmarshal(v, &iu); err != nil {
+					if err := jsonx.Unmarshal(v, &iu); err != nil {
 						return err
 					}
 					p.Image.URL = iu.URL
@@ -362,7 +363,7 @@ func decodeTools(v json.RawMessage, req *llmcall.Request) error {
 			Parameters  json.RawMessage `json:"parameters"`
 		} `json:"function"`
 	}
-	if err := json.Unmarshal(v, &elems); err != nil {
+	if err := jsonx.Unmarshal(v, &elems); err != nil {
 		return err
 	}
 	for _, el := range elems {
@@ -395,7 +396,7 @@ func decodeToolChoice(v json.RawMessage, req *llmcall.Request) error {
 	tc := &llmcall.ToolChoice{}
 	if len(v) > 0 && v[0] == '"' {
 		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
+		if err := jsonx.Unmarshal(v, &s); err != nil {
 			return err
 		}
 		switch s {
@@ -414,7 +415,7 @@ func decodeToolChoice(v json.RawMessage, req *llmcall.Request) error {
 				Name string `json:"name"`
 			} `json:"function"`
 		}
-		if err := json.Unmarshal(v, &obj); err != nil {
+		if err := jsonx.Unmarshal(v, &obj); err != nil {
 			return err
 		}
 		tc.Mode = llmcall.ToolChoiceNamed
@@ -872,7 +873,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 
 func decodeChoices(raw json.RawMessage) ([]llmcall.Choice, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	choices := make([]llmcall.Choice, 0, len(elems))
@@ -894,7 +895,7 @@ func decodeChoices(raw json.RawMessage) ([]llmcall.Choice, error) {
 					return nil
 				}
 				var s string
-				if err := json.Unmarshal(v, &s); err != nil {
+				if err := jsonx.Unmarshal(v, &s); err != nil {
 					return err
 				}
 				ch.FinishReasonRaw = s

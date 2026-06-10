@@ -1,9 +1,9 @@
 package anthropic
 
 import (
-	"encoding/json"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
@@ -64,7 +64,7 @@ func (telemetryParser) Parse(in llmcall.Input) *llmcall.ProviderInfo {
 	}
 
 	var resp anthropicResponse
-	if err := json.Unmarshal(in.RespBody, &resp); err != nil {
+	if err := jsonx.Unmarshal(in.RespBody, &resp); err != nil {
 		// Truncation or non-JSON error body. Leave usage zero; the
 		// OTLP sink decides whether to flag UsageVisible based on
 		// truncation state.
@@ -111,13 +111,13 @@ func extractAnthropicSSEUsage(body []byte, info *llmcall.ProviderInfo) {
 	}
 	llmcall.ScanSSEData(body, func(payload []byte) {
 		var env anthropicSSEEnvelope
-		if err := json.Unmarshal(payload, &env); err != nil {
+		if err := jsonx.Unmarshal(payload, &env); err != nil {
 			return
 		}
 		switch env.Type {
 		case "message_start":
 			var ms anthropicSSEMessageStart
-			if err := json.Unmarshal(payload, &ms); err != nil {
+			if err := jsonx.Unmarshal(payload, &ms); err != nil {
 				return
 			}
 			if ms.Message.Model != "" {
@@ -134,7 +134,7 @@ func extractAnthropicSSEUsage(body []byte, info *llmcall.ProviderInfo) {
 			}
 		case "message_delta":
 			var md anthropicSSEMessageDelta
-			if err := json.Unmarshal(payload, &md); err != nil {
+			if err := jsonx.Unmarshal(payload, &md); err != nil {
 				return
 			}
 			if md.Usage.OutputTokens > 0 {
@@ -161,7 +161,7 @@ func decodeAnthropicModel(body []byte) string {
 		return ""
 	}
 	var r anthropicRequest
-	if err := json.Unmarshal(body, &r); err != nil {
+	if err := jsonx.Unmarshal(body, &r); err != nil {
 		return ""
 	}
 	return r.Model

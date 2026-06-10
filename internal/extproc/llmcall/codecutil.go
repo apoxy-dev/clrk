@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 )
 
 // This file holds the shared machinery provider codecs build their
@@ -52,7 +54,7 @@ func DecodeKnown(raw json.RawMessage, w *Wire, known map[string]func(value json.
 // bytes (\uXXXX escapes and friends).
 func DecodeShadowString(value json.RawMessage, w *Wire, key string) (string, error) {
 	var s string
-	if err := json.Unmarshal(value, &s); err != nil {
+	if err := jsonx.Unmarshal(value, &s); err != nil {
 		return "", err
 	}
 	if fresh, err := MarshalCompact(s); err == nil && !bytes.Equal(fresh, value) {
@@ -65,7 +67,7 @@ func DecodeShadowString(value json.RawMessage, w *Wire, key string) (string, err
 // literals ("12.0", "1e2") that wouldn't re-marshal identically.
 func DecodeShadowInt64(value json.RawMessage, w *Wire, key string) (int64, error) {
 	var n json.Number
-	if err := json.Unmarshal(value, &n); err != nil {
+	if err := jsonx.Unmarshal(value, &n); err != nil {
 		return 0, err
 	}
 	i, err := n.Int64()
@@ -89,7 +91,7 @@ func DecodeShadowInt64(value json.RawMessage, w *Wire, key string) (int64, error
 // shadows.
 func DecodeNumber(value json.RawMessage) (json.Number, error) {
 	var n json.Number
-	err := json.Unmarshal(value, &n)
+	err := jsonx.Unmarshal(value, &n)
 	return n, err
 }
 
@@ -97,7 +99,7 @@ func DecodeNumber(value json.RawMessage) (json.Number, error) {
 // whole-value shadow keyed on the joined contents.
 func DecodeShadowStringSlice(value json.RawMessage, w *Wire, key string) ([]string, error) {
 	var ss []string
-	if err := json.Unmarshal(value, &ss); err != nil {
+	if err := jsonx.Unmarshal(value, &ss); err != nil {
 		return nil, err
 	}
 	compacted, err := CompactJSON(value)
@@ -223,7 +225,7 @@ func EncodeArray(elems []json.RawMessage) []byte {
 // consuming the rest.
 func DecodeTypedBlock(raw json.RawMessage, field string) (string, error) {
 	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	if err := jsonx.Unmarshal(raw, &probe); err != nil {
 		return "", err
 	}
 	tv, ok := probe[field]
@@ -231,7 +233,7 @@ func DecodeTypedBlock(raw json.RawMessage, field string) (string, error) {
 		return "", nil
 	}
 	var t string
-	if err := json.Unmarshal(tv, &t); err != nil {
+	if err := jsonx.Unmarshal(tv, &t); err != nil {
 		return "", err
 	}
 	return t, nil

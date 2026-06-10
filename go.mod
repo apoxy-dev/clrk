@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/apoxy-dev/apoxy v0.20.1-0.20260528184144-a0701864af75
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
+	github.com/bytedance/sonic v1.15.1
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -58,7 +59,6 @@ require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/avast/retry-go/v4 v4.6.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic v1.15.1 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/containerd/containerd v1.7.27 // indirect

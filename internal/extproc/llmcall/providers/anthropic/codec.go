@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 )
 
@@ -77,7 +78,7 @@ func (codec) DecodeRequest(in llmcall.RequestInput) (*llmcall.Request, error) {
 			return err
 		},
 		"stream": func(v json.RawMessage) error {
-			return json.Unmarshal(v, &req.Stream)
+			return jsonx.Unmarshal(v, &req.Stream)
 		},
 		"system": func(v json.RawMessage) error {
 			// System is a top-level string or an array of content
@@ -124,7 +125,7 @@ func textPart(s string) llmcall.Part {
 
 func decodeMessages(raw json.RawMessage) ([]llmcall.Message, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	msgs := make([]llmcall.Message, 0, len(elems))
@@ -134,7 +135,7 @@ func decodeMessages(raw json.RawMessage) ([]llmcall.Message, error) {
 		err := llmcall.DecodeKnown(el, mw, map[string]func(json.RawMessage) error{
 			"role": func(v json.RawMessage) error {
 				var s string
-				if err := json.Unmarshal(v, &s); err != nil {
+				if err := jsonx.Unmarshal(v, &s); err != nil {
 					return err
 				}
 				msg.Role = llmcall.Role(s)
@@ -165,7 +166,7 @@ func decodeMessages(raw json.RawMessage) ([]llmcall.Message, error) {
 
 func decodeParts(raw json.RawMessage) ([]llmcall.Part, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	parts := make([]llmcall.Part, 0, len(elems))
@@ -235,7 +236,7 @@ func decodeBlock(raw json.RawMessage) (llmcall.Part, error) {
 				return err
 			},
 			"is_error": func(v json.RawMessage) error {
-				return json.Unmarshal(v, &p.ToolCallResponse.IsError)
+				return jsonx.Unmarshal(v, &p.ToolCallResponse.IsError)
 			},
 			"content": func(v json.RawMessage) error {
 				if len(v) > 0 && v[0] == '"' {
@@ -304,7 +305,7 @@ func decodeImageSource(raw json.RawMessage, img *llmcall.ImagePart) error {
 		Data      string `json:"data"`
 		URL       string `json:"url"`
 	}
-	if err := json.Unmarshal(raw, &src); err != nil {
+	if err := jsonx.Unmarshal(raw, &src); err != nil {
 		return err
 	}
 	img.MIMEType = src.MediaType
@@ -319,7 +320,7 @@ func imageShadowVal(img *llmcall.ImagePart) string {
 
 func decodeTools(raw json.RawMessage) ([]llmcall.ToolDefinition, error) {
 	var elems []json.RawMessage
-	if err := json.Unmarshal(raw, &elems); err != nil {
+	if err := jsonx.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
 	tools := make([]llmcall.ToolDefinition, 0, len(elems))
@@ -357,7 +358,7 @@ func decodeToolChoice(raw json.RawMessage) (*llmcall.ToolChoice, error) {
 	err := llmcall.DecodeKnown(raw, tw, map[string]func(json.RawMessage) error{
 		"type": func(v json.RawMessage) error {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			switch s {
@@ -767,7 +768,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 		},
 		"type": func(v json.RawMessage) error {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			if s != "message" {
@@ -777,7 +778,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 		},
 		"role": func(v json.RawMessage) error {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			choice.Message.Role = llmcall.Role(s)
@@ -799,7 +800,7 @@ func (codec) DecodeResponse(in llmcall.ResponseInput, req *llmcall.Request) (*ll
 				return nil
 			}
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
+			if err := jsonx.Unmarshal(v, &s); err != nil {
 				return err
 			}
 			choice.FinishReasonRaw = s

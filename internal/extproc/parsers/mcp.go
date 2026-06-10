@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"github.com/apoxy-dev/clrk/internal/extproc/jsonx"
 )
 
 // JSON-RPC methods we read by name. Stable across all MCP spec
@@ -130,7 +130,7 @@ func ParseRequest(in Input) *MCPInfo {
 		return nil
 	}
 	var env mcpEnvelope
-	if err := sonic.Unmarshal(body, &env); err != nil {
+	if err := jsonx.Unmarshal(body, &env); err != nil {
 		return nil
 	}
 	if env.Method == "" {
@@ -174,7 +174,7 @@ func ParseResponse(in Input) *MCPResult {
 		return nil
 	}
 	var env mcpResponseEnvelope
-	if err := sonic.Unmarshal(body, &env); err != nil {
+	if err := jsonx.Unmarshal(body, &env); err != nil {
 		return nil
 	}
 	if env.Error == nil {
