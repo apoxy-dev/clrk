@@ -11,9 +11,11 @@ import (
 // literals, and string escapes inside it are preserved for free because
 // it is never re-parsed. Extras are an ordered slice, never a map:
 // preserve-mode encoding must re-emit members in source order.
+//
+// +k8s:deepcopy-gen=true
 type ExtraField struct {
-	Key   string
-	Value json.RawMessage
+	Key   string          `json:"key,omitempty" yaml:"key,omitempty"`
+	Value json.RawMessage `json:"value,omitempty" yaml:"value,omitempty"`
 }
 
 // Shadow pairs the verbatim source bytes of a modeled scalar with the
@@ -23,44 +25,68 @@ type ExtraField struct {
 // shadow's Raw is emitted only while Val still equals the field —
 // a mutated field falls back to canonical marshaling.
 type Shadow struct {
-	Raw json.RawMessage
-	Val any
+	Raw json.RawMessage `json:"raw,omitempty" yaml:"raw,omitempty"`
+	Val any             `json:"val,omitempty" yaml:"val,omitempty"`
+}
+
+// DeepCopyInto is hand-written because deepcopy-gen cannot generate
+// for the interface-typed Val. Val holds only comparable scalars
+// (string, bool, json.Number, int64 — see RecordShadow), so plain
+// assignment is a correct deep copy.
+func (in *Shadow) DeepCopyInto(out *Shadow) {
+	*out = *in
+	if in.Raw != nil {
+		out.Raw = make(json.RawMessage, len(in.Raw))
+		copy(out.Raw, in.Raw)
+	}
+}
+
+// DeepCopy returns a deep copy of the Shadow.
+func (in *Shadow) DeepCopy() *Shadow {
+	if in == nil {
+		return nil
+	}
+	out := new(Shadow)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // Wire is per-node bookkeeping that makes preserve-mode encoding
 // byte-faithful. The zero value means "programmatically built": no
 // extras, canonical field order, canonical formatting.
+//
+// +k8s:deepcopy-gen=true
 type Wire struct {
 	// KeyOrder is the node's full original member sequence — modeled
 	// and extra keys interleaved. The encoder walks it to reproduce
 	// source order; modeled keys absent from it (added after decode)
 	// are appended in the codec's canonical order.
-	KeyOrder []string
+	KeyOrder []string `json:"keyOrder,omitempty" yaml:"keyOrder,omitempty"`
 
 	// Extras are the unmodeled members in encounter order.
-	Extras []ExtraField
+	Extras []ExtraField `json:"extras,omitempty" yaml:"extras,omitempty"`
 
 	// Shadow maps a modeled key to its source-byte fallback. See Shadow.
-	Shadow map[string]Shadow
+	Shadow map[string]Shadow `json:"shadow,omitempty" yaml:"shadow,omitempty"`
 
 	// Hints record wire-shape variants the typed fields can't express,
 	// e.g. {"content": "string"} when an OpenAI message carried string
 	// content rather than a parts array. Keys and values are
 	// codec-private conventions.
-	Hints map[string]string
+	Hints map[string]string `json:"hints,omitempty" yaml:"hints,omitempty"`
 
 	// Raw is the verbatim source subtree. On root nodes (Request,
 	// Response) it is the full original body, used by the
 	// equality-gated passthrough (EncodeRaw). On unknown Parts it is
 	// the whole unmodeled block.
-	Raw json.RawMessage
+	Raw json.RawMessage `json:"raw,omitempty" yaml:"raw,omitempty"`
 
 	// Path is the original request :path. Root Request only.
-	Path string
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
 	// Headers are modeled request headers captured at decode time
 	// (e.g. anthropic-version), lowercased keys. Root Request only.
-	Headers map[string]string
+	Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 }
 
 // Extra returns the value of the named extra member, if captured.

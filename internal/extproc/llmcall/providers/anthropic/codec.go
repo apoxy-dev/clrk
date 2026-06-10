@@ -12,6 +12,13 @@ import (
 // requests encoded without a captured original (cross-schema).
 const defaultVersion = "2023-06-01"
 
+// defaultMaxTokens is synthesized by strip-mode EncodeRequest when the
+// IR carries no max_tokens (cross-schema sources may omit it; the
+// Messages API requires it). 4096 is the long-standing community
+// default (LiteLLM and friends) — high enough not to clip ordinary
+// completions, low enough to be safe on every Claude model.
+const defaultMaxTokens = "4096"
+
 // codec implements llmcall.Codec for the Anthropic Messages API.
 // Phase 1 scope: non-streaming POST /v1/messages chat only; every
 // other endpoint and response framing returns ErrUnsupported.
@@ -392,7 +399,22 @@ func (c codec) EncodeRequest(req *llmcall.Request, opts llmcall.EncodeOptions) (
 			}
 			llmcall.EmitShadowString(e, w, "model", req.Model)
 		},
-		"max_tokens":  numberEmitter(w, "max_tokens", &req.Generation.MaxTokens),
+		"max_tokens": func(e *llmcall.ObjectEncoder) {
+			if req.Generation.MaxTokens == "" {
+				// The Messages API requires max_tokens; sources that
+				// don't (OpenAI omits it freely) decode to an empty
+				// value. Strip mode — the cross-schema translation
+				// path — synthesizes the customary default instead of
+				// emitting a request the upstream would 400. Preserve
+				// mode keeps the absence: a same-schema round trip
+				// must not invent bytes.
+				if mode == llmcall.ModeStrip {
+					e.Field("max_tokens", json.Number(defaultMaxTokens))
+				}
+				return
+			}
+			numberEmitter(w, "max_tokens", &req.Generation.MaxTokens)(e)
+		},
 		"temperature": numberEmitter(w, "temperature", &req.Generation.Temperature),
 		"top_p":       numberEmitter(w, "top_p", &req.Generation.TopP),
 		"top_k":       numberEmitter(w, "top_k", &req.Generation.TopK),

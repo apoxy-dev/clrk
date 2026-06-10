@@ -4628,7 +4628,7 @@ func schema_clrk_api_clrk_v1alpha1_WorkerPodTemplate(ref common.ReferenceCallbac
 					},
 					"env": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Env is additional environment for the worker container, appended after the fixed downward-API vars (POD_NAME, POD_NAMESPACE) and the controller-injected vars (CLRK_POOL_NAME, CLRK_CM_OTLP_ENDPOINT, CLRK_CM_NATS_ADDR). A var whose name collides with one of those reserved names is dropped (the reserved var wins).",
+							Description: "Env is additional environment for the worker container, appended after the fixed downward-API vars (POD_NAME, POD_NAMESPACE, CLRK_POOL_NAME). A var named POD_NAME/POD_NAMESPACE/CLRK_POOL_NAME is always dropped (the controller owns it). CLRK_CM_OTLP_ENDPOINT/CLRK_CM_NATS_ADDR are dropped only when the controller injects them (cm mode); in single-binary mode the controller injects nothing, so an operator-supplied value here is kept.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

@@ -147,3 +147,21 @@ func Canonical(name string) string {
 	}
 	return name
 }
+
+// KnownName reports whether name (a lowercased CRD-supplied provider
+// or schema spelling) is recognized: a registered canonical name, a
+// registered alias, or a pending alias whose plugin hasn't landed yet.
+// Pending aliases count so admission validation never tightens beyond
+// the historical enum ("azure-openai"/"bedrock" were always legal).
+// "custom" is not a registry concept — callers that accept it (route
+// matching, admission validation) special-case it before asking.
+func KnownName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if _, ok := aliasToName[name]; ok {
+		return true
+	}
+	_, ok := providersByName[name]
+	return ok
+}

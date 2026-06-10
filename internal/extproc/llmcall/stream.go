@@ -30,71 +30,89 @@ const (
 
 // StreamEvent is one canonical streamed-response event — a tagged
 // union in the same idiom as Part. StreamEventDone has no payload.
+//
+// +k8s:deepcopy-gen=true
 type StreamEvent struct {
-	Type StreamEventType
+	Type StreamEventType `json:"type,omitempty" yaml:"type,omitempty"`
 
-	Start          *StreamStart
-	ContentStart   *StreamContentStart
-	TextDelta      *StreamTextDelta
-	ToolCallDelta  *StreamToolCallDelta
-	ReasoningDelta *StreamReasoningDelta
-	ContentEnd     *StreamContentEnd
-	Usage          *Usage
-	Finish         *StreamFinish
-	Error          *StreamError
+	Start          *StreamStart          `json:"start,omitempty" yaml:"start,omitempty"`
+	ContentStart   *StreamContentStart   `json:"contentStart,omitempty" yaml:"contentStart,omitempty"`
+	TextDelta      *StreamTextDelta      `json:"textDelta,omitempty" yaml:"textDelta,omitempty"`
+	ToolCallDelta  *StreamToolCallDelta  `json:"toolCallDelta,omitempty" yaml:"toolCallDelta,omitempty"`
+	ReasoningDelta *StreamReasoningDelta `json:"reasoningDelta,omitempty" yaml:"reasoningDelta,omitempty"`
+	ContentEnd     *StreamContentEnd     `json:"contentEnd,omitempty" yaml:"contentEnd,omitempty"`
+	Usage          *Usage                `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Finish         *StreamFinish         `json:"finish,omitempty" yaml:"finish,omitempty"`
+	Error          *StreamError          `json:"error,omitempty" yaml:"error,omitempty"`
 
-	Wire Wire
+	Wire Wire `json:"wire,omitempty" yaml:"wire,omitempty"`
 }
 
 // StreamStart carries the stream-opening metadata.
+//
+// +k8s:deepcopy-gen=true
 type StreamStart struct {
-	ID    string
-	Model string
+	ID    string `json:"id,omitempty" yaml:"id,omitempty"`
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
 }
 
 // StreamContentStart opens the content block at Index; Part carries
 // the block's initial typed shape (empty text, tool-call ID + name).
+//
+// +k8s:deepcopy-gen=true
 type StreamContentStart struct {
-	Index int
-	Part  Part
+	Index int  `json:"index,omitempty" yaml:"index,omitempty"`
+	Part  Part `json:"part,omitempty" yaml:"part,omitempty"`
 }
 
 // StreamTextDelta appends text to the block at Index.
+//
+// +k8s:deepcopy-gen=true
 type StreamTextDelta struct {
-	Index int
-	Text  string
+	Index int    `json:"index,omitempty" yaml:"index,omitempty"`
+	Text  string `json:"text,omitempty" yaml:"text,omitempty"`
 }
 
 // StreamToolCallDelta appends argument bytes to a tool call. ID and
 // Name are set when the provider repeats them per chunk (OpenAI);
 // empty otherwise.
+//
+// +k8s:deepcopy-gen=true
 type StreamToolCallDelta struct {
-	Index          int
-	ID             string
-	Name           string
-	ArgumentsDelta string
+	Index          int    `json:"index,omitempty" yaml:"index,omitempty"`
+	ID             string `json:"id,omitempty" yaml:"id,omitempty"`
+	Name           string `json:"name,omitempty" yaml:"name,omitempty"`
+	ArgumentsDelta string `json:"argumentsDelta,omitempty" yaml:"argumentsDelta,omitempty"`
 }
 
 // StreamReasoningDelta appends reasoning text to the block at Index.
+//
+// +k8s:deepcopy-gen=true
 type StreamReasoningDelta struct {
-	Index int
-	Text  string
+	Index int    `json:"index,omitempty" yaml:"index,omitempty"`
+	Text  string `json:"text,omitempty" yaml:"text,omitempty"`
 }
 
 // StreamContentEnd closes the content block at Index.
+//
+// +k8s:deepcopy-gen=true
 type StreamContentEnd struct {
-	Index int
+	Index int `json:"index,omitempty" yaml:"index,omitempty"`
 }
 
 // StreamFinish reports why generation stopped; FinishReasonRaw mirrors
 // Choice.FinishReasonRaw.
+//
+// +k8s:deepcopy-gen=true
 type StreamFinish struct {
-	FinishReason    FinishReason
-	FinishReasonRaw string
+	FinishReason    FinishReason `json:"finishReason,omitempty" yaml:"finishReason,omitempty"`
+	FinishReasonRaw string       `json:"finishReasonRaw,omitempty" yaml:"finishReasonRaw,omitempty"`
 }
 
 // StreamError is a mid-stream provider error event.
+//
+// +k8s:deepcopy-gen=true
 type StreamError struct {
-	Code    string
-	Message string
+	Code    string `json:"code,omitempty" yaml:"code,omitempty"`
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 }

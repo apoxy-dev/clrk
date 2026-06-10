@@ -15,7 +15,8 @@ echo "Generating deepcopy helpers..."
 go run "k8s.io/code-generator/cmd/deepcopy-gen@${CODEGEN_VERSION}" \
   --output-file zz_generated.deepcopy.go \
   --go-header-file "${BOILERPLATE_FILE}" \
-  ./api/clrk/v1alpha1
+  ./api/clrk/v1alpha1 \
+  ./internal/extproc/llmcall
 
 echo "Generating register helpers..."
 

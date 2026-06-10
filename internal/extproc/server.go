@@ -308,20 +308,29 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// when re-selection can't run (truncated body, no candidate).
 	deferReselect := false
 	var provMatch *routeRule
+	// finalRule is the rule that accepted this transaction at RequestBody
+	// EOS (model-aware match). It is threaded through to enrichRecord and
+	// budget charging instead of re-matching at emit time: a ModelRewrite
+	// (and, with cross-schema translation, a schema change) alters the
+	// captured body, so an emit-time re-match against the rewritten
+	// system/model can miss the rule that actually routed the request —
+	// losing route attribution and silently skipping the TokenBudget
+	// charge.
+	var finalRule *routeRule
 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
 			rec.EndAt = time.Now()
 			if errors.Is(err, io.EOF) {
-				matched := enrichRecord(&rec, routes)
+				matched := enrichRecord(&rec, routes, finalRule)
 				s.chargeBudget(matched, egKey, rec)
 				sink.Emit(rec)
 				return nil
 			}
 			// Client cancelled or transport error. Still emit whatever we
 			// captured before the break.
-			matched := enrichRecord(&rec, routes)
+			matched := enrichRecord(&rec, routes, finalRule)
 			s.chargeBudget(matched, egKey, rec)
 			sink.Emit(rec)
 			return err
@@ -353,7 +362,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				rec.MatchedRouteName = denied
 				if err := stream.Send(immediateResponse(typev3.StatusCode_TooManyRequests, "clrk: token budget exceeded for route "+denied)); err != nil {
 					rec.EndAt = time.Now()
-					enrichRecord(&rec, routes)
+					enrichRecord(&rec, routes, finalRule)
 					sink.Emit(rec)
 					return err
 				}
@@ -480,6 +489,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 					if final == nil {
 						final = provMatch
 					}
+					// Pin the accepting rule now, while the body still
+					// carries the agent's original system/model — emit-time
+					// re-matching would run against the rewritten body.
+					finalRule = final
 					// Weighted/first pick over the rule's candidate
 					// backendRefs (BackendRef.Weight). The candidate set was
 					// already restricted to the rule provider's wire schema
@@ -513,7 +526,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 						// original SaaS host.
 						if err := stream.Send(immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+chosen.unsupportedReason)); err != nil {
 							rec.EndAt = time.Now()
-							enrichRecord(&rec, routes)
+							enrichRecord(&rec, routes, finalRule)
 							sink.Emit(rec)
 							return err
 						}
@@ -581,7 +594,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 						if res.decision == mcpDecisionDeny {
 							if err := stream.Send(immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)); err != nil {
 								rec.EndAt = time.Now()
-								enrichRecord(&rec, routes)
+								enrichRecord(&rec, routes, finalRule)
 								sink.Emit(rec)
 								return err
 							}
@@ -623,7 +636,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		}
 		if err := stream.Send(resp); err != nil {
 			rec.EndAt = time.Now()
-			matched := enrichRecord(&rec, routes)
+			matched := enrichRecord(&rec, routes, finalRule)
 			s.chargeBudget(matched, egKey, rec)
 			sink.Emit(rec)
 			return err
@@ -632,15 +645,21 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 }
 
 // enrichRecord runs the provider parser on the captured headers/bodies
-// and, if a parser matched, asks the per-EG route table to identify
-// the AIProviderRoute that accepted the transaction. Returns the
-// matched routeRule (for downstream budget charging) or nil. Both
-// outcomes are no-ops when the request didn't reach a known provider
-// host or when no APR is attached to the calling EG.
+// and identifies the AIProviderRoute that accepted the transaction.
+// Returns the matched routeRule (for downstream budget charging) or
+// nil. Both outcomes are no-ops when the request didn't reach a known
+// provider host or when no APR is attached to the calling EG.
+//
+// matched, when non-nil, is the rule pinned at RequestBody EOS and is
+// trusted over a fresh routes.match: per-backend rewrites mutate the
+// captured body (model remap today, schema translation with APO-742),
+// so re-matching against the rewritten system/model here can miss the
+// rule that actually routed the request — dropping route attribution
+// and the TokenBudget charge.
 //
 // Called once per stream, just before sink.Emit, so partial-capture
 // records (truncated bodies) still attempt parsing.
-func enrichRecord(rec *Record, routes *routeTable) *routeRule {
+func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRule {
 	// Augment the MCP record with response-envelope facts (the JSON-RPC
 	// error code) now that the response body is buffered. rec.MCP is set
 	// only when the request parsed as a single JSON-RPC call under an
@@ -680,6 +699,11 @@ func enrichRecord(rec *Record, routes *routeTable) *routeRule {
 			RespBody:      rec.ResponseBody,
 			RespTruncated: rec.ResponseTruncated,
 		})
+	}
+	if matched != nil {
+		rec.MatchedRouteNamespace = matched.routeNamespace
+		rec.MatchedRouteName = matched.routeName
+		return matched
 	}
 	if routes == nil || rec.Provider == nil {
 		return nil

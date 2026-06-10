@@ -556,7 +556,20 @@ func splitMessageParts(msg *llmcall.Message) (content []llmcall.Part, toolCalls 
 }
 
 func encodeMessages(req *llmcall.Request, mode llmcall.Mode, dropped *int) (json.RawMessage, error) {
-	elems := make([]json.RawMessage, 0, len(req.Messages))
+	elems := make([]json.RawMessage, 0, len(req.Messages)+1)
+	// System content decoded from a schema that carries it top-level
+	// (anthropic system, Gemini systemInstruction) re-enters this wire
+	// shape as a leading system message. OpenAI decodes keep system
+	// turns positional in Messages and leave req.System empty, so
+	// same-schema round trips emit nothing here.
+	if len(req.System) > 0 {
+		sys := llmcall.Message{Role: llmcall.RoleSystem, Parts: req.System}
+		b, err := encodeMessage(&sys, mode, dropped)
+		if err != nil {
+			return nil, err
+		}
+		elems = append(elems, b)
+	}
 	for i := range req.Messages {
 		b, err := encodeMessage(&req.Messages[i], mode, dropped)
 		if err != nil {
