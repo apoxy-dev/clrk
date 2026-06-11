@@ -86,6 +86,10 @@ type Server struct {
 	registry    *sinkRegistry
 	budget      *budgetStore
 	invocations *invocationctx.Store
+
+	// states correlates a request's downstream stream with its
+	// upstream (per-attempt) streams by x-request-id. See reqstate.go.
+	states *requestStateStore
 }
 
 // New constructs an ext_proc server. The client is used to look up
@@ -97,6 +101,7 @@ func New(c client.Client, opts ...ServerOption) *Server {
 		client:   c,
 		registry: newSinkRegistry(c),
 		budget:   newBudgetStore(),
+		states:   newRequestStateStore(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -168,11 +173,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	}
 }
 
-// processUpstream drives one upstream (per-attempt) stream. The
-// handler currently observes and continues; the per-attempt adapter
-// lands with the cutover (see upstream.go).
+// processUpstream drives one upstream (per-attempt) stream: the
+// request-only adapter that translates, repoints, and authenticates
+// each router attempt for the backend Envoy picked (see upstream.go).
 func (s *Server) processUpstream(stream extprocv3.ExternalProcessor_ProcessServer, logger logr.Logger) error {
-	us := s.newUpstreamStream(logger)
+	us := s.newUpstreamStream(stream.Context(), logger)
 	for {
 		req, err := stream.Recv()
 		if err != nil {

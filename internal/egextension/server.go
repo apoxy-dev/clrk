@@ -1066,6 +1066,14 @@ func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) 
 			ForwardingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
 				Untyped: []string{extproc.MetadataNamespace},
 			},
+			// The handler pins a request to a single backend through
+			// the envoy.lb subset key when per-request gates shrink
+			// the viable set (see pinAtBodyEOS). Without the namespace
+			// granted here, ext_proc DynamicMetadata writes are
+			// silently dropped.
+			ReceivingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
+				Untyped: []string{"envoy.lb"},
+			},
 		},
 	})
 	if err != nil {

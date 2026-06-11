@@ -133,19 +133,6 @@ func filterTranslatable(cands []resolvedBackend, system string, src *llmcall.Pro
 	return kept, skipped
 }
 
-// sameSchemaOnly restricts candidates to the rule provider's schema
-// (plus refuse-mode entries, which must keep failing loudly) — the
-// fallback set when a cross-schema encode fails pre-commit.
-func sameSchemaOnly(cands []resolvedBackend, system string) []resolvedBackend {
-	out := make([]resolvedBackend, 0, len(cands))
-	for _, c := range cands {
-		if c.refuse || c.system == system {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 // translateRequest converts a decoded request to the target schema:
 // DeepCopy (fallback paths keep the pristine decode), normalize
 // (system lifting, tool-call IDs), strip the source schema's wire

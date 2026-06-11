@@ -10,9 +10,7 @@ package extproc
 import (
 	"errors"
 	"maps"
-	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,10 +19,12 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
+	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
+	"github.com/apoxy-dev/clrk/internal/llmroute"
 )
 
 // downstreamStream is the per-stream state of one downstream ext_proc
@@ -95,15 +95,25 @@ type downstreamStream struct {
 	// itself was willing to hold.
 	fullReqBody []byte
 
-	// xlate is non-nil once a cross-schema-translated request was
-	// committed upstream. The response phases key off it: the agent
+	// xlate is non-nil once the serving attempt sent a cross-schema-
+	// translated request. The response phases key off it: the agent
 	// speaks xlate.src's schema, the upstream answers in xlate.tgt's,
-	// and the body must come back through the reverse translation.
+	// and the body must come back through the reverse translation. It
+	// is armed at ResponseHeaders from pinState's final attempt — by
+	// then no further retries are possible, so the last recorded
+	// attempt IS the one whose response is arriving.
 	// fullRespBody is the response-side full-fidelity buffer, mirroring
 	// fullReqBody — reverse translation must run on complete bytes, not
 	// the capped capture.
 	xlate        *translationState
 	fullRespBody []byte
+
+	// requestID is Envoy's x-request-id; pinState is this request's
+	// shared state when the body-EOS pin published one (nil for
+	// passthrough and degraded streams). The downstream owns the
+	// state's lifecycle: created at pin, deleted at finish.
+	requestID string
+	pinState  *requestState
 }
 
 // handle dispatches one ProcessingRequest to its phase method and
@@ -129,19 +139,61 @@ func (ds *downstreamStream) handle(req *extprocv3.ProcessingRequest, now time.Ti
 	}
 }
 
-// finish stamps the end time, runs record enrichment + budget charging,
-// and emits the record. Called exactly once per stream, when Recv or
-// Send breaks the loop.
+// finish stamps the end time, folds the serving attempt's facts into
+// the record, runs record enrichment + budget charging, and emits.
+// Called exactly once per stream, when Recv or Send breaks the loop.
 func (ds *downstreamStream) finish() {
 	ds.rec.EndAt = time.Now()
+	ds.foldAttemptFacts()
 	matched := enrichRecord(&ds.rec, ds.routes, ds.finalRule)
 	ds.srv.chargeBudget(matched, ds.egKey, ds.rec)
 	ds.sink.Emit(ds.rec)
+	if ds.pinState != nil {
+		ds.srv.states.delete(ds.requestID)
+	}
+}
+
+// foldAttemptFacts copies the serving (last) attempt's facts from the
+// shared request state onto the record: which backend served, whether
+// translation ran, and — when the attempt rewrote the request — the
+// path/body the upstream actually received, preserving the capture
+// convention that OTLP shows the upstream-facing request. The
+// SelectedBackendSchema fold is what keys enrichRecord's parser to the
+// serving backend's wire schema, so usage parsing and TokenBudget
+// charging survive the move of selection into Envoy's LB.
+func (ds *downstreamStream) foldAttemptFacts() {
+	if ds.pinState == nil {
+		return
+	}
+	a := ds.pinState.lastAttempt()
+	if a == nil {
+		return
+	}
+	ds.rec.SelectedBackendNamespace = a.backendNamespace
+	ds.rec.SelectedBackendName = a.backendName
+	ds.rec.SelectedBackendSchema = a.backendSchema
+	ds.rec.SelectedBackendReselected = true
+	if a.translationApplied {
+		ds.rec.TranslationApplied = true
+		ds.rec.TranslationFrom = ds.pinState.system
+		ds.rec.TranslationTo = a.backendSchema
+		ds.rec.TranslationDroppedExtras += a.droppedExtras
+	}
+	if a.bodyRewritten {
+		ds.rec.RequestHeaders[":path"] = a.sentPath
+		left := ds.maxCaptureBytes
+		ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, a.sentBody, &left)
+		ds.rec.RequestBodyRewritten = true
+	}
 }
 
 func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.Time) *extprocv3.ProcessingResponse {
 	ds.rec.RequestHeadersAt = now
 	ds.rec.RequestHeaders = headersToMap(m)
+	// Envoy generates x-request-id before the filter chain and keeps
+	// it stable across retry attempts — it is the correlation key
+	// between this stream and the per-attempt upstream streams.
+	ds.requestID = ds.rec.RequestHeaders["x-request-id"]
 	// Pre-flight TokenBudget check: if the matched route's
 	// daily counter is already over cap, return ImmediateResponse
 	// 429 instead of letting the request reach the upstream. The
@@ -212,6 +264,24 @@ func (ds *downstreamStream) onResponseHeaders(m *extprocv3.HttpHeaders, now time
 	ds.rec.ResponseHeadersAt = now
 	ds.rec.ResponseHeaders = headersToMap(m)
 	resp := headersContinue(false)
+	// Arm cross-schema response translation from the serving attempt.
+	// Response headers reaching this filter means Envoy will not retry
+	// again, so the LAST attempt the upstream filter recorded is the
+	// one whose response is arriving. (The old code armed this at the
+	// downstream commit; the commit now happens per attempt upstream.)
+	if ds.xlate == nil && ds.pinState != nil {
+		if a := ds.pinState.lastAttempt(); a != nil && a.translationApplied && a.tgt != nil && a.xreq != nil {
+			if src := llmcall.ByName(ds.pinState.system); src != nil {
+				ds.xlate = &translationState{
+					src:       src,
+					tgt:       a.tgt,
+					req:       a.xreq,
+					srcIR:     ds.pinState.srcIR,
+					streaming: a.xreq.Stream,
+				}
+			}
+		}
+	}
 	// Promote response-body mode to STREAMED when the response
 	// will actually stream AND the upstream returned a 200. Two
 	// triggers: the client requested streaming (request body
@@ -320,7 +390,7 @@ func (ds *downstreamStream) onRequestBody(m *extprocv3.HttpBody, now time.Time) 
 		reqPath := ds.rec.RequestHeaders[":path"]
 
 		if ds.deferReselect {
-			return ds.reselectAtBodyEOS(host, reqPath)
+			return ds.pinAtBodyEOS(host, reqPath)
 		}
 
 		// Non-reselectable stream: today's path, unchanged. Skip
@@ -357,38 +427,51 @@ func (ds *downstreamStream) onRequestBody(m *extprocv3.HttpBody, now time.Time) 
 	return bodyContinue(true)
 }
 
-// reselectAtBodyEOS runs the deferred backend re-selection for a
-// reselectable stream once the complete request body is buffered:
-// model-aware rule pinning, cross-schema candidate filtering, the
-// weighted pick, and the commit (repoint + translation + credential
-// injection) or its fallbacks.
-func (ds *downstreamStream) reselectAtBodyEOS(host, reqPath string) *extprocv3.ProcessingResponse {
-	// Re-selection works from fullReqBody — the complete
-	// bytes — never the capped capture; a truncated CAPTURE
-	// no longer forces the fallback path.
+// pinAtBodyEOS routes a reselectable stream onto its rule's
+// synthesized Envoy route once the complete request body is buffered:
+// model-aware rule pinning, per-request translatability filtering, and
+// the pin itself — the rule-key header plus ClearRouteCache so the
+// route table re-evaluates onto the synthesized route. SELECTION moved
+// into Envoy's load balancer (the synthesized cluster carries the
+// candidates, weights, and fallback priorities); the per-attempt
+// request adaptation (repoint + translation + credential injection)
+// runs in the upstream ext_proc, fed by the requestState this method
+// publishes. Only when per-request gates shrink the viable set below
+// the cluster's membership does the downstream still pick — one
+// servable backend, pinned via the envoy.lb subset key.
+func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.ProcessingResponse {
+	// Pinning works from fullReqBody — the complete bytes — never the
+	// capped capture; a truncated CAPTURE does not force the fallback
+	// path.
 	system := parsers.SystemFor(host)
 	model := parsers.RequestModel(ds.fullReqBody)
 	final := ds.routes.match(system, reqPath, model)
 	if final == nil {
 		final = ds.provMatch
 	}
-	// Pin the accepting rule now, while the body still
-	// carries the agent's original system/model — emit-time
-	// re-matching would run against the rewritten body.
+	// Pin the accepting rule now, while the body still carries the
+	// agent's original system/model — emit-time re-matching would run
+	// against the (per-attempt) rewritten body.
 	ds.finalRule = final
 
-	// Decode the request through the source codec once,
-	// only when the candidate set spans schemas. A decode
-	// failure isn't fatal: cross-schema candidates drop out
-	// at the filter below (ir == nil) and same-schema
-	// reselection proceeds as before. Only malformed bodies
-	// are surfaced — ErrUnsupported just means an endpoint
+	// A custom rule does endpoint-only matching: clrk has no parser for
+	// its wire format, so it can neither verify schema parity nor
+	// translate. The operator vouched for every backendRef — keep all
+	// candidates and never gate on translatability (the upstream
+	// adapter mirrors this by treating custom attempts as passthrough).
+	trustOperator := final.provider == "custom"
+
+	// Decode the request through the source codec once, only when the
+	// candidate set spans schemas. A decode failure isn't fatal:
+	// cross-schema candidates drop out at the filter below (ir == nil)
+	// and same-schema candidates proceed as before. Only malformed
+	// bodies are surfaced — ErrUnsupported just means an endpoint
 	// translation doesn't cover (embeddings, non-chat).
 	var (
 		srcProv *llmcall.Provider
 		ir      *llmcall.Request
 	)
-	if crossSchemaCandidates(final.backends, system) {
+	if !trustOperator && crossSchemaCandidates(final.backends, system) {
 		if srcProv = llmcall.ByName(system); srcProv != nil && srcProv.Codec != nil {
 			decoded, derr := srcProv.Codec.DecodeRequest(llmcall.RequestInput{
 				Method:  ds.rec.RequestHeaders[":method"],
@@ -408,114 +491,54 @@ func (ds *downstreamStream) reselectAtBodyEOS(host, reqPath string) *extprocv3.P
 		}
 	}
 
-	// Per-request translatability filter: same-schema
-	// candidates always pass; cross-schema ones need a
-	// clean TranslationBlockers verdict (streaming waits
-	// for APO-743, capability misses, Gemini tool results)
-	// and a modelRewrite covering the decoded model.
-	cands, skipped := filterTranslatable(final.backends, system, srcProv, ir)
+	// Per-request translatability filter: same-schema candidates
+	// always pass; cross-schema ones need a clean TranslationBlockers
+	// verdict (capability misses, Gemini tool results) and a
+	// modelRewrite covering the decoded model. Custom rules skip the
+	// filter wholesale — with no recognized source schema every
+	// candidate would read as cross-schema and be dropped, silently
+	// breaking the OpenAI-compatible-gateway case.
+	cands, skipped := final.backends, 0
+	if !trustOperator {
+		cands, skipped = filterTranslatable(final.backends, system, srcProv, ir)
+	}
 	ds.rec.TranslationSkippedBackends = skipped
 
-	// Weighted/first pick over the surviving candidates
-	// (BackendRef.Weight). A classifier-driven ExtensionRef
-	// selector is APO-480 and will swap a different
-	// backendSelector in here.
-	chosen, ok := staticSelector{}.Select(cands, selectorInput{
-		provider:     system,
-		model:        model,
-		path:         reqPath,
-		invocationID: ds.rec.InvocationID,
-		reqHeaders:   ds.rec.RequestHeaders,
-		reqBody:      ds.fullReqBody,
-	})
-
-	// A cross-schema pick translates the request before
-	// anything is committed. An encode failure here is
-	// pre-commit: drop back to the same-schema candidates
-	// and let the usual paths handle whatever remains.
-	if ok && !chosen.refuse && ir != nil && chosen.system != system {
-		tgtProv := llmcall.ByName(chosen.system)
-		newModel, _ := chosen.rewriteModel(ir.Model)
-		enc, xreq, xerr := translateRequest(tgtProv, ir, newModel)
-		if xerr != nil {
-			ds.rec.TranslationError = "request encode: " + xerr.Error()
-			chosen, ok = staticSelector{}.Select(sameSchemaOnly(cands, system), selectorInput{
-				provider:     system,
-				model:        model,
-				path:         reqPath,
-				invocationID: ds.rec.InvocationID,
-				reqHeaders:   ds.rec.RequestHeaders,
-				reqBody:      ds.fullReqBody,
-			})
-		} else {
-			// Streamed responses must still yield terminal
-			// usage for TokenBudget/telemetry; the opt-in
-			// flag belongs to the TARGET schema, so it is
-			// injected into the translated body (the source
-			// body's flag was already re-encoded away).
-			if xreq.Stream && tgtProv.EnsureStreamUsage != nil {
-				if nb, changed := tgtProv.EnsureStreamUsage(enc.Path, enc.Body); changed {
-					enc.Body = nb
-				}
+	// Split the per-request-viable candidates from the refuse-mode
+	// entries. Refuse (InferencePool) backends are not cluster
+	// endpoints: an all-refuse rule still fails cleanly with a 501,
+	// but on a mixed rule a refuse candidate can no longer win a
+	// weighted pick — mixed rules never 501 (documented semantic
+	// change from the in-extproc selector).
+	viable := make([]resolvedBackend, 0, len(cands))
+	hasNonRefuse := false
+	refuseReason := ""
+	for _, c := range cands {
+		if c.refuse {
+			if refuseReason == "" {
+				refuseReason = c.unsupportedReason
 			}
-			// Commit: repoint :authority + :path, swap the
-			// body for the target-schema encode, set the
-			// target codec's headers, shed the source
-			// schema's modeled + credential headers, inject
-			// the backend's credentials, and ClearRouteCache
-			// so DFP re-derives upstream host + SNI.
-			mut := setHeaderMut(nil, ":authority", net.JoinHostPort(chosen.host, strconv.Itoa(chosen.port)))
-			mut = setHeaderMut(mut, ":path", enc.Path)
-			for _, k := range slices.Sorted(maps.Keys(enc.SetHeaders)) {
-				mut = setHeaderMut(mut, k, enc.SetHeaders[k])
-			}
-			injs := ds.creds.lookupForBackend(final, chosen.name)
-			if len(injs) > 0 {
-				if collisions := redactInjected(ds.rec.RequestHeaders, injs); len(collisions) > 0 {
-					ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
-						"policies", collisions)
-				}
-				mut = applyInjections(mut, injs)
-			}
-			mut = removeHeadersMut(mut, sourceHeaderRemovals(ir, enc, injs))
-
-			ds.rec.SelectedBackendNamespace = chosen.namespace
-			ds.rec.SelectedBackendName = chosen.name
-			ds.rec.SelectedBackendSchema = chosen.system
-			ds.rec.SelectedBackendReselected = true
-			ds.rec.TranslationApplied = true
-			ds.rec.TranslationFrom = system
-			ds.rec.TranslationTo = chosen.system
-			ds.rec.TranslationDroppedExtras += enc.DroppedExtras
-			// Keep the captured view coherent with what the
-			// upstream receives: the translated path keys
-			// the response parser (Gemini's model rides the
-			// URL) and the translated body is what gen_ai.*
-			// is parsed from, per the APO-689 convention.
-			ds.rec.RequestHeaders[":path"] = enc.Path
-			left := ds.maxCaptureBytes
-			ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, enc.Body, &left)
-			ds.rec.RequestBodyRewritten = true
-			ds.xlate = &translationState{
-				src:       srcProv,
-				tgt:       tgtProv,
-				req:       xreq,
-				srcIR:     ir,
-				streaming: xreq.Stream,
-			}
-			return bodyMutationWithHeaders(true, enc.Body, mut, true)
+			continue
 		}
+		hasNonRefuse = true
+		if c.host == "" {
+			continue
+		}
+		viable = append(viable, c)
+	}
+	if len(cands) > 0 && !hasNonRefuse {
+		return immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+refuseReason)
 	}
 
-	if !ok {
-		// Nothing servable for THIS request — no candidate
-		// resolved, or per-request filtering emptied the
-		// set. Fall back to the header-time host with the
-		// rule's route-wide credentials, and still apply
-		// the include-usage rewrite the non-reselectable
-		// path would have: without it, streamed traffic on
-		// an all-cross-schema rule would silently evade
-		// TokenBudget.
+	if len(viable) == 0 || ds.egKey == (types.NamespacedName{}) || ds.requestID == "" {
+		// Nothing servable for THIS request — no candidate resolved,
+		// or per-request filtering emptied the set (or the stream
+		// lacks the identity the pin needs, which only happens in
+		// degraded registry states). Fall back to the header-time
+		// host with the rule's route-wide credentials, and still
+		// apply the include-usage rewrite the non-reselectable path
+		// would have: without it, streamed traffic on an
+		// all-cross-schema rule would silently evade TokenBudget.
 		mut := injectFallbackCreds(ds.creds, final, ds.rec.RequestHeaders, ds.logger)
 		if newBody, changed := parsers.EnsureIncludeUsage(host, reqPath, ds.fullReqBody); changed {
 			left := ds.maxCaptureBytes
@@ -528,41 +551,84 @@ func (ds *downstreamStream) reselectAtBodyEOS(host, reqPath string) *extprocv3.P
 		}
 		return bodyContinue(true)
 	}
-	if chosen.refuse {
-		// Resolved but unservable (InferencePool). Fail
-		// cleanly rather than mis-route to the agent's
-		// original SaaS host.
-		return immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+chosen.unsupportedReason)
-	}
 
-	// Same-schema pick: repoint :authority and inject the
-	// backend's credentials (route-wide + the CIP whose
-	// parentRef sectionName names this backend + gateway),
-	// in the backend's scheme.
-	mut := setHeaderMut(nil, ":authority", net.JoinHostPort(chosen.host, strconv.Itoa(chosen.port)))
-	if injs := ds.creds.lookupForBackend(final, chosen.name); len(injs) > 0 {
-		if collisions := redactInjected(ds.rec.RequestHeaders, injs); len(collisions) > 0 {
-			ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
-				"policies", collisions)
+	// Redact (names-only) every header any candidate's credential
+	// policies are configured to inject, BEFORE the captured headers
+	// reach the sink: injection itself happens per attempt in the
+	// upstream filter, but an agent-supplied credential header must
+	// never reach OTLP raw.
+	seen := map[string]bool{}
+	var injUnion []credInjection
+	for _, c := range viable {
+		for _, inj := range ds.creds.lookupForBackend(final, c.name) {
+			if seen[inj.headerName] {
+				continue
+			}
+			seen[inj.headerName] = true
+			injUnion = append(injUnion, inj)
 		}
-		mut = applyInjections(mut, injs)
 	}
-	ds.rec.SelectedBackendNamespace = chosen.namespace
-	ds.rec.SelectedBackendName = chosen.name
-	ds.rec.SelectedBackendSchema = chosen.system
-	ds.rec.SelectedBackendReselected = true
+	if collisions := redactInjected(ds.rec.RequestHeaders, injUnion); len(collisions) > 0 {
+		ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+			"policies", collisions)
+	}
 
-	// Apply per-backend body rewrites (model remap +
-	// include-usage in the backend's schema) and emit the
-	// repoint with ClearRouteCache so DFP re-derives the
-	// upstream host + SNI from the new :authority.
-	if newBody, changed := rewriteRequestBody(ds.fullReqBody, reqPath, model, chosen); changed {
-		left := ds.maxCaptureBytes
-		ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, newBody, &left)
-		ds.rec.RequestBodyRewritten = true
-		return bodyMutationWithHeaders(true, newBody, mut, true)
+	// Publish the shared state the upstream attempts adapt from, then
+	// pin: the rule-key header steers the re-evaluated route table
+	// onto the synthesized route (a BODY-phase header mutation, honored
+	// because this stream was promoted to BUFFERED at headers time).
+	st := &requestState{
+		system: system,
+		model:  model,
+		srcIR:  ir,
+		rule:   final,
 	}
-	return bodyContinueWithHeaders(true, mut, true)
+	ds.pinState = st
+	ds.srv.states.put(ds.requestID, st)
+
+	ruleKey := llmroute.RuleKey(
+		ds.egKey,
+		types.NamespacedName{Namespace: final.routeNamespace, Name: final.routeName},
+		final.ruleIdx,
+		final.provider,
+	)
+	mut := setHeaderMut(nil, llmroute.PinHeader, ruleKey)
+	resp := bodyContinueWithHeaders(true, mut, true)
+
+	// The synthesized cluster holds the rule's full servable candidate
+	// set. When this request's viable set is smaller (a translation
+	// gate or model-rewrite miss dropped someone), Envoy's LB must not
+	// pick a dropped backend — pin ONE viable backend through the
+	// envoy.lb subset key, weighted like the old in-extproc selector
+	// so existing weight semantics hold on this narrowed path.
+	if clusterCount := servableCount(final.backends); len(viable) < clusterCount {
+		key := ds.rec.InvocationID
+		if key == "" {
+			key = model + "\x00" + reqPath
+		}
+		if chosen, ok := weightedPick(viable, key); ok {
+			resp.DynamicMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{
+				"envoy.lb": structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
+					llmroute.SubsetKeyBackend: structpb.NewStringValue(chosen.name),
+				}}),
+			}}
+		}
+	}
+	return resp
+}
+
+// servableCount mirrors the egextension's servableCandidates filter:
+// the number of a rule's candidates that became cluster endpoints
+// (non-refuse, resolvable host). The pin only narrows via the subset
+// key when the per-request viable set is smaller than this.
+func servableCount(backends []resolvedBackend) int {
+	n := 0
+	for _, c := range backends {
+		if !c.refuse && c.host != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func (ds *downstreamStream) onResponseBody(m *extprocv3.HttpBody, now time.Time) *extprocv3.ProcessingResponse {

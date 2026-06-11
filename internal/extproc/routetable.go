@@ -39,6 +39,11 @@ type routeRule struct {
 	routeNamespace string
 	routeName      string
 
+	// ruleIdx is the rule's index within the route's spec.rules. It is
+	// an input to llmroute.RuleKey, which names the synthesized route
+	// (pin-header value) and cluster this rule's traffic pins onto.
+	ruleIdx int
+
 	// provider is the canonical provider name from the match clause.
 	// "" when the rule had no provider clause (skipped by match()).
 	provider string
@@ -63,6 +68,15 @@ type routeRule struct {
 	// rule keeps today's pass-through-to-original-host behavior.
 	// Pre-resolved at build time so selection is allocation-free.
 	backends []resolvedBackend
+}
+
+// trustsOperator reports whether this rule's backends are
+// operator-vouched passthrough targets: a "custom" provider does
+// endpoint-only matching, clrk has no parser for its wire format, and
+// translation gating must not apply — neither at pin time nor in the
+// per-attempt adapter.
+func (rr *routeRule) trustsOperator() bool {
+	return rr.provider == "custom"
 }
 
 // resolvedBackend is a clrk Backend resolved to the facts the data plane
@@ -135,7 +149,7 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 		if !routeAttachesTo(r, egNamespace, egName) {
 			continue
 		}
-		for _, rule := range r.Spec.Rules {
+		for ruleIdx, rule := range r.Spec.Rules {
 			budget := firstTokenBudget(rule.Filters)
 			resolved := llmroute.ResolveCandidates(rule.BackendRefs, r.Namespace, byKey)
 			for _, m := range rule.Matches {
@@ -143,6 +157,7 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 				t.rules = append(t.rules, routeRule{
 					routeNamespace: r.Namespace,
 					routeName:      r.Name,
+					ruleIdx:        ruleIdx,
 					provider:       prov,
 					endpoints:      append([]string(nil), m.Endpoints...),
 					models:         append([]string(nil), m.Models...),
