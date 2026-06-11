@@ -3,6 +3,10 @@ package extproc
 import (
 	"sync"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 )
 
 // budgetKey identifies one daily counter bucket. Per route, per EG —
@@ -95,4 +99,64 @@ func (b *budgetStore) bucket(key budgetKey) bucketKey {
 		}
 	}
 	return bucketKey{budgetKey: key, date: today}
+}
+
+// evaluateBudget runs the pre-flight TokenBudget check at request-
+// headers time. Returns ("", 0, 0) when nothing should block the
+// request; otherwise returns the route name plus current daily total
+// and cap, and the caller is expected to short-circuit with a 429.
+//
+// Pre-flight matches with model="" because the request body hasn't
+// been buffered yet — model-scoped rules don't enforce here (see
+// routeTable.match for the rationale).
+func (s *Server) evaluateBudget(routes *routeTable, eg types.NamespacedName, headers map[string]string) (route string, used, max int64) {
+	if s.budget == nil || routes == nil || eg.Name == "" {
+		return "", 0, 0
+	}
+	host, _ := splitHostPort(headers[":authority"])
+	system := parsers.SystemFor(host)
+	if system == "" {
+		return "", 0, 0
+	}
+	rr := routes.match(system, headers[":path"], "")
+	if rr == nil || rr.tokenBudget == nil || rr.tokenBudget.MaxTokensPerDay == nil {
+		return "", 0, 0
+	}
+	cap := *rr.tokenBudget.MaxTokensPerDay
+	if cap <= 0 {
+		return "", 0, 0
+	}
+	bk := budgetKey{
+		egNamespace:    eg.Namespace,
+		egName:         eg.Name,
+		routeNamespace: rr.routeNamespace,
+		routeName:      rr.routeName,
+	}
+	if s.budget.Allow(bk, cap) {
+		return "", 0, 0
+	}
+	return rr.routeName, s.budget.snapshot(bk), cap
+}
+
+// chargeBudget increments the daily counter for the matched route by
+// the parsed input+output token total. No-op when the route has no
+// TokenBudget, the parser found no usage, or the request was denied
+// at pre-flight (in which case nothing reached the upstream).
+func (s *Server) chargeBudget(rr *routeRule, eg types.NamespacedName, rec Record) {
+	if s.budget == nil || rr == nil || rr.tokenBudget == nil {
+		return
+	}
+	if rec.BudgetDenied || rec.Provider == nil {
+		return
+	}
+	tokens := rec.Provider.InputTokens + rec.Provider.OutputTokens
+	if tokens <= 0 {
+		return
+	}
+	s.budget.Add(budgetKey{
+		egNamespace:    eg.Namespace,
+		egName:         eg.Name,
+		routeNamespace: rr.routeNamespace,
+		routeName:      rr.routeName,
+	}, tokens)
 }
