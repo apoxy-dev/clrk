@@ -25,6 +25,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 	"github.com/apoxy-dev/clrk/internal/llmroute"
+	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
 // downstreamStream is the per-stream state of one downstream ext_proc
@@ -169,6 +170,8 @@ func (ds *downstreamStream) foldAttemptFacts() {
 	if a == nil {
 		return
 	}
+	ds.rec.Attempts = ds.pinState.attemptCount()
+	ds.rec.AttemptBackends = ds.pinState.attemptBackends()
 	ds.rec.SelectedBackendNamespace = a.backendNamespace
 	ds.rec.SelectedBackendName = a.backendName
 	ds.rec.SelectedBackendSchema = a.backendSchema
@@ -585,6 +588,14 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 	}
 	ds.pinState = st
 	ds.srv.states.put(ds.requestID, st)
+
+	// A body larger than the synthesized route's retry buffer is still
+	// served, but Envoy silently disables retries for it — an attached
+	// FallbackRoutingPolicy cannot fire. Surface that on telemetry
+	// instead of letting it read as fallback that never triggers.
+	if len(ds.fullReqBody) > llmroute.RetryBodyBufferBytes {
+		ds.rec.RetryIneligibleReason = otelemit.RetryIneligibleBodyTooLarge
+	}
 
 	ruleKey := llmroute.RuleKey(
 		ds.egKey,

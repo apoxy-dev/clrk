@@ -366,17 +366,30 @@ func appendAPRAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {
 // backendAttrs emits the selected-backend attributes only when
 // re-selection actually fired. Guarded on SelectedBackendName so records
 // for single-backend / non-reselectable routes carry no clrk.backend.*
-// keys — zero attribute drift for existing traffic.
+// keys — zero attribute drift for existing traffic. The per-attempt
+// walk (clrk.attempts + clrk.attempt.backends) and retry-ineligibility
+// reason ride the same guard family: they only appear on pinned
+// traffic that recorded attempts.
 func backendAttrs(r Record) []attribute.KeyValue {
-	if r.SelectedBackendName == "" {
-		return nil
+	var out []attribute.KeyValue
+	if r.SelectedBackendName != "" {
+		out = append(out,
+			attribute.Bool(otelemit.AttrBackendReselected, r.SelectedBackendReselected),
+			attribute.String(otelemit.AttrBackendNamespace, r.SelectedBackendNamespace),
+			attribute.String(otelemit.AttrBackendName, r.SelectedBackendName),
+			attribute.String(otelemit.AttrBackendSchema, r.SelectedBackendSchema),
+		)
 	}
-	return []attribute.KeyValue{
-		attribute.Bool(otelemit.AttrBackendReselected, r.SelectedBackendReselected),
-		attribute.String(otelemit.AttrBackendNamespace, r.SelectedBackendNamespace),
-		attribute.String(otelemit.AttrBackendName, r.SelectedBackendName),
-		attribute.String(otelemit.AttrBackendSchema, r.SelectedBackendSchema),
+	if r.Attempts > 0 {
+		out = append(out,
+			attribute.Int(otelemit.AttrAttempts, r.Attempts),
+			attribute.StringSlice(otelemit.AttrAttemptBackends, r.AttemptBackends),
+		)
 	}
+	if r.RetryIneligibleReason != "" {
+		out = append(out, attribute.String(otelemit.AttrRetryIneligible, r.RetryIneligibleReason))
+	}
+	return out
 }
 
 func appendBackendAttrs(dst []attribute.KeyValue, r Record) []attribute.KeyValue {

@@ -33,6 +33,15 @@ const PinHeader = "x-clrk-llm-rule"
 // ClusterPrefix prefixes every synthesized per-rule cluster name.
 const ClusterPrefix = "clrk-llm-"
 
+// RetryBodyBufferBytes is the router-side retry buffer stamped on
+// every synthesized route (request_body_buffer_limit). A request body
+// larger than this stays servable but SILENTLY loses retry
+// eligibility — Envoy cannot replay what it did not buffer. Shared so
+// the downstream ext_proc can surface the ineligibility on telemetry
+// (clrk.retry.ineligible) instead of operators discovering it as
+// fallback that never fires.
+const RetryBodyBufferBytes = 1 << 20
+
 // Group/kind spellings for ref checks. The API group doubles as the
 // dynamic-metadata namespace carrying clrk endpoint identity.
 const (

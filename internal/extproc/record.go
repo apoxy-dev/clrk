@@ -147,6 +147,20 @@ type Record struct {
 	TranslationSkippedBackends int
 	TranslationDroppedExtras   int
 	TranslationError           string
+
+	// Attempts is the number of upstream router attempts that recorded
+	// facts for this request; AttemptBackends is the ordered
+	// "<ns>/<name>" walk of the backends they targeted (the last entry
+	// is the serving attempt, mirrored in SelectedBackend*). Both stay
+	// zero for unpinned traffic.
+	Attempts        int
+	AttemptBackends []string
+
+	// RetryIneligibleReason is set when a pinned request cannot be
+	// retried — today only "body_too_large": the request body exceeded
+	// the synthesized route's retry buffer, so Envoy silently disables
+	// retries and an attached FallbackRoutingPolicy cannot fire.
+	RetryIneligibleReason string
 }
 
 func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {

@@ -103,6 +103,21 @@ func (st *requestState) attemptCount() int {
 	return len(st.attempts)
 }
 
+// attemptBackends returns the ordered "<ns>/<name>" walk of the
+// backends the attempts targeted, for telemetry.
+func (st *requestState) attemptBackends() []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.attempts) == 0 {
+		return nil
+	}
+	out := make([]string, len(st.attempts))
+	for i, a := range st.attempts {
+		out[i] = a.backendNamespace + "/" + a.backendName
+	}
+	return out
+}
+
 // requestStateTTL bounds how long an orphaned requestState survives.
 // The owning downstream stream deletes its state on close; the TTL is
 // purely a leak backstop, generous enough to outlive any legitimate

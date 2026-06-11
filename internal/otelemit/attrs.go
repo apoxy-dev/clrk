@@ -47,6 +47,21 @@ const (
 	AttrBackendNamespace  = "clrk.backend.namespace"
 	AttrBackendSchema     = "clrk.backend.schema"
 
+	// Per-attempt fallback attributes — emitted only when the request
+	// was pinned onto a synthesized LLM route and at least one upstream
+	// attempt recorded facts. clrk.backend.* / clrk.translation.*
+	// describe the SERVING (final) attempt; clrk.attempts is the walk
+	// length and clrk.attempt.backends the ordered "<ns>/<name>" list
+	// of backends the attempts targeted. Intermediate attempts'
+	// response statuses are not observable (the upstream filter is
+	// request-only by design); Envoy cluster retry stats carry those.
+	// clrk.retry.ineligible surfaces a pinned request whose body
+	// exceeded the router's retry buffer — Envoy silently disables
+	// retries for it, so an attached fallback policy cannot fire.
+	AttrAttempts        = "clrk.attempts"
+	AttrAttemptBackends = "clrk.attempt.backends"
+	AttrRetryIneligible = "clrk.retry.ineligible"
+
 	// Cross-schema translation attributes (APO-742) — emitted only when
 	// translation applied, skipped candidates, or failed, so records for
 	// same-schema traffic are unchanged. gen_ai.* on a translated record
@@ -131,6 +146,11 @@ const (
 const (
 	IoStreamStdout = "stdout"
 	IoStreamStderr = "stderr"
+)
+
+// RetryIneligible* are the enumerated values for AttrRetryIneligible.
+const (
+	RetryIneligibleBodyTooLarge = "body_too_large"
 )
 
 // IngressOutcome* are the enumerated values for AttrIngressOutcome.

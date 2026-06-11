@@ -27,11 +27,11 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	upstreamcodecv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/upstream_codec/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	previousprioritiesv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/priority/previous_priorities/v3"
 	upstreamhttpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
-	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -77,13 +77,6 @@ const (
 	// llmRetryMaxAttempts caps the default retry count derived from
 	// the candidate list length.
 	llmRetryMaxAttempts = 5
-
-	// llmPerRequestBufferBytes is the router-side retry buffer for
-	// request bodies on synthesized routes. Distinct knob from the
-	// connection buffer that bounds the downstream ext_proc's BUFFERED
-	// body delivery: this one decides whether a request stays
-	// RETRIABLE (a body larger than this disables retries silently).
-	llmPerRequestBufferBytes = 1 << 20
 )
 
 // llmRule is the synthesized view of one (AIProviderRoute, rule,
@@ -236,8 +229,10 @@ func buildLLMRoutes(cfg *llmConfig) []*routev3.Route {
 			RequestHeadersToRemove: []string{llmroute.PinHeader},
 			Action:                 &routev3.Route_Route{Route: ra},
 			// Router-side retry buffer: bodies above this stay
-			// servable but silently lose retry eligibility.
-			RequestBodyBufferLimit: wrapperspb.UInt64(llmPerRequestBufferBytes),
+			// servable but silently lose retry eligibility. Distinct
+			// knob from the connection buffer that bounds the
+			// downstream ext_proc's BUFFERED body delivery.
+			RequestBodyBufferLimit: wrapperspb.UInt64(llmroute.RetryBodyBufferBytes),
 		})
 	}
 	return out
