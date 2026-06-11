@@ -1,0 +1,28 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: AIProviderRoute
+metadata:
+  name: fallback-router
+spec:
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: EgressGateway
+      name: fallback-router
+  # One rule, two candidates. WITHOUT a FallbackRoutingPolicy attached,
+  # this list is a standard Gateway API weighted split (each BackendRef
+  # defaults to weight 1 — a 50/50 coin flip per request, half of them
+  # landing on the dead backend). WITH the policy attached
+  # (fallbackroutingpolicy.yaml), list ORDER becomes fallback priority:
+  # anthropic-primary serves everything while healthy, anthropic-direct
+  # only catches its failures.
+  rules:
+    - matches:
+        - provider: anthropic
+          endpoints:
+            - /v1/messages
+      backendRefs:
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-primary
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-direct

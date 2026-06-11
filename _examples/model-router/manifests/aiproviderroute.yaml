@@ -31,10 +31,10 @@ spec:
           name: anthropic-budget
     # Rule 2: catch-all for the rest of the Anthropic traffic, and the
     # rule that arms re-selection at header time. Two candidates split
-    # by standard Gateway API BackendRef weights (90/10 canary). The
-    # pick is deterministic per invocation — retries of the same agent
-    # run always land on the same backend — so the split is visible
-    # across agent restarts, not within one run.
+    # by standard Gateway API BackendRef weights (90/10 canary), rolled
+    # per request by Envoy's weighted load balancing. To make a list
+    # like this an ordered failover chain instead of a split, attach a
+    # FallbackRoutingPolicy (see _examples/fallback-router/).
     - matches:
         - provider: anthropic
           endpoints:

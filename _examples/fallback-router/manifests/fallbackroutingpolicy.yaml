@@ -1,0 +1,26 @@
+# The opt-in switch: attaching this policy to the AIProviderRoute turns
+# its rules' backendRefs lists from weighted splits into ordered
+# failover chains, and stamps Envoy's retry policy onto the synthesized
+# routes so failed attempts walk to a not-yet-tried backend. Delete
+# this file and re-apply to fall back (sic) to plain weighted routing.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: FallbackRoutingPolicy
+metadata:
+  name: fallback-router
+spec:
+  # Whole-route attachment: every rule on the referenced
+  # AIProviderRoute switches to ordered fallback (sectionName scoping
+  # is a follow-up).
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: AIProviderRoute
+      name: fallback-router
+  # `retry` is optional and the defaults suit most deployments:
+  # connection failures, refused streams, and resets always retry;
+  # retriableStatusCodes defaults to [429, 503]; numRetries defaults to
+  # one fewer than the rule's backend count (capped at 5);
+  # perTryTimeout defaults to unset — a retry can only fire before
+  # response headers arrive, so an unset bound never cuts a long LLM
+  # stream. Spelled out here only to make the knobs visible.
+  retry:
+    retriableStatusCodes: [429, 503]

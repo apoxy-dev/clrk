@@ -1,0 +1,41 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: DaemonAgent
+metadata:
+  name: fallback-router
+spec:
+  workerPoolRef: default
+  # Always: even after a successful cycle the daemon supervisor
+  # respawns the agent so the demo keeps producing new ext_proc records
+  # in the otel-logs / otel-traces panes.
+  restartPolicy: Always
+  egressRefs:
+    - gatewayRef: fallback-router
+  template:
+    spec:
+      image: docker.io/curlimages/curl:8.10.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          # Plain Anthropic calls, no x-api-key header — the proxy
+          # injects it per attempt via CredentialInjectionPolicy.
+          #
+          # The agent has no idea the primary backend is down: each
+          # request is first attempted against anthropic-primary
+          # (connection refused), retried against anthropic-direct, and
+          # comes back as a clean 200. The only trace visible from in
+          # here is latency; the walk itself shows up in otel-logs as
+          # clrk.attempts / clrk.attempt.backends.
+          while :; do
+            curl -sS -o /tmp/resp.json -w 'http %{http_code} in %{time_total}s\n' \
+              -X POST https://api.anthropic.com/v1/messages \
+              -H 'content-type: application/json' \
+              -H 'anthropic-version: 2023-06-01' \
+              -d '{
+                "model": "claude-haiku-4-5",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Say hi in three words."}]
+              }'
+            echo "served: $(sed -n 's/.*"model":"\([^"]*\)".*/\1/p' /tmp/resp.json)"
+            echo
+            sleep 5
+          done

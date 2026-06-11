@@ -1,9 +1,9 @@
 # Two clrk Backends an AIProviderRoute rule can re-point traffic to.
-# Both speak the `anthropic` wire schema — backend re-selection is
-# same-schema only: a backend whose schema differs from the rule's
-# provider would need request/response translation, so the route table
-# drops it from the candidate set at build time rather than send it a
-# mismatched body.
+# Both speak the `anthropic` wire schema here, though that is no longer
+# required: a backend whose schema differs from the rule's provider is
+# served through on-the-wire request/response translation, and only
+# candidates with no translator for the schema pair are dropped from
+# the rule at build time.
 #
 # Backends carry NO credentials. The key injected after a backend is
 # selected comes from a CredentialInjectionPolicy: route-wide CIPs

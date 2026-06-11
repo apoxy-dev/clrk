@@ -22,9 +22,11 @@ One `AIProviderRoute` with two rules:
    `anthropic-budget` (standard Gateway API `BackendRef.weight`).
 
 Selection happens at RequestBody end-of-stream (the model lives in the
-JSON body), after which the proxy re-points `:authority` to the chosen
-backend, applies its model/body rewrites, injects credentials, and the
-response parser is keyed to the backend's declared schema — so token
+JSON body): the proxy pins the request onto a per-rule route whose
+cluster holds the rule's backends, Envoy's load balancer picks one, and
+a per-attempt upstream filter re-points `:authority`, applies the
+backend's model/body rewrites, and injects credentials. The response
+parser is keyed to the serving backend's declared schema — so token
 usage attribution stays correct after a re-route.
 
 ## Run under `clrk dev`
@@ -37,8 +39,9 @@ ANTHROPIC_API_KEY=sk-ant-... clrk dev \
 
 ## What you should see
 
-- Agent logs (`kubectl logs -l clrk.apoxy.dev/agent=model-router`)
-  alternate between:
+- Agent output (in the `clrk dev` TUI, or wrapped in the worker's
+  structured logs: `kubectl logs -l clrk.apoxy.dev/component=worker |
+  grep model-router`) alternates between:
   ```
   asked for: claude-opus-4-1
   served:    claude-haiku-4-5      <- rule 1 + backend modelRewrite
@@ -53,17 +56,19 @@ ANTHROPIC_API_KEY=sk-ant-... clrk dev \
   controller reports `Accepted` and `ResolvedRefs` per parent; a
   dangling or non-Backend ref flips `ResolvedRefs=False` and the rule
   degrades to pass-through.
-- `kubectl get backends` — shortname `be`, schema printed per column.
+- `kubectl get backends.clrk.apoxy.dev` — schema printed per column.
+  (Qualify the group: bare `backends` can resolve to Envoy Gateway's
+  same-named CRD.)
 
 ## Rules of the road (what works, what doesn't)
 
-- **Same-schema only.** A rule's candidate set is filtered to backends
-  whose `schema.name` matches the rule's provider at route-table build
-  time. Pointing an `anthropic` rule at an `openai`-schema Backend
-  doesn't error the data plane — the candidate is dropped, and if none
-  remain the rule passes through to the original host. Cross-schema
-  routing needs request/response translation (planned, APO-572).
-  `provider: custom` rules skip the schema check (endpoint-only
+- **Cross-schema backends translate on the wire.** A rule's candidates
+  no longer have to match the rule's provider schema: an `anthropic`
+  rule can point at an `openai`-schema Backend and the proxy translates
+  the request/response (including streams) between schemas per attempt.
+  Candidates whose schema pair has no translator are dropped, and if
+  none remain the rule passes through to the original host.
+  `provider: custom` rules skip the gating entirely (endpoint-only
   matching, no parser) and trust the operator's refs.
 - **Model-scoped rules need a model-blind escort.** Whether a request
   defers selection to body time is decided at request-headers time by
@@ -71,9 +76,11 @@ ANTHROPIC_API_KEY=sk-ant-... clrk dev \
   model-scoped, it is invisible at header time and re-selection never
   arms. Always include a catch-all rule with `backendRefs` (rule 2
   here) below your model-scoped rules.
-- **Weighted picks are sticky per invocation.** The 90/10 split hashes
-  the invocation ID, so one agent run always lands on the same side —
-  retries stay stable for budget attribution. Respawns re-roll.
+- **Weighted picks roll per request.** The 90/10 split is Envoy's
+  weighted load balancing over the rule's backends, decided fresh on
+  every request. To turn a backendRefs list into an ordered failover
+  chain instead of a split, attach a `FallbackRoutingPolicy` — see
+  `_examples/fallback-router/`.
 - **Credentials attach via CIP, never on the Backend.** Route-wide
   policies apply to every backend; `sectionName: <backend-name>` on
   the CIP's route parentRef scopes a key to one backend, injected only

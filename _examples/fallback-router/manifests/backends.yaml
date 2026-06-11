@@ -1,0 +1,48 @@
+# A Service whose selector matches no pods, standing in for a provider
+# outage: the ClusterIP exists (so DNS resolves), but with no endpoints
+# behind it every connection is refused immediately and
+# deterministically. In a real deployment the primary would be a
+# healthy provider that occasionally 429s/503s or drops connections.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dead-upstream
+spec:
+  selector:
+    app: no-such-pod
+  ports:
+    - port: 443
+      targetPort: 443
+---
+# The primary backend: first in the rule's backendRefs list, so with a
+# FallbackRoutingPolicy attached it owns ALL traffic while healthy.
+# Here it points at the dead Service, so every attempt against it fails
+# with a connection refused and walks to the next backend.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: anthropic-primary
+spec:
+  type: Upstream
+  schema:
+    name: anthropic
+  upstream:
+    host: dead-upstream.default.svc.cluster.local
+    port: 443
+---
+# The fallback: the real Anthropic API. Backends of a DIFFERENT wire
+# schema can sit in the fallback position too (e.g. an openai-schema
+# Backend under this anthropic rule) — the proxy translates the
+# request/response per attempt. One schema is used here so the demo
+# runs with a single API key.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: anthropic-direct
+spec:
+  type: Upstream
+  schema:
+    name: anthropic
+  upstream:
+    host: api.anthropic.com
+    port: 443

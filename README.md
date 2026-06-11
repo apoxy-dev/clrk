@@ -64,7 +64,7 @@ CLRK ships two long-running binaries plus a CLI:
 an `EgressGateway` - an Envoy-based data plane with TLS termination (MITM) and a
 custom filter. This is where telemetry is recorded, credentials are injected,
 and routing/governance policies (`EgressL4Route`, `MCPRoute`, `AIProviderRoute`,
-egress/credential/logging/rate-limit policies) are applied.
+egress/credential/fallback-routing/logging/rate-limit policies) are applied.
 
 **Telemetry storage and export.** Intercepted I/O becomes `Invocation` records
 backed by ClickHouse (via the `ch-go` driver) and can be consumed using `/logs` and
