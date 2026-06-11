@@ -54,10 +54,14 @@ ANTHROPIC_API_KEY=sk-ant-... clrk dev \
   describe the serving (final) attempt — `clrk.backend.name:
   anthropic-direct`.
 - Outlier detection ejects the dead backend after ~5 consecutive
-  failures, so `clrk.attempts` drops to `1` for ~30s (requests go
-  straight to the fallback tier), then pops back to `2` when the
-  ejection expires and the backend is probed again. The per-attempt
-  failure statuses live in Envoy's cluster stats
+  failures, so `clrk.attempts` drops to `1` (requests go straight to
+  the fallback tier), then pops back to `2` when the ejection expires
+  and the backend is probed again — there is no active health probing,
+  so the expiry is what returns the backend. Ejections grow with the
+  backend's ejection count (30s, 60s, 90s, ...) up to the policy's
+  `ejection.maxEjectionTime` (60s here; Envoy's 300s when unset) — the
+  knob that bounds how long a recovered backend can stay blacked out.
+  The per-attempt failure statuses live in Envoy's cluster stats
   (`cluster.clrk-llm-<rule-key>.upstream_rq_retry*`), not in clrk
   telemetry.
 - `kubectl get fallbackroutingpolicies fallback-router -o yaml` — the

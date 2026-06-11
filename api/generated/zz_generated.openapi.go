@@ -85,6 +85,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerTLS":                   schema_clrk_api_clrk_v1alpha1_EgressListenerTLS(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec":               schema_clrk_api_clrk_v1alpha1_EgressUpstreamTLSSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources":                  schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection":                    schema_clrk_api_clrk_v1alpha1_FallbackEjection(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry":                       schema_clrk_api_clrk_v1alpha1_FallbackRetry(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicy":               schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyList":           schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyList(ref),
@@ -2800,6 +2801,27 @@ func schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref common.ReferenceCallba
 	}
 }
 
+func schema_clrk_api_clrk_v1alpha1_FallbackEjection(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackEjection tunes passive outlier ejection on the synthesized per-rule cluster: a backend that fails repeatedly (consecutive 5xx or connection failures) is ejected from load balancing for a cooldown, so a dead primary stops eating the first attempt of every request.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"maxEjectionTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxEjectionTime caps how long a failing backend stays ejected. Ejection durations grow linearly with the backend's ejection count (30s, 60s, 90s, ...) and the count never decays, so without a cap a backend that flapped for a while keeps serving 5-minute (Envoy's default cap) blackout windows even after it recovers — there is no active probing, the expiry of this timer is what puts the backend back in rotation. Values below the 30s base ejection time also lower the base, so the very first ejection honors the cap too. Defaults to Envoy's 300s.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
 func schema_clrk_api_clrk_v1alpha1_FallbackRetry(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2961,12 +2983,18 @@ func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref common.Referenc
 							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry"),
 						},
 					},
+					"ejection": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ejection tunes passive outlier ejection of failing backends. Nil applies the per-field defaults documented on FallbackEjection.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection"),
+						},
+					},
 				},
 				Required: []string{"parentRefs"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1.ParentReference"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1.ParentReference"},
 	}
 }
 

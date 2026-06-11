@@ -459,6 +459,13 @@ func (p *FallbackRoutingPolicy) Validate(_ context.Context) field.ErrorList {
 		}
 	}
 
+	if e := p.Spec.Ejection; e != nil {
+		if e.MaxEjectionTime != nil && e.MaxEjectionTime.Duration <= 0 {
+			errs = append(errs, field.Invalid(specPath.Child("ejection").Child("maxEjectionTime"),
+				e.MaxEjectionTime.Duration.String(), "maxEjectionTime must be > 0"))
+		}
+	}
+
 	return errs
 }
 

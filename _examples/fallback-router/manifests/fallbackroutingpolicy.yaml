@@ -24,3 +24,11 @@ spec:
   # stream. Spelled out here only to make the knobs visible.
   retry:
     retriableStatusCodes: [429, 503]
+  # `ejection` tunes how long a failing backend is held out of rotation
+  # by passive outlier detection. Ejection durations grow with the
+  # backend's ejection count (30s, 60s, 90s, ...) and there is no
+  # active probing — the timer expiring is what returns the backend —
+  # so maxEjectionTime bounds the post-recovery blackout for a backend
+  # that flapped. Defaults to Envoy's 300s when unset.
+  ejection:
+    maxEjectionTime: 60s

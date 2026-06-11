@@ -136,6 +136,25 @@ type FallbackRetry struct {
 	PerTryTimeout *metav1.Duration `json:"perTryTimeout,omitempty"`
 }
 
+// FallbackEjection tunes passive outlier ejection on the synthesized
+// per-rule cluster: a backend that fails repeatedly (consecutive 5xx
+// or connection failures) is ejected from load balancing for a
+// cooldown, so a dead primary stops eating the first attempt of every
+// request.
+type FallbackEjection struct {
+	// MaxEjectionTime caps how long a failing backend stays ejected.
+	// Ejection durations grow linearly with the backend's ejection
+	// count (30s, 60s, 90s, ...) and the count never decays, so without
+	// a cap a backend that flapped for a while keeps serving 5-minute
+	// (Envoy's default cap) blackout windows even after it recovers —
+	// there is no active probing, the expiry of this timer is what puts
+	// the backend back in rotation. Values below the 30s base ejection
+	// time also lower the base, so the very first ejection honors the
+	// cap too. Defaults to Envoy's 300s.
+	// +optional
+	MaxEjectionTime *metav1.Duration `json:"maxEjectionTime,omitempty"`
+}
+
 // FallbackRoutingPolicySpec defines the desired state of a
 // FallbackRoutingPolicy.
 type FallbackRoutingPolicySpec struct {
@@ -154,6 +173,11 @@ type FallbackRoutingPolicySpec struct {
 	// defaults documented on FallbackRetry.
 	// +optional
 	Retry *FallbackRetry `json:"retry,omitempty"`
+
+	// Ejection tunes passive outlier ejection of failing backends. Nil
+	// applies the per-field defaults documented on FallbackEjection.
+	// +optional
+	Ejection *FallbackEjection `json:"ejection,omitempty"`
 }
 
 // FallbackRoutingPolicy opts AIProviderRoutes into ordered inter-backend

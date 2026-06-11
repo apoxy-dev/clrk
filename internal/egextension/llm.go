@@ -77,6 +77,11 @@ const (
 	// llmRetryMaxAttempts caps the default retry count derived from
 	// the candidate list length.
 	llmRetryMaxAttempts = 5
+
+	// llmBaseEjectionTime is the first-ejection cooldown for passive
+	// outlier detection. Envoy multiplies it by the endpoint's ejection
+	// count for subsequent ejections, capped at max_ejection_time.
+	llmBaseEjectionTime = 30 * time.Second
 )
 
 // llmRule is the synthesized view of one (AIProviderRoute, rule,
@@ -429,16 +434,7 @@ func (s *Server) buildLLMCluster(rule llmRule, key egKey, lookupFamily clusterv3
 				FallbackPolicy: clusterv3.Cluster_LbSubsetConfig_LbSubsetSelector_NO_FALLBACK,
 			}},
 		},
-		// Passive health: consecutive upstream 5xx ejects an endpoint
-		// for a cooldown, so under an attached fallback policy a dead
-		// primary stops eating the first attempt of every request.
-		// MaxEjectionPercent 100 deliberately allows ejecting whole
-		// tiers — panic routing still serves if everything is sick.
-		OutlierDetection: &clusterv3.OutlierDetection{
-			Consecutive_5Xx:    wrapperspb.UInt32(5),
-			BaseEjectionTime:   durationpb.New(30 * time.Second),
-			MaxEjectionPercent: wrapperspb.UInt32(100),
-		},
+		OutlierDetection: buildLLMOutlierDetection(rule.fallback),
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			ClusterName: llmroute.ClusterName(rule.key),
 			Endpoints:   localities,
@@ -452,6 +448,34 @@ func (s *Server) buildLLMCluster(rule llmRule, key egKey, lookupFamily clusterv3
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": httpOptsAny,
 		},
 	}, nil
+}
+
+// buildLLMOutlierDetection renders the passive-health config for one
+// synthesized cluster: consecutive upstream 5xx (including
+// local-origin connection failures) ejects an endpoint for a cooldown,
+// so under an attached fallback policy a dead primary stops eating the
+// first attempt of every request. MaxEjectionPercent 100 deliberately
+// allows ejecting whole tiers — panic routing still serves if
+// everything is sick. The policy's ejection.maxEjectionTime caps the
+// linearly-growing (base x ejection count, never decaying) ejection
+// duration; a cap below the base also lowers the base, both to honor
+// the operator's bound on the very first ejection and because Envoy
+// rejects max_ejection_time < base_ejection_time at config load.
+func buildLLMOutlierDetection(fallback *clrkv1alpha1.FallbackRoutingPolicy) *clusterv3.OutlierDetection {
+	od := &clusterv3.OutlierDetection{
+		Consecutive_5Xx:    wrapperspb.UInt32(5),
+		BaseEjectionTime:   durationpb.New(llmBaseEjectionTime),
+		MaxEjectionPercent: wrapperspb.UInt32(100),
+	}
+	if fallback == nil || fallback.Spec.Ejection == nil || fallback.Spec.Ejection.MaxEjectionTime == nil {
+		return od
+	}
+	maxEject := fallback.Spec.Ejection.MaxEjectionTime.Duration
+	od.MaxEjectionTime = durationpb.New(maxEject)
+	if maxEject < llmBaseEjectionTime {
+		od.BaseEjectionTime = durationpb.New(maxEject)
+	}
+	return od
 }
 
 // buildLLMEndpointTLS renders one endpoint's UpstreamTlsContext: SNI
