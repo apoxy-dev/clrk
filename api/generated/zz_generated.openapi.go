@@ -85,6 +85,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressListenerTLS":                   schema_clrk_api_clrk_v1alpha1_EgressListenerTLS(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressUpstreamTLSSpec":               schema_clrk_api_clrk_v1alpha1_EgressUpstreamTLSSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ExecutionResources":                  schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry":                       schema_clrk_api_clrk_v1alpha1_FallbackRetry(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicy":               schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicy(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyList":           schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyList(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec":           schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.HeaderExtractor":                     schema_clrk_api_clrk_v1alpha1_HeaderExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.IdentityExtractor":                   schema_clrk_api_clrk_v1alpha1_IdentityExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ImageCacheConfig":                    schema_clrk_api_clrk_v1alpha1_ImageCacheConfig(ref),
@@ -741,7 +745,7 @@ func schema_clrk_api_clrk_v1alpha1_AIProviderRouteRule(ref common.ReferenceCallb
 					},
 					"backendRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "BackendRefs is the candidate set of clrk Backends (clrk.apoxy.dev/Backend) this rule may route to, selected at RequestBody end-of-stream. With a single ref the request is re-pointed to that backend. With two or more, the request is distributed by the standard Gateway API BackendRef.Weight (deterministically per request so retries are stable), unless an ExtensionRef classifier filter on this rule picks one instead (APO-480). Refs that are not clrk Backends are reported as unresolved by the status controller and ignored at selection time.",
+							Description: "BackendRefs is the candidate set of clrk Backends (clrk.apoxy.dev/Backend) this rule may route to. With a single ref the request is re-pointed to that backend. With two or more, the request is distributed by the standard Gateway API BackendRef.Weight — unless a FallbackRoutingPolicy attaches to this route, in which case list ORDER is the fallback priority and weights are ignored, or an ExtensionRef classifier filter on this rule picks one instead (APO-480). Refs that are not clrk Backends are reported as unresolved by the status controller and ignored at selection time.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -2793,6 +2797,176 @@ func schema_clrk_api_clrk_v1alpha1_ExecutionResources(ref common.ReferenceCallba
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_FallbackRetry(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackRetry tunes the per-attempt retry behavior of a FallbackRoutingPolicy. All fields are optional; nil fields take the defaults documented per field.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"numRetries": {
+						SchemaProps: spec.SchemaProps{
+							Description: "NumRetries caps the number of retry attempts after the first. Defaults to one fewer than the rule's viable backend count, capped at 5.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"retriableStatusCodes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RetriableStatusCodes lists upstream HTTP status codes that trigger a retry, in addition to connection failures and stream resets (always retried). Defaults to [429, 503].",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+					"perTryTimeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PerTryTimeout bounds each individual attempt. Unset means no per-attempt bound — streaming LLM responses routinely outlive any reasonable fixed timeout, and a retry can only fire before response headers arrive, so leaving this unset never strands a stream.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackRoutingPolicy opts AIProviderRoutes into ordered inter-backend fallback: a request whose attempt fails (connect failure, reset, or a retriable status) is retried against the next backend in the rule's BackendRefs list, with per-attempt schema translation and credential injection. It is the first of the routing-policy family; siblings with other selection strategies (cost- or latency-based) can follow the same attachment pattern.\n\nFallback only applies before the upstream response starts: once response headers are forwarded to the agent there are no further attempts (a mid-stream provider failure surfaces through the translation error-frame convention instead).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec"),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackRoutingPolicyList contains a list of FallbackRoutingPolicy resources.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicy"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicy", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackRoutingPolicySpec defines the desired state of a FallbackRoutingPolicy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"parentRefs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ParentRefs attaches this policy to AIProviderRoutes. Attachment changes how the referenced routes' rules distribute traffic across their BackendRefs: without a policy, BackendRef.Weight splits traffic and each request gets a single attempt; with one, BackendRefs list ORDER becomes the fallback priority — the first viable backend serves all traffic while healthy, and a failed attempt retries against the next, walking the list in order (weights are ignored). Whole-route attachment only for now; sectionName scoping may follow.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1.ParentReference"),
+									},
+								},
+							},
+						},
+					},
+					"retry": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Retry tunes the retry behavior. Nil applies the per-field defaults documented on FallbackRetry.",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry"),
+						},
+					},
+				},
+				Required: []string{"parentRefs"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1.ParentReference"},
 	}
 }
 
@@ -21845,7 +22019,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_BackendRef(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.\n\n<gateway:experimental:description>\n\nWhen the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.\n\nImplementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.\n\nIf a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.\n\nIf a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the \"ResolvedRefs\" condition to \"False\" with the \"UnsupportedProtocol\" reason.\n\n</gateway:experimental:description>\n\nNote that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.",
+				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {
@@ -24465,7 +24639,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_ParentReference(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with \"Core\" support:\n\n* Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)\n\nThis API may be extended in the future to support additional kinds of parent resources.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
+				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with \"Core\" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.\n\nNote that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {

@@ -34,6 +34,8 @@ type EgressGatewayExpansion interface{}
 
 type EgressL4RouteExpansion interface{}
 
+type FallbackRoutingPolicyExpansion interface{}
+
 type InvocationExpansion interface{}
 
 type LoggingPolicyExpansion interface{}

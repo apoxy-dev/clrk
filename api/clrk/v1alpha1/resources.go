@@ -110,6 +110,12 @@ var (
 	_ rest.SingularNameProvider  = &CredentialInjectionPolicy{}
 	_ resourcestrategy.Defaulter = &CredentialInjectionPolicy{}
 
+	_ runtime.Object                   = &FallbackRoutingPolicy{}
+	_ resource.Object                  = &FallbackRoutingPolicy{}
+	_ rest.SingularNameProvider        = &FallbackRoutingPolicy{}
+	_ resourcestrategy.Validater       = &FallbackRoutingPolicy{}
+	_ resourcestrategy.ValidateUpdater = &FallbackRoutingPolicy{}
+
 	_ runtime.Object             = &RateLimitPolicy{}
 	_ resource.Object            = &RateLimitPolicy{}
 	_ rest.SingularNameProvider  = &RateLimitPolicy{}
@@ -330,6 +336,18 @@ func (r *CredentialInjectionPolicy) GetGroupVersionResource() schema.GroupVersio
 }
 func (r *CredentialInjectionPolicy) IsStorageVersion() bool  { return true }
 func (r *CredentialInjectionPolicy) GetSingularName() string { return "credentialinjectionpolicy" }
+
+// FallbackRoutingPolicy (no status subresource).
+
+func (r *FallbackRoutingPolicy) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
+func (r *FallbackRoutingPolicy) NamespaceScoped() bool             { return true }
+func (r *FallbackRoutingPolicy) New() runtime.Object               { return &FallbackRoutingPolicy{} }
+func (r *FallbackRoutingPolicy) NewList() runtime.Object           { return &FallbackRoutingPolicyList{} }
+func (r *FallbackRoutingPolicy) GetGroupVersionResource() schema.GroupVersionResource {
+	return gvr("fallbackroutingpolicies")
+}
+func (r *FallbackRoutingPolicy) IsStorageVersion() bool  { return true }
+func (r *FallbackRoutingPolicy) GetSingularName() string { return "fallbackroutingpolicy" }
 
 // RateLimitPolicy (no status subresource).
 

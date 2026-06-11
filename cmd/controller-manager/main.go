@@ -218,6 +218,7 @@ func main() {
 			&clrkv1alpha1.AIProviderRoute{},
 			&clrkv1alpha1.Backend{},
 			&clrkv1alpha1.CredentialInjectionPolicy{},
+			&clrkv1alpha1.FallbackRoutingPolicy{},
 			&clrkv1alpha1.RateLimitPolicy{},
 			&clrkv1alpha1.LoggingPolicy{},
 			&clrkv1alpha1.EgressDenyPolicy{},

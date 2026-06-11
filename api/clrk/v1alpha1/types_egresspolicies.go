@@ -108,6 +108,89 @@ type CredentialInjectionPolicyList struct {
 }
 
 // ============================================================================
+// FallbackRoutingPolicy
+// ============================================================================
+
+// FallbackRetry tunes the per-attempt retry behavior of a
+// FallbackRoutingPolicy. All fields are optional; nil fields take the
+// defaults documented per field.
+type FallbackRetry struct {
+	// NumRetries caps the number of retry attempts after the first.
+	// Defaults to one fewer than the rule's viable backend count,
+	// capped at 5.
+	// +optional
+	NumRetries *int32 `json:"numRetries,omitempty"`
+
+	// RetriableStatusCodes lists upstream HTTP status codes that
+	// trigger a retry, in addition to connection failures and stream
+	// resets (always retried). Defaults to [429, 503].
+	// +optional
+	RetriableStatusCodes []int32 `json:"retriableStatusCodes,omitempty"`
+
+	// PerTryTimeout bounds each individual attempt. Unset means no
+	// per-attempt bound — streaming LLM responses routinely outlive any
+	// reasonable fixed timeout, and a retry can only fire before
+	// response headers arrive, so leaving this unset never strands a
+	// stream.
+	// +optional
+	PerTryTimeout *metav1.Duration `json:"perTryTimeout,omitempty"`
+}
+
+// FallbackRoutingPolicySpec defines the desired state of a
+// FallbackRoutingPolicy.
+type FallbackRoutingPolicySpec struct {
+	// ParentRefs attaches this policy to AIProviderRoutes. Attachment
+	// changes how the referenced routes' rules distribute traffic
+	// across their BackendRefs: without a policy, BackendRef.Weight
+	// splits traffic and each request gets a single attempt; with one,
+	// BackendRefs list ORDER becomes the fallback priority — the first
+	// viable backend serves all traffic while healthy, and a failed
+	// attempt retries against the next, walking the list in order
+	// (weights are ignored). Whole-route attachment only for now;
+	// sectionName scoping may follow.
+	ParentRefs []gwapiv1.ParentReference `json:"parentRefs"`
+
+	// Retry tunes the retry behavior. Nil applies the per-field
+	// defaults documented on FallbackRetry.
+	// +optional
+	Retry *FallbackRetry `json:"retry,omitempty"`
+}
+
+// FallbackRoutingPolicy opts AIProviderRoutes into ordered inter-backend
+// fallback: a request whose attempt fails (connect failure, reset, or a
+// retriable status) is retried against the next backend in the rule's
+// BackendRefs list, with per-attempt schema translation and credential
+// injection. It is the first of the routing-policy family; siblings with
+// other selection strategies (cost- or latency-based) can follow the
+// same attachment pattern.
+//
+// Fallback only applies before the upstream response starts: once
+// response headers are forwarded to the agent there are no further
+// attempts (a mid-stream provider failure surfaces through the
+// translation error-frame convention instead).
+//
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=frp
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+type FallbackRoutingPolicy struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              FallbackRoutingPolicySpec `json:"spec"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
+
+// FallbackRoutingPolicyList contains a list of FallbackRoutingPolicy resources.
+type FallbackRoutingPolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []FallbackRoutingPolicy `json:"items"`
+}
+
+// ============================================================================
 // RateLimitPolicy
 // ============================================================================
 

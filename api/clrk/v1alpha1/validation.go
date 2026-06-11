@@ -412,6 +412,63 @@ func (b *Backend) ValidateUpdate(ctx context.Context, old runtime.Object) field.
 	return b.Validate(ctx)
 }
 
+func (p *FallbackRoutingPolicy) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+
+	if len(p.Spec.ParentRefs) == 0 {
+		errs = append(errs, field.Required(specPath.Child("parentRefs"), "at least one parentRef is required"))
+	}
+	for i, ref := range p.Spec.ParentRefs {
+		rp := specPath.Child("parentRefs").Index(i)
+		// Attachment (llmroute.PolicyAttachesTo) joins on an explicit
+		// clrk.apoxy.dev/AIProviderRoute spelling plus a name, so any
+		// ref missing one of those is permanently inert. Reject it at
+		// admission instead of letting it silently never attach: only
+		// AIProviderRoute parents carry backendRef candidate sets, so
+		// nothing else can ever gain fallback semantics.
+		if ref.Kind == nil || *ref.Kind == "" {
+			errs = append(errs, field.Required(rp.Child("kind"), "kind must be AIProviderRoute"))
+		} else if string(*ref.Kind) != "AIProviderRoute" {
+			errs = append(errs, field.NotSupported(rp.Child("kind"), string(*ref.Kind), []string{"AIProviderRoute"}))
+		}
+		if ref.Group == nil || *ref.Group == "" {
+			errs = append(errs, field.Required(rp.Child("group"), "group must be "+SchemeGroupVersion.Group))
+		} else if string(*ref.Group) != SchemeGroupVersion.Group {
+			errs = append(errs, field.NotSupported(rp.Child("group"), string(*ref.Group), []string{SchemeGroupVersion.Group}))
+		}
+		if ref.Name == "" {
+			errs = append(errs, field.Required(rp.Child("name"), "name of the parent AIProviderRoute is required"))
+		}
+	}
+
+	if r := p.Spec.Retry; r != nil {
+		retryPath := specPath.Child("retry")
+		if r.NumRetries != nil && *r.NumRetries < 0 {
+			errs = append(errs, field.Invalid(retryPath.Child("numRetries"), *r.NumRetries, "numRetries must be >= 0"))
+		}
+		for i, code := range r.RetriableStatusCodes {
+			if code < 400 || code > 599 {
+				errs = append(errs, field.Invalid(retryPath.Child("retriableStatusCodes").Index(i), code,
+					"retriable status codes must be in [400, 599]"))
+			}
+		}
+		if r.PerTryTimeout != nil && r.PerTryTimeout.Duration <= 0 {
+			errs = append(errs, field.Invalid(retryPath.Child("perTryTimeout"), r.PerTryTimeout.Duration.String(),
+				"perTryTimeout must be > 0"))
+		}
+	}
+
+	return errs
+}
+
+func (p *FallbackRoutingPolicy) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*FallbackRoutingPolicy); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &p.Spec) {
+		return nil
+	}
+	return p.Validate(ctx)
+}
+
 func (r *AIProviderRoute) Validate(_ context.Context) field.ErrorList {
 	var errs field.ErrorList
 	rules := field.NewPath("spec").Child("rules")

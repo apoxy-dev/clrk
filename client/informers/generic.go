@@ -69,6 +69,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().EgressGateways().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("egressl4routes"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().EgressL4Routes().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("fallbackroutingpolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().FallbackRoutingPolicies().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("invocations"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Clrk().V1alpha1().Invocations().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("loggingpolicies"):

@@ -60,6 +60,10 @@ func (c *FakeClrkV1alpha1) EgressL4Routes(namespace string) v1alpha1.EgressL4Rou
 	return newFakeEgressL4Routes(c, namespace)
 }
 
+func (c *FakeClrkV1alpha1) FallbackRoutingPolicies(namespace string) v1alpha1.FallbackRoutingPolicyInterface {
+	return newFakeFallbackRoutingPolicies(c, namespace)
+}
+
 func (c *FakeClrkV1alpha1) Invocations(namespace string) v1alpha1.InvocationInterface {
 	return newFakeInvocations(c, namespace)
 }
