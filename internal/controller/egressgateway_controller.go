@@ -2,8 +2,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -16,10 +19,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/llmroute"
 )
 
 const (
@@ -44,10 +50,25 @@ const (
 	// range narrow and reviewable. Bump if a real workload needs more.
 	MaxEgressListeners = 8
 
-	// defaultEgressRequestTimeout is the catch-all HTTPRoute's request
-	// timeout when EgressGateway.spec.requestTimeout is unset. Sized for
-	// AI-provider streaming completions — see the spec field comment.
-	defaultEgressRequestTimeout = 5 * time.Minute
+	// LLMRevAnnotation carries a hash of the LLM routing inputs
+	// (attached AIProviderRoutes, their referenced Backends, attached
+	// FallbackRoutingPolicies) on the clrk-owned Gateway, for operator
+	// observability. NOTE: the annotation alone does NOT trigger Envoy
+	// Gateway retranslation — EG's watch predicate passes annotation
+	// changes, but its gateway-api runner dedupes on the translated IR
+	// and Gateway metadata never reaches the IR, so the xds-translator
+	// (where the egextension hooks live) is never re-run. The actual
+	// trigger is the revision header-match rule ensureCatchAllRoute
+	// stamps on the catch-all HTTPRoute (see LLMRevHeaderName): route
+	// rules ARE IR-visible, and the egextension replaces EG's whole
+	// route configuration so the rule never serves traffic.
+	LLMRevAnnotation = "clrk.apoxy.dev/llm-rev"
+
+	// LLMRevHeaderName is the header name of the IR-perturbing revision
+	// match on the catch-all HTTPRoute. Never sent by clients; exists
+	// solely so a clrk CR change makes EG's translated IR differ and
+	// forces the xds-translation pass that re-runs the extension hooks.
+	LLMRevHeaderName = "x-clrk-llm-rev"
 )
 
 // listenerPort assigns a deterministic port per EgressListener index.
@@ -58,14 +79,10 @@ const (
 func listenerPort(idx int) int32 { return EgressListenerBasePort + int32(idx) }
 
 // resolveRequestTimeout returns the effective per-request timeout for
-// the catch-all HTTPRoute. Operator-supplied positive values win; unset
-// or non-positive (the latter is also rejected at validate time) falls
-// back to defaultEgressRequestTimeout.
+// the catch-all HTTPRoute. Resolution lives on the API type so the EG
+// extension server applies the same value to synthesized routes.
 func resolveRequestTimeout(eg *clrkv1alpha1.EgressGateway) time.Duration {
-	if eg.Spec.RequestTimeout != nil && eg.Spec.RequestTimeout.Duration > 0 {
-		return eg.Spec.RequestTimeout.Duration
-	}
-	return defaultEgressRequestTimeout
+	return eg.Spec.EffectiveRequestTimeout()
 }
 
 // EgressGatewayReconciler provisions Envoy Gateway infrastructure for each
@@ -100,6 +117,7 @@ type EgressGatewayReconciler struct {
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=aiproviderroutes;backends;fallbackroutingpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch;create;update;patch
@@ -178,11 +196,36 @@ func (r *EgressGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// installed) and Owns() would fail manager setup. We still re-
 	// reconcile on CA Secret changes so expiry or operator actions
 	// on the Secret trigger mint logic.
+	//
+	// AIProviderRoute / Backend / FallbackRoutingPolicy changes alter
+	// the LLM routing inputs hashed into the Gateway's LLMRevAnnotation,
+	// so each enqueues every EG (the fleet is small; precision isn't
+	// worth a reverse index). CredentialInjectionPolicy is deliberately
+	// absent — credentials are injected at request time and have no xDS
+	// footprint.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clrkv1alpha1.EgressGateway{}).
 		Owns(&corev1.Secret{}).
+		Watches(&clrkv1alpha1.AIProviderRoute{}, handler.EnqueueRequestsFromMapFunc(r.allEgressGateways)).
+		Watches(&clrkv1alpha1.Backend{}, handler.EnqueueRequestsFromMapFunc(r.allEgressGateways)).
+		Watches(&clrkv1alpha1.FallbackRoutingPolicy{}, handler.EnqueueRequestsFromMapFunc(r.allEgressGateways)).
 		Named("egressgateway").
 		Complete(r)
+}
+
+// allEgressGateways enqueues every EgressGateway. Used by the LLM-input
+// watches above, where any change can affect any EG's synthesized
+// routes.
+func (r *EgressGatewayReconciler) allEgressGateways(ctx context.Context, _ client.Object) []reconcile.Request {
+	var egs clrkv1alpha1.EgressGatewayList
+	if err := r.List(ctx, &egs); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(egs.Items))
+	for _, eg := range egs.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: eg.Namespace, Name: eg.Name}})
+	}
+	return reqs
 }
 
 // ensureCASecret mints the per-EgressGateway MITM CA if one doesn't exist.
@@ -548,7 +591,129 @@ func (r *EgressGatewayReconciler) markInvalid(ctx context.Context, eg *clrkv1alp
 // TLS placeholder cert (per-EG CA) is the same on every listener; the
 // extension overwrites the handshaker on shapes that terminate TLS
 // and strips the TransportSocket entirely on plain-TCP shapes.
+// llmRevision hashes the LLM routing inputs the egextension reads when
+// synthesizing this EG's routes and clusters: the specs of attached
+// AIProviderRoutes, of the Backends those routes reference, and of the
+// FallbackRoutingPolicies attached to those routes — in sorted
+// namespace/name order so the hash is deterministic. Resources outside
+// the EG's attachment graph don't perturb the hash, so unrelated CR
+// churn doesn't force retranslation.
+func (r *EgressGatewayReconciler) llmRevision(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (string, error) {
+	var routes clrkv1alpha1.AIProviderRouteList
+	if err := r.List(ctx, &routes); err != nil {
+		return "", fmt.Errorf("listing AIProviderRoutes: %w", err)
+	}
+	var attached []*clrkv1alpha1.AIProviderRoute
+	for i := range routes.Items {
+		if llmroute.RouteAttachesTo(routes.Items[i], eg.Namespace, eg.Name) {
+			attached = append(attached, &routes.Items[i])
+		}
+	}
+	sort.Slice(attached, func(i, j int) bool {
+		if attached[i].Namespace != attached[j].Namespace {
+			return attached[i].Namespace < attached[j].Namespace
+		}
+		return attached[i].Name < attached[j].Name
+	})
+	// No attached routes means the egextension synthesizes nothing for
+	// this EG: skip the revision rule entirely so LLM-less gateways keep
+	// a pristine catch-all. The transition out of the last attachment
+	// still retranslates — removing the rule itself perturbs the IR.
+	if len(attached) == 0 {
+		return "", nil
+	}
+
+	h := sha256.New()
+	hashSpec := func(kind, ns, name string, spec any) error {
+		raw, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("marshaling %s %s/%s spec: %w", kind, ns, name, err)
+		}
+		fmt.Fprintf(h, "%s|%s/%s|", kind, ns, name)
+		h.Write(raw)
+		return nil
+	}
+
+	backendRefs := map[types.NamespacedName]bool{}
+	for _, route := range attached {
+		if err := hashSpec("apr", route.Namespace, route.Name, route.Spec); err != nil {
+			return "", err
+		}
+		for _, rule := range route.Spec.Rules {
+			for _, ref := range rule.BackendRefs {
+				if !llmroute.BackendRefIsClrkBackend(ref) {
+					continue
+				}
+				ns := route.Namespace
+				if ref.Namespace != nil && *ref.Namespace != "" {
+					ns = string(*ref.Namespace)
+				}
+				backendRefs[types.NamespacedName{Namespace: ns, Name: string(ref.Name)}] = true
+			}
+		}
+	}
+
+	refs := make([]types.NamespacedName, 0, len(backendRefs))
+	for nn := range backendRefs {
+		refs = append(refs, nn)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Namespace != refs[j].Namespace {
+			return refs[i].Namespace < refs[j].Namespace
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	for _, nn := range refs {
+		var be clrkv1alpha1.Backend
+		if err := r.Get(ctx, nn, &be); err != nil {
+			if apierrors.IsNotFound(err) {
+				// A missing Backend is part of the state: when it
+				// appears the hash changes and EG retranslates.
+				continue
+			}
+			return "", fmt.Errorf("getting Backend %s: %w", nn, err)
+		}
+		if err := hashSpec("backend", be.Namespace, be.Name, be.Spec); err != nil {
+			return "", err
+		}
+	}
+
+	var policies clrkv1alpha1.FallbackRoutingPolicyList
+	if err := r.List(ctx, &policies); err != nil {
+		return "", fmt.Errorf("listing FallbackRoutingPolicies: %w", err)
+	}
+	sort.Slice(policies.Items, func(i, j int) bool {
+		if policies.Items[i].Namespace != policies.Items[j].Namespace {
+			return policies.Items[i].Namespace < policies.Items[j].Namespace
+		}
+		return policies.Items[i].Name < policies.Items[j].Name
+	})
+	for i := range policies.Items {
+		p := &policies.Items[i]
+		attachedToRoute := false
+		for _, route := range attached {
+			if llmroute.PolicyAttachesTo(*p, route.Namespace, route.Name) {
+				attachedToRoute = true
+				break
+			}
+		}
+		if !attachedToRoute {
+			continue
+		}
+		if err := hashSpec("frp", p.Namespace, p.Name, p.Spec); err != nil {
+			return "", err
+		}
+	}
+
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:8]), nil
+}
+
 func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
+	llmRev, err := r.llmRevision(ctx, eg)
+	if err != nil {
+		return fmt.Errorf("computing LLM revision: %w", err)
+	}
 	gw := &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GatewayNamePrefix + eg.Name,
@@ -556,6 +721,13 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 		},
 	}
 	if err := createOrUpdateWithRetry(ctx, r.Client, gw, func() error {
+		// Annotation bump → EG retranslation → egextension re-reads the
+		// clrk CRs and re-synthesizes the LLM routes/clusters. Mutate
+		// only our key; Get-then-Update preserves foreign annotations.
+		if gw.Annotations == nil {
+			gw.Annotations = map[string]string{}
+		}
+		gw.Annotations[LLMRevAnnotation] = llmRev
 		caSecret := gwapiv1.ObjectName(EgressGatewayCASecretName(eg.Name))
 		tlsMode := gwapiv1.TLSModeTerminate
 		allRoutes := gwapiv1.NamespacesFromAll
@@ -599,7 +771,7 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 	}); err != nil {
 		return err
 	}
-	return r.ensureCatchAllRoute(ctx, eg)
+	return r.ensureCatchAllRoute(ctx, eg, llmRev)
 }
 
 // ensureCatchAllRoute creates a placeholder HTTPRoute attached to every
@@ -612,7 +784,14 @@ func (r *EgressGatewayReconciler) ensureGateway(ctx context.Context, eg *clrkv1a
 // TLS-Passthrough listeners the extension nukes the HCM and substitutes
 // network filters; the HTTPRoute is purely the trigger that gets EG to
 // emit a listener at all.
-func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
+//
+// llmRev rides along as a second rule matching the LLMRevHeaderName
+// header: it changes EG's translated IR whenever the LLM routing
+// inputs change, which is the only thing that makes EG re-run the
+// xds-translation pass (and therefore the egextension hooks that
+// synthesize the per-rule LLM routes and clusters). The rule never
+// serves traffic — rewriteHCM replaces the whole route configuration.
+func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *clrkv1alpha1.EgressGateway, llmRev string) error {
 	rt := &gwapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GatewayNamePrefix + eg.Name + "-catchall",
@@ -642,20 +821,33 @@ func (r *EgressGatewayReconciler) ensureCatchAllRoute(ctx context.Context, eg *c
 		// String() yields a GEP-2257-compatible value for
 		// gwapiv1.Duration.
 		gwTimeout := gwapiv1.Duration(resolveRequestTimeout(eg).String())
-		rt.Spec.Rules = []gwapiv1.HTTPRouteRule{{
-			BackendRefs: []gwapiv1.HTTPBackendRef{{
-				BackendRef: gwapiv1.BackendRef{
-					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name + "-dfp-placeholder"),
-						Port: &port,
-					},
+		placeholderRef := gwapiv1.HTTPBackendRef{
+			BackendRef: gwapiv1.BackendRef{
+				BackendObjectReference: gwapiv1.BackendObjectReference{
+					Name: gwapiv1.ObjectName(GatewayNamePrefix + eg.Name + "-dfp-placeholder"),
+					Port: &port,
 				},
-			}},
+			},
+		}
+		rt.Spec.Rules = []gwapiv1.HTTPRouteRule{{
+			BackendRefs: []gwapiv1.HTTPBackendRef{placeholderRef},
 			Timeouts: &gwapiv1.HTTPRouteTimeouts{
 				Request:        &gwTimeout,
 				BackendRequest: &gwTimeout,
 			},
 		}}
+		if llmRev != "" {
+			// IR perturbation only — see the function doc.
+			rt.Spec.Rules = append(rt.Spec.Rules, gwapiv1.HTTPRouteRule{
+				Matches: []gwapiv1.HTTPRouteMatch{{
+					Headers: []gwapiv1.HTTPHeaderMatch{{
+						Name:  gwapiv1.HTTPHeaderName(LLMRevHeaderName),
+						Value: llmRev,
+					}},
+				}},
+				BackendRefs: []gwapiv1.HTTPBackendRef{placeholderRef},
+			})
+		}
 		return ctrl.SetControllerReference(eg, rt, r.Scheme)
 	})
 }

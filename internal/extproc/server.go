@@ -26,9 +26,7 @@ import (
 
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -136,10 +134,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	logger := ctrllog.FromContext(ctx).WithName("extproc")
 
 	if streamRole(ctx) == extprocRoleUpstream {
-		// The per-attempt handler lands with the upstream cutover;
-		// until the egextension synthesizes clusters that target this
-		// role, no stream arrives here.
-		return status.Error(codes.Unimplemented, "clrk: upstream ext_proc role not yet served")
+		return s.processUpstream(stream, logger)
 	}
 
 	ds := s.newDownstreamStream(ctx, logger)
@@ -168,6 +163,31 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		}
 		if err := stream.Send(resp); err != nil {
 			ds.finish()
+			return err
+		}
+	}
+}
+
+// processUpstream drives one upstream (per-attempt) stream. The
+// handler currently observes and continues; the per-attempt adapter
+// lands with the cutover (see upstream.go).
+func (s *Server) processUpstream(stream extprocv3.ExternalProcessor_ProcessServer, logger logr.Logger) error {
+	us := s.newUpstreamStream(logger)
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			us.finish()
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		resp := us.handle(req)
+		if resp == nil {
+			continue
+		}
+		if err := stream.Send(resp); err != nil {
+			us.finish()
 			return err
 		}
 	}

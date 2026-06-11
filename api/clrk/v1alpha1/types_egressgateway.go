@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -136,6 +138,24 @@ type EgressGatewaySpec struct {
 	// shares the cap.
 	// +optional
 	RequestTimeout *metav1.Duration `json:"requestTimeout,omitempty"`
+}
+
+// DefaultEgressRequestTimeout is the RequestTimeout applied when the
+// spec leaves it unset. See the field doc for the rationale.
+const DefaultEgressRequestTimeout = 5 * time.Minute
+
+// EffectiveRequestTimeout resolves the gateway's request timeout:
+// operator-supplied positive values win; unset or non-positive falls
+// back to DefaultEgressRequestTimeout. Shared by the controller (which
+// pins it on the catch-all HTTPRoute) and the EG extension server
+// (which stamps it onto the synthesized Envoy routes — EG's translated
+// HTTPRoute timeouts are discarded when the extension replaces the
+// route config, so the extension must re-assert it).
+func (s *EgressGatewaySpec) EffectiveRequestTimeout() time.Duration {
+	if s.RequestTimeout != nil && s.RequestTimeout.Duration > 0 {
+		return s.RequestTimeout.Duration
+	}
+	return DefaultEgressRequestTimeout
 }
 
 // EgressUpstreamTLSSpec configures the EG-managed Envoy's upstream

@@ -4,12 +4,10 @@ import (
 	"path"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/types"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
-	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
+	"github.com/apoxy-dev/clrk/internal/llmroute"
 )
 
 // backendKind is the BackendRef kind that resolves to a clrk Backend.
@@ -71,7 +69,9 @@ type routeRule struct {
 // needs at RequestBody EOS: where to send the request, what wire schema
 // to parse the response against, and any per-backend rewrites. Resolved
 // once at route-table build time from a (rule, BackendRef, Backend)
-// tuple.
+// tuple. The resolution and filtering LOGIC lives in internal/llmroute
+// (shared with the egextension's cluster synthesis so the two sides
+// can't drift); this struct is the extproc-local projection.
 type resolvedBackend struct {
 	// name is the BackendRef name (== the Backend's metadata.name). It
 	// doubles as the CredentialInjectionPolicy parentRef sectionName key
@@ -129,7 +129,7 @@ func (b resolvedBackend) rewriteModel(model string) (string, bool) {
 // API conventions (any match satisfies the rule), so each match
 // becomes its own routeRule entry; first-hit-wins at match time.
 func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProviderRoute, backends []clrkv1alpha1.Backend) *routeTable {
-	byKey := indexBackends(backends)
+	byKey := llmroute.IndexBackends(backends)
 	t := &routeTable{}
 	for _, r := range routes {
 		if !routeAttachesTo(r, egNamespace, egName) {
@@ -137,9 +137,9 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 		}
 		for _, rule := range r.Spec.Rules {
 			budget := firstTokenBudget(rule.Filters)
-			resolved := resolveBackends(rule.BackendRefs, r.Namespace, byKey)
+			resolved := llmroute.ResolveCandidates(rule.BackendRefs, r.Namespace, byKey)
 			for _, m := range rule.Matches {
-				prov := parsers.Canonical(strings.ToLower(m.Provider))
+				prov := llmroute.CanonicalProvider(m.Provider)
 				t.rules = append(t.rules, routeRule{
 					routeNamespace: r.Namespace,
 					routeName:      r.Name,
@@ -147,7 +147,7 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 					endpoints:      append([]string(nil), m.Endpoints...),
 					models:         append([]string(nil), m.Models...),
 					tokenBudget:    budget,
-					backends:       translatableBackends(resolved, prov),
+					backends:       fromCandidates(llmroute.TranslatableCandidates(resolved, prov)),
 				})
 			}
 		}
@@ -155,133 +155,35 @@ func buildRouteTable(egNamespace, egName string, routes []clrkv1alpha1.AIProvide
 	return t
 }
 
-// indexBackends keys the Backend list by namespace/name for O(1) lookup
-// during BackendRef resolution.
-func indexBackends(backends []clrkv1alpha1.Backend) map[types.NamespacedName]*clrkv1alpha1.Backend {
-	m := make(map[types.NamespacedName]*clrkv1alpha1.Backend, len(backends))
-	for i := range backends {
-		b := &backends[i]
-		m[types.NamespacedName{Namespace: b.Namespace, Name: b.Name}] = b
+// fromCandidates projects the shared llmroute candidate shape onto the
+// extproc-local resolvedBackend. Pure field copy; resolution and
+// filtering semantics live in internal/llmroute.
+func fromCandidates(cands []llmroute.Candidate) []resolvedBackend {
+	if len(cands) == 0 {
+		return nil
 	}
-	return m
-}
-
-// resolveBackends turns a rule's BackendRefs into the candidate set the
-// selector picks from. Refs that don't name a clrk Backend, or name one
-// that doesn't exist, are dropped (the status controller surfaces those
-// as unresolved); the rule degrades to its remaining candidates, or to
-// pass-through when none resolve. An InferencePool Backend resolves to a
-// refuse=true candidate so selecting it produces a clean 501 instead of
-// a silent mis-route. routeNamespace defaults the ref namespace.
-func resolveBackends(refs []gwapiv1.BackendRef, routeNamespace string, byKey map[types.NamespacedName]*clrkv1alpha1.Backend) []resolvedBackend {
-	var out []resolvedBackend
-	for _, ref := range refs {
-		if !backendRefIsClrkBackend(ref) {
-			continue
-		}
-		ns := routeNamespace
-		if ref.Namespace != nil && *ref.Namespace != "" {
-			ns = string(*ref.Namespace)
-		}
-		be, ok := byKey[types.NamespacedName{Namespace: ns, Name: string(ref.Name)}]
-		if !ok {
-			continue
-		}
-		// Standard Gateway API weight semantics: nil defaults to 1.
-		weight := 1
-		if ref.Weight != nil {
-			weight = int(*ref.Weight)
-		}
-		rb := resolvedBackend{
-			name:          be.Name,
-			namespace:     be.Namespace,
-			weight:        weight,
-			system:        parsers.Canonical(strings.ToLower(string(be.Spec.Schema.Name))),
-			modelRewrites: be.Spec.ModelRewrites,
-			bodyMutation:  be.Spec.BodyMutation,
-		}
-		switch {
-		case be.Spec.Type == clrkv1alpha1.BackendTypeUpstream && be.Spec.Upstream != nil && be.Spec.Upstream.Host != "":
-			rb.host = be.Spec.Upstream.Host
-			rb.port = int(be.Spec.Upstream.Port)
-			if rb.port == 0 {
-				rb.port = 443
-			}
-		case be.Spec.Type == clrkv1alpha1.BackendTypeInferencePool:
-			rb.refuse = true
-			rb.unsupportedReason = "InferencePool backends are not yet supported by the egress data plane"
-		default:
-			// Malformed Upstream (no host). Drop so the rule falls back
-			// instead of routing nowhere; the status controller flags it.
-			continue
-		}
-		out = append(out, rb)
-	}
-	return out
-}
-
-// translatableBackends restricts a rule's resolved candidate set to backends
-// the data plane can actually serve: same-schema candidates as before
-// (APO-689), plus cross-schema candidates the llmcall registry can
-// translate to (APO-742). A cross-schema candidate survives when both the
-// rule's provider and the candidate's schema carry a registered Codec AND
-// the Backend declares modelRewrites — model IDs don't transfer across
-// providers, so a backend with no rewrite table can never be picked and is
-// dropped here rather than dead-weighting selection. Build-time filtering
-// is static-only; the per-request gates (streaming, capability misses,
-// whether a rewrite actually covers the request's model) run at
-// RequestBody EOS in server.go.
-//
-// The rule degrades to pass-through to the original host when nothing
-// remains — an empty set also clears the re-selectable latch
-// (deferReselect) in server.go, so such a rule keeps the header-time path
-// verbatim.
-//
-// A "custom" provider does endpoint-only matching and clrk has no parser
-// for its wire format, so it can neither verify schema parity nor
-// translate; those rules keep every candidate and trust the operator's
-// backendRefs (e.g. an OpenAI-compatible gateway reselecting to
-// api.openai.com). refuse (InferencePool) candidates are always kept so
-// selecting one yields a clean 501 rather than a silent fall-through to
-// the original host.
-func translatableBackends(candidates []resolvedBackend, provider string) []resolvedBackend {
-	if provider == "" || provider == "custom" {
-		return candidates
-	}
-	src := llmcall.ByName(provider)
-	out := make([]resolvedBackend, 0, len(candidates))
-	for _, c := range candidates {
-		if c.refuse || c.system == provider {
-			out = append(out, c)
-			continue
-		}
-		if src == nil || src.Codec == nil {
-			continue
-		}
-		if tgt := llmcall.ByName(c.system); tgt == nil || tgt.Codec == nil {
-			continue
-		}
-		if len(c.modelRewrites) == 0 {
-			continue
-		}
-		out = append(out, c)
+	out := make([]resolvedBackend, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, resolvedBackend{
+			name:              c.Name,
+			namespace:         c.Namespace,
+			host:              c.Host,
+			port:              c.Port,
+			system:            c.System,
+			weight:            c.Weight,
+			modelRewrites:     c.ModelRewrites,
+			bodyMutation:      c.BodyMutation,
+			refuse:            c.Refuse,
+			unsupportedReason: c.UnsupportedReason,
+		})
 	}
 	return out
 }
 
 // backendRefIsClrkBackend reports whether ref names a clrk
-// (clrk.apoxy.dev/Backend) resource. Empty group/kind defaults to the
-// Gateway API Service backend and must be rejected.
+// (clrk.apoxy.dev/Backend) resource.
 func backendRefIsClrkBackend(ref gwapiv1.BackendRef) bool {
-	group := ""
-	if ref.Group != nil {
-		group = string(*ref.Group)
-	}
-	kind := ""
-	if ref.Kind != nil {
-		kind = string(*ref.Kind)
-	}
-	return group == clrkAPIGroup && kind == backendKind
+	return llmroute.BackendRefIsClrkBackend(ref)
 }
 
 // firstTokenBudget returns the first TokenBudget filter on a rule, or
@@ -298,26 +200,9 @@ func firstTokenBudget(filters []clrkv1alpha1.AIProviderRouteFilter) *clrkv1alpha
 }
 
 // routeAttachesTo reports whether any of route's parentRefs point at
-// the EgressGateway (egNamespace, egName). Cross-namespace refs are
-// allowed today (no ReferenceGrant gate); revisit when we add deny
-// semantics.
+// the EgressGateway (egNamespace, egName).
 func routeAttachesTo(route clrkv1alpha1.AIProviderRoute, egNamespace, egName string) bool {
-	for _, ref := range route.Spec.ParentRefs {
-		if !parentRefIsClrkEgressGateway(ref) {
-			continue
-		}
-		if string(ref.Name) != egName {
-			continue
-		}
-		ns := route.Namespace
-		if ref.Namespace != nil && *ref.Namespace != "" {
-			ns = string(*ref.Namespace)
-		}
-		if ns == egNamespace {
-			return true
-		}
-	}
-	return false
+	return llmroute.RouteAttachesTo(route, egNamespace, egName)
 }
 
 // parentRefIsClrkEgressGateway returns true when the ref's group+kind

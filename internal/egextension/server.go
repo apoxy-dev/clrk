@@ -32,7 +32,6 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	fileaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	dfpclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
-	upstreamhttpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	dfpcommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
 	dfpfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -42,6 +41,7 @@ import (
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	snidfpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	upstreamhttpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -53,6 +53,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/extproc"
+	"github.com/apoxy-dev/clrk/internal/llmroute"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -188,6 +189,12 @@ type Server struct {
 	// Entries are not evicted on EgressGateway delete — the leak is
 	// bounded by the total EGs ever created against this controller.
 	dnsCacheByEG sync.Map // egKey → *dfpcommonv3.DnsCacheConfig
+
+	// llmByEG records the per-EG LLM rule config resolved during
+	// PostHTTPListenerModify so PostTranslateModify can emit the
+	// matching clrk-llm-* clusters. Same EG v1.4 no-listener-context
+	// rationale (and the same bounded non-eviction) as dnsCacheByEG.
+	llmByEG sync.Map // egKey → *llmConfig
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
@@ -259,8 +266,8 @@ func (s *Server) lookupFamilyFor(ctx context.Context, key egKey) clusterv3.Clust
 // the listener and thus the EG) stamps the per-EG cluster name into the
 // HCM route / SNI tcp_proxy, and PostTranslateModify emits clusters under
 // the same names.
-func dnsCacheNameFor(egName string) string      { return dnsCacheName + "-" + egName }
-func dfpClusterNameFor(egName string) string    { return DFPClusterName + "-" + egName }
+func dnsCacheNameFor(egName string) string   { return dnsCacheName + "-" + egName }
+func dfpClusterNameFor(egName string) string { return DFPClusterName + "-" + egName }
 func dfpPlainClusterNameFor(egName string) string {
 	return DFPPlainClusterName + "-" + egName
 }
@@ -354,7 +361,11 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 
 	switch shape {
 	case clrkv1alpha1.EgressShapeTLSTerminate, clrkv1alpha1.EgressShapeHTTPS, clrkv1alpha1.EgressShapeHTTP:
-		s.applyHTTPShape(ctx, listener, egKey, shape, dnsCacheCfg)
+		// Resolve the LLM rule set once per listener pass; rewriteHCM
+		// installs the synthesized routes and PostTranslateModify emits
+		// the matching clusters from the cache this populates.
+		llmCfg := s.llmConfigFor(ctx, egKey)
+		s.applyHTTPShape(ctx, listener, egKey, shape, dnsCacheCfg, llmCfg)
 	case clrkv1alpha1.EgressShapeTLSPassthrough:
 		s.applyTLSPassthroughShape(ctx, listener, egKey, dnsCacheCfg)
 	case clrkv1alpha1.EgressShapeTCP:
@@ -370,7 +381,7 @@ func (s *Server) PostHTTPListenerModify(ctx context.Context, req *pb.PostHTTPLis
 // to add ext_proc + DFP filters with a catch-all route. Used by
 // tls-terminate / https / http shapes. For plain http we strip the
 // per-chain TLS TransportSocket since the listener is non-TLS.
-func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape clrkv1alpha1.EgressListenerShape, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) {
+func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listener, egKey egKey, shape clrkv1alpha1.EgressListenerShape, dnsCacheCfg *dfpcommonv3.DnsCacheConfig, llmCfg *llmConfig) {
 	logger := ctrllog.FromContext(ctx).WithName("egextension")
 	if err := ensureProxyProtocolFilter(listener); err != nil {
 		logger.Error(err, "Adding proxy_protocol listener filter failed", "listener", listener.GetName())
@@ -391,7 +402,7 @@ func (s *Server) applyHTTPShape(ctx context.Context, listener *listenerv3.Listen
 		} else if err := s.injectHandshaker(fc, egKey); err != nil {
 			logger.Error(err, "Inject handshaker failed", "filterChain", fc.GetName())
 		}
-		if err := s.rewriteHCM(fc, egKey, dnsCacheCfg); err != nil {
+		if err := s.rewriteHCM(fc, egKey, dnsCacheCfg, llmCfg); err != nil {
 			logger.Error(err, "Rewrite HCM failed", "filterChain", fc.GetName())
 		}
 	}
@@ -480,6 +491,25 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateM
 		return true
 	})
 
+	// Per-LLM-rule clusters, from the rule sets PostHTTPListenerModify
+	// cached per EG. Same fan-out caveat as the DFP pairs: every Envoy
+	// receives every EG's clrk-llm-* clusters until the EG dep bump
+	// makes emission listener-scoped; STRICT_DNS eagerness is bounded
+	// by the long refresh rate set in buildLLMCluster.
+	s.llmByEG.Range(func(k, v any) bool {
+		key := k.(egKey)
+		cfg := v.(*llmConfig)
+		for _, rule := range cfg.rules {
+			c, err := s.buildLLMCluster(rule, key, cfg.lookupFamily)
+			if err != nil {
+				logger.Error(err, "Build LLM cluster failed", "eg", key, "rule", rule.key)
+				continue
+			}
+			out = append(out, c)
+		}
+		return true
+	})
+
 	out = append(out, s.origDstCluster)
 	for _, c := range in {
 		// Strip any pre-existing copies of the names we're emitting so
@@ -488,7 +518,7 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *pb.PostTranslateM
 		// DFPPlainClusterName ("clrk-egress-dfp-plain"), so a single
 		// HasPrefix check on the former covers both per-EG variants.
 		name := c.GetName()
-		if name == OriginalDstClusterName || strings.HasPrefix(name, DFPClusterName) {
+		if name == OriginalDstClusterName || strings.HasPrefix(name, DFPClusterName) || strings.HasPrefix(name, llmroute.ClusterPrefix) {
 			continue
 		}
 		out = append(out, c)
@@ -611,7 +641,7 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 // The ext_proc filter is rebuilt per call because it carries a per-EG
 // :authority value that identifies the calling EG to the
 // controller-manager.
-func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) error {
+func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig, llmCfg *llmConfig) error {
 	dfpHTTPFilter, err := buildDFPHTTPFilter(dnsCacheCfg)
 	if err != nil {
 		return fmt.Errorf("build dfp http filter: %w", err)
@@ -661,43 +691,50 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *
 		}
 		hcm.HttpFilters = newFilters
 
-		// Replace whatever EG generated with a single catch-all
-		// virtual_host that hands the request to the DFP cluster. Any
+		// Replace whatever EG generated with the synthesized per-LLM-rule
+		// routes (pin-header matched, see llm.go) followed by a catch-all
+		// virtual_host that hands everything else to the DFP cluster. Any
 		// upstream rewrite happens via auto_host_rewrite; the SNI used
 		// during MITM is also propagated as :authority so the upstream
 		// connection re-resolves the original hostname.
 		//
-		// The route pins only the cluster name, never a host: the upstream
-		// is resolved per request from :authority. That is what lets
-		// ext_proc re-point :authority at RequestBody EOS (APO-689) and
-		// reach a different backend without any new cluster — it sets
-		// ClearRouteCache on the body response so this catch-all is
-		// re-evaluated against the mutated :authority. A body-phase header
-		// mutation only takes effect when the request body mode is
-		// BUFFERED, which ext_proc promotes per-stream via ModeOverride
-		// (AllowModeOverride below) for reselectable routes only, leaving
-		// the default BUFFERED_PARTIAL for everything else.
+		// The catch-all pins only the cluster name, never a host: the
+		// upstream is resolved per request from :authority. The pinned
+		// LLM routes are selected at RequestBody EOS — ext_proc sets the
+		// pin header plus ClearRouteCache on the body response so this
+		// route table is re-evaluated against the mutated headers. A
+		// body-phase header mutation only takes effect when the request
+		// body mode is BUFFERED, which ext_proc promotes per-stream via
+		// ModeOverride (AllowModeOverride below) for LLM-routed streams
+		// only, leaving the default BUFFERED_PARTIAL for everything else.
+		//
+		// Replacing EG's route config drops the timeouts EG translated
+		// from the catch-all HTTPRoute, so the EG request timeout must be
+		// re-asserted here — without it Envoy's 15s route default would
+		// 504 long LLM responses.
+		catchAll := &routev3.Route{
+			Match: &routev3.RouteMatch{
+				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
+			},
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{
+						Cluster: dfpClusterNameFor(key.name),
+					},
+					HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
+						AutoHostRewrite: wrapperspb.Bool(true),
+					},
+					Timeout: durationpb.New(llmCfg.requestTimeout),
+				},
+			},
+		}
 		hcm.RouteSpecifier = &hcmv3.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
 				Name: "clrk-egress-dfp",
 				VirtualHosts: []*routev3.VirtualHost{{
 					Name:    "clrk-egress-dfp",
 					Domains: []string{"*"},
-					Routes: []*routev3.Route{{
-						Match: &routev3.RouteMatch{
-							PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
-						},
-						Action: &routev3.Route_Route{
-							Route: &routev3.RouteAction{
-								ClusterSpecifier: &routev3.RouteAction_Cluster{
-									Cluster: dfpClusterNameFor(key.name),
-								},
-								HostRewriteSpecifier: &routev3.RouteAction_AutoHostRewrite{
-									AutoHostRewrite: wrapperspb.Bool(true),
-								},
-							},
-						},
-					}},
+					Routes:  append(buildLLMRoutes(llmCfg), catchAll),
 				}},
 			},
 		}
