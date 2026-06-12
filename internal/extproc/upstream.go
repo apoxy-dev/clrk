@@ -69,8 +69,12 @@ type upstreamStream struct {
 
 	requestID string
 	path      string
-	backend   *attemptBackend
-	state     *requestState
+	method    string
+	// reqHeaders is the attempt's request header map (lowercased),
+	// kept for SigV4 signing (unsigned x-amz-* shedding).
+	reqHeaders map[string]string
+	backend    *attemptBackend
+	state      *requestState
 	// cand is the pinned rule's candidate matching backend — the
 	// modelRewrites/bodyMutation facts the adaptation needs.
 	cand *resolvedBackend
@@ -133,6 +137,8 @@ func (us *upstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders) *extprocv3.
 	hdrs := headersToMap(m)
 	us.requestID = hdrs["x-request-id"]
 	us.path = hdrs[":path"]
+	us.method = hdrs[":method"]
+	us.reqHeaders = hdrs
 	us.state = us.srv.states.get(us.requestID)
 	if us.state == nil || us.state.rule == nil {
 		us.failed = true
@@ -202,22 +208,38 @@ func (us *upstreamStream) onRequestBody(m *extprocv3.HttpBody) *extprocv3.Proces
 		}
 	}
 
-	// Same-schema attempt: repoint :authority, inject the backend's
-	// credentials, and apply the per-backend body rewrites (model
-	// remap + include-usage in the backend's schema).
-	mut := setHeaderMut(nil, ":authority", net.JoinHostPort(cand.host, strconv.Itoa(cand.port)))
-	mut = applyInjections(mut, injs)
+	// Same-schema attempt: apply the per-backend body rewrites first
+	// (model remap + include-usage in the backend's schema), THEN build
+	// the header mutation — :authority repoint, credential injection,
+	// and any SigV4 signature, which must cover the bytes that actually
+	// go out.
+	finalBody := m.GetBody()
+	bodyChanged := false
+	if newBody, changed := rewriteRequestBody(m.GetBody(), us.path, st.model, *cand); changed {
+		finalBody, bodyChanged = newBody, true
+	}
+	authority := net.JoinHostPort(cand.host, strconv.Itoa(cand.port))
+	hdrInjs, sigInjs := splitInjections(injs)
+	mut := setHeaderMut(nil, ":authority", authority)
+	mut = applyInjections(mut, hdrInjs)
+	mut = applySigning(mut, sigInjs, signInput{
+		method:    us.method,
+		authority: authority,
+		path:      us.path,
+		body:      finalBody,
+		headers:   us.reqHeaders,
+	}, us.logger)
 	fact := attemptFact{
 		backendNamespace: cand.namespace,
 		backendName:      cand.name,
 		backendSchema:    cand.system,
 	}
-	if newBody, changed := rewriteRequestBody(m.GetBody(), us.path, st.model, *cand); changed {
+	if bodyChanged {
 		fact.bodyRewritten = true
 		fact.sentPath = us.path
-		fact.sentBody = newBody
+		fact.sentBody = finalBody
 		st.appendAttempt(fact)
-		return bodyMutationWithHeaders(true, newBody, mut, false)
+		return bodyMutationWithHeaders(true, finalBody, mut, false)
 	}
 	st.appendAttempt(fact)
 	return bodyContinueWithHeaders(true, mut, false)
@@ -259,12 +281,25 @@ func (us *upstreamStream) commitTranslated(injs []credInjection) *extprocv3.Proc
 			enc.Body = nb
 		}
 	}
-	mut := setHeaderMut(nil, ":authority", net.JoinHostPort(cand.host, strconv.Itoa(cand.port)))
+	authority := net.JoinHostPort(cand.host, strconv.Itoa(cand.port))
+	mut := setHeaderMut(nil, ":authority", authority)
 	mut = setHeaderMut(mut, ":path", enc.Path)
 	for _, k := range slices.Sorted(maps.Keys(enc.SetHeaders)) {
 		mut = setHeaderMut(mut, k, enc.SetHeaders[k])
 	}
-	mut = applyInjections(mut, injs)
+	hdrInjs, sigInjs := splitInjections(injs)
+	mut = applyInjections(mut, hdrInjs)
+	// The signature covers enc.Body/enc.Path as finalized above (the
+	// stream-usage rewrite included); sourceHeaderRemovals' keep-set
+	// excludes the signature headers, so the removals below never undo
+	// what signing just set.
+	mut = applySigning(mut, sigInjs, signInput{
+		method:    us.method,
+		authority: authority,
+		path:      enc.Path,
+		body:      enc.Body,
+		headers:   us.reqHeaders,
+	}, us.logger)
 	mut = removeHeadersMut(mut, sourceHeaderRemovals(st.srcIR, enc, injs))
 
 	st.appendAttempt(attemptFact{

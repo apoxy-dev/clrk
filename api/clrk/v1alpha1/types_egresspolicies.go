@@ -36,11 +36,28 @@ const (
 	CredentialTargetProviderAuth CredentialTarget = "ProviderAuth"
 )
 
+// ProviderAuth type values.
+const (
+	// ProviderAuthTypeAWSv4 signs requests with AWS Signature Version 4.
+	// The referenced Secret carries `access_key_id` and
+	// `secret_access_key` (required) plus an optional `session_token`.
+	ProviderAuthTypeAWSv4 = "AWSv4"
+	// ProviderAuthTypeGCPServiceAccount is reserved; not implemented.
+	ProviderAuthTypeGCPServiceAccount = "GCPServiceAccount"
+)
+
 // ProviderAuthConfig configures provider-specific authentication.
 type ProviderAuthConfig struct {
 	// +kubebuilder:validation:Enum=AWSv4;GCPServiceAccount
-	Type    string  `json:"type"`
-	Region  *string `json:"region,omitempty"`
+	Type string `json:"type"`
+	// Region scopes the AWSv4 signature. When unset, the region is
+	// derived from the target hostname at signing time
+	// (bedrock-runtime.<region>.amazonaws.com) — the derived value is
+	// the only one guaranteed to agree with the endpoint actually hit
+	// when one policy covers Backends in multiple regions.
+	Region *string `json:"region,omitempty"`
+	// Service is the AWSv4 credential-scope service name. Defaults to
+	// "bedrock".
 	Service *string `json:"service,omitempty"`
 }
 

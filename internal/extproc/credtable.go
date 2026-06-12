@@ -16,6 +16,7 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/awssigv4"
 )
 
 // Parent-ref kind names CredentialInjectionPolicy may target.
@@ -32,6 +33,13 @@ type credInjection struct {
 	headerName  string
 	headerValue string
 
+	// sigv4, when non-nil, marks a ProviderAuth/AWSv4 policy: instead
+	// of a static header pair, the request is signed at a point where
+	// the final method/host/path/body are all known — applySigning,
+	// called from the upstream attempt commit and the downstream
+	// deferSign body-EOS path. headerName/headerValue are unused.
+	sigv4 *sigv4Cred
+
 	// section is the parentRef sectionName the CIP targeted, naming a
 	// specific backend (BackendRef name) on the route. Empty means the
 	// CIP is route-wide: injected at RequestHeaders for every request the
@@ -39,6 +47,30 @@ type credInjection struct {
 	// only when that backend is selected post-body, in that backend's
 	// scheme — see lookup vs lookupForBackend.
 	section string
+}
+
+// sigv4Cred is the resolved credential + signing scope of one
+// ProviderAuth/AWSv4 CredentialInjectionPolicy.
+type sigv4Cred struct {
+	creds awssigv4.Credentials
+	// region "" means derive from the target host at signing time.
+	region  string
+	service string
+}
+
+// headerNames returns the lowercase request header names this
+// injection will set — the single configured header for Header
+// targets, the SigV4 signature set for AWSv4. It drives capture
+// redaction and the translated-request removal keep-set.
+func (i credInjection) headerNames() []string {
+	if i.sigv4 == nil {
+		return []string{i.headerName}
+	}
+	names := []string{"authorization", "x-amz-date", "x-amz-content-sha256"}
+	if i.sigv4.creds.SessionToken != "" {
+		names = append(names, "x-amz-security-token")
+	}
+	return names
 }
 
 // credTable holds resolved CredentialInjectionPolicies attached to one
@@ -130,27 +162,96 @@ func buildCredTable(
 }
 
 // resolveCIP loads the referenced Secret and produces a credInjection.
-// Returns nil for non-Header targets (skipped — file follow-ups for
-// QueryParam / ProviderAuth) or on Secret lookup failure.
+// Returns nil for unsupported targets (QueryParam and non-AWSv4
+// ProviderAuth are log-skipped follow-ups) or on Secret lookup failure.
 func resolveCIP(ctx context.Context, c client.Client, cip *clrkv1alpha1.CredentialInjectionPolicy, log logr.Logger) *credInjection {
 	spec := &cip.Spec
-	if spec.Target != clrkv1alpha1.CredentialTargetHeader {
-		log.V(1).Info("Skipping non-Header credential target",
+	switch spec.Target {
+	case clrkv1alpha1.CredentialTargetHeader:
+		if spec.HeaderName == nil || *spec.HeaderName == "" {
+			log.Info("CredentialInjectionPolicy Target=Header missing HeaderName",
+				"policy", cip.Namespace+"/"+cip.Name)
+			return nil
+		}
+		secret := loadCIPSecret(ctx, c, cip, log)
+		if secret == nil {
+			return nil
+		}
+		dataKey := spec.SecretKey
+		if dataKey == "" {
+			dataKey = "token"
+		}
+		raw, ok := secret.Data[dataKey]
+		if !ok || len(raw) == 0 {
+			log.Info("CredentialInjectionPolicy Secret missing or empty key",
+				"policy", cip.Namespace+"/"+cip.Name, "key", dataKey)
+			return nil
+		}
+		return &credInjection{
+			policyName:  cip.Namespace + "/" + cip.Name,
+			headerName:  strings.ToLower(*spec.HeaderName),
+			headerValue: string(raw),
+		}
+
+	case clrkv1alpha1.CredentialTargetProviderAuth:
+		pa := spec.ProviderAuth
+		if pa == nil {
+			log.Info("CredentialInjectionPolicy Target=ProviderAuth missing providerAuth",
+				"policy", cip.Namespace+"/"+cip.Name)
+			return nil
+		}
+		if pa.Type != clrkv1alpha1.ProviderAuthTypeAWSv4 {
+			log.V(1).Info("Skipping unsupported providerAuth type",
+				"policy", cip.Namespace+"/"+cip.Name, "type", pa.Type)
+			return nil
+		}
+		secret := loadCIPSecret(ctx, c, cip, log)
+		if secret == nil {
+			return nil
+		}
+		// SecretKey is ignored for this target: the AWSv4 credential
+		// is a fixed-key triple, not a single value.
+		akid := string(secret.Data["access_key_id"])
+		sak := string(secret.Data["secret_access_key"])
+		if akid == "" || sak == "" {
+			log.Info("CredentialInjectionPolicy AWSv4 Secret missing access_key_id or secret_access_key",
+				"policy", cip.Namespace+"/"+cip.Name)
+			return nil
+		}
+		sc := &sigv4Cred{
+			creds: awssigv4.Credentials{
+				AccessKeyID:     akid,
+				SecretAccessKey: sak,
+				SessionToken:    string(secret.Data["session_token"]),
+			},
+			service: "bedrock",
+		}
+		if pa.Region != nil {
+			sc.region = *pa.Region
+		}
+		if pa.Service != nil && *pa.Service != "" {
+			sc.service = *pa.Service
+		}
+		return &credInjection{
+			policyName: cip.Namespace + "/" + cip.Name,
+			sigv4:      sc,
+		}
+
+	default:
+		log.V(1).Info("Skipping unsupported credential target",
 			"policy", cip.Namespace+"/"+cip.Name, "target", spec.Target)
 		return nil
 	}
-	if spec.HeaderName == nil || *spec.HeaderName == "" {
-		log.Info("CredentialInjectionPolicy Target=Header missing HeaderName",
-			"policy", cip.Namespace+"/"+cip.Name)
-		return nil
-	}
+}
 
-	// SecretRef.Namespace is intentionally ignored: a same-namespace
-	// constraint blocks a tenant who can author CIPs from pointing at
-	// any Secret in the cluster and exfiltrating it via header
-	// injection. Cross-namespace refs will gate on ReferenceGrant
-	// post-MVP (APO-577).
-	secretKey := types.NamespacedName{Namespace: cip.Namespace, Name: string(spec.SecretRef.Name)}
+// loadCIPSecret reads the policy's referenced Secret, logging and
+// returning nil on failure. SecretRef.Namespace is intentionally
+// ignored: a same-namespace constraint blocks a tenant who can author
+// CIPs from pointing at any Secret in the cluster and exfiltrating it
+// via header injection. Cross-namespace refs will gate on
+// ReferenceGrant post-MVP (APO-577).
+func loadCIPSecret(ctx context.Context, c client.Client, cip *clrkv1alpha1.CredentialInjectionPolicy, log logr.Logger) *corev1.Secret {
+	secretKey := types.NamespacedName{Namespace: cip.Namespace, Name: string(cip.Spec.SecretRef.Name)}
 	var secret corev1.Secret
 	if err := c.Get(ctx, secretKey, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -162,23 +263,7 @@ func resolveCIP(ctx context.Context, c client.Client, cip *clrkv1alpha1.Credenti
 		}
 		return nil
 	}
-
-	dataKey := spec.SecretKey
-	if dataKey == "" {
-		dataKey = "token"
-	}
-	raw, ok := secret.Data[dataKey]
-	if !ok || len(raw) == 0 {
-		log.Info("CredentialInjectionPolicy Secret missing or empty key",
-			"policy", cip.Namespace+"/"+cip.Name, "secret", secretKey.String(), "key", dataKey)
-		return nil
-	}
-
-	return &credInjection{
-		policyName:  cip.Namespace + "/" + cip.Name,
-		headerName:  strings.ToLower(*spec.HeaderName),
-		headerValue: string(raw),
-	}
+	return &secret
 }
 
 // lookup returns the credentials applied at RequestHeaders time for a
@@ -226,13 +311,15 @@ func sectionOf(ref gwapiv1.ParentReference) string {
 }
 
 // applyInjections appends SetHeaders entries to (or builds) a
-// HeaderMutation that injects the supplied credentials. Returns nil
+// HeaderMutation that injects the supplied static header credentials.
+// SigV4 entries are skipped — they have no static pair and are applied
+// by applySigning once the final request bytes are known. Returns nil
 // when injs is empty and existing was nil.
 func applyInjections(existing *extprocv3.HeaderMutation, injs []credInjection) *extprocv3.HeaderMutation {
-	if len(injs) == 0 {
-		return existing
-	}
 	for _, inj := range injs {
+		if inj.sigv4 != nil {
+			continue
+		}
 		existing = setHeaderMut(existing, inj.headerName, inj.headerValue)
 	}
 	return existing
@@ -263,21 +350,29 @@ func setHeaderMut(existing *extprocv3.HeaderMutation, name, value string) *extpr
 	return existing
 }
 
-// redactInjected replaces the value of every header whose name matches
-// an injected key with "<redacted>" in the captured-record map. Called
-// just after injection so OTLP records never carry the raw secret. The
-// returned slice lists policies whose header names collided with an
-// agent-supplied non-empty value — operators want to know an agent is
-// trying to smuggle a credential.
+// redactInjected replaces the value of every header an injection will
+// set with "<redacted>" in the captured-record map. Called just after
+// injection so OTLP records never carry the raw secret — for SigV4
+// policies that covers the whole signature set (authorization,
+// x-amz-*). The returned slice lists policies whose header names
+// collided with an agent-supplied non-empty value — operators want to
+// know an agent is trying to smuggle (or, for AWS SDK agents,
+// self-sign) a credential.
 func redactInjected(headers map[string]string, injs []credInjection) (collisions []string) {
 	if len(headers) == 0 || len(injs) == 0 {
 		return nil
 	}
 	for _, inj := range injs {
-		if existing, ok := headers[inj.headerName]; ok && existing != "" && existing != "<redacted>" {
+		collided := false
+		for _, name := range inj.headerNames() {
+			if existing, ok := headers[name]; ok && existing != "" && existing != "<redacted>" {
+				collided = true
+			}
+			headers[name] = "<redacted>"
+		}
+		if collided {
 			collisions = append(collisions, inj.policyName)
 		}
-		headers[inj.headerName] = "<redacted>"
 	}
 	return collisions
 }

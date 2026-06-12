@@ -169,7 +169,12 @@ func sourceHeaderRemovals(ir *llmcall.Request, enc *llmcall.EncodedRequest, injs
 		keep[strings.ToLower(k)] = true
 	}
 	for _, inj := range injs {
-		keep[strings.ToLower(inj.headerName)] = true
+		// headerNames covers the SigV4 signature set for AWSv4
+		// policies — the signature applySigning is about to set must
+		// not simultaneously appear in RemoveHeaders.
+		for _, h := range inj.headerNames() {
+			keep[h] = true
+		}
 	}
 	seen := make(map[string]bool)
 	var out []string
