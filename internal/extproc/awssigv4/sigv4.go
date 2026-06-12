@@ -54,6 +54,7 @@ type Header struct {
 // final :path exactly as it will leave Envoy, already URL-encoded.
 // body must be the final byte-exact payload after every mutation.
 func Sign(method, host, pathAndQuery string, body []byte, creds Credentials, region, service string, now time.Time) []Header {
+	host = stripDefaultPort(host)
 	amzDate := now.UTC().Format("20060102T150405Z")
 	dateStamp := now.UTC().Format("20060102")
 	payloadHash := hexSHA256(body)
@@ -135,6 +136,22 @@ func RegionFromHost(host string) string {
 		return ""
 	}
 	return region
+}
+
+// stripDefaultPort removes an explicit default-port suffix (:443/:80)
+// from the host before it enters the signature, mirroring
+// aws-sdk-go-v2's SanitizeHostForHeader: AWS's verifier normalizes
+// default ports the same way, so a `host:443` authority (the egress
+// proxy's port-explicit rewrite) must sign as the bare host. Non-
+// default ports stay — they are part of the endpoint identity.
+func stripDefaultPort(host string) string {
+	if h, ok := strings.CutSuffix(host, ":443"); ok {
+		return h
+	}
+	if h, ok := strings.CutSuffix(host, ":80"); ok {
+		return h
+	}
+	return host
 }
 
 // canonicalURI applies SigV4's non-S3 path rule to the wire path: each
