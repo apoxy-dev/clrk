@@ -292,6 +292,11 @@ func isStreamingContentType(ct string) bool {
 	switch ct {
 	case "text/event-stream", "application/x-ndjson":
 		return true
+	case "application/vnd.amazon.eventstream":
+		// Bedrock converse-stream. Without this entry the response
+		// stays BUFFERED on the passthrough path — Envoy holds the
+		// whole stream until EOS or the buffer limit.
+		return true
 	}
 	return false
 }

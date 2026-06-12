@@ -84,10 +84,9 @@ func (p *Provider) StreamsTranslatable() bool {
 // for schemas that have no provider package yet. The host table is
 // registration-driven, but these CRD spellings predate their plugins —
 // each entry migrates into its provider package when that plugin lands
-// (Register tolerates a plugin re-claiming its pending alias).
-var pendingAliases = map[string]string{
-	"bedrock": "aws_bedrock",
-}
+// (Register tolerates a plugin re-claiming its pending alias). Empty
+// since the bedrock plugin landed; kept for the next pre-plugin schema.
+var pendingAliases = map[string]string{}
 
 var (
 	providersByName = map[string]*Provider{}

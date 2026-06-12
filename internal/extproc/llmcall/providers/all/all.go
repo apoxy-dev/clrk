@@ -11,6 +11,7 @@ package all
 import (
 	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/anthropic"
 	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/azureopenai"
+	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/bedrock"
 	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/google"
 	_ "github.com/apoxy-dev/clrk/internal/extproc/llmcall/providers/openai"
 )
