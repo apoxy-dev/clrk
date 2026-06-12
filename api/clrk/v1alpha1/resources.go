@@ -105,10 +105,12 @@ var (
 	_ resourcestrategy.ValidateUpdater     = &Backend{}
 	_ resource.StatusSubResource           = &BackendStatus{}
 
-	_ runtime.Object             = &CredentialInjectionPolicy{}
-	_ resource.Object            = &CredentialInjectionPolicy{}
-	_ rest.SingularNameProvider  = &CredentialInjectionPolicy{}
-	_ resourcestrategy.Defaulter = &CredentialInjectionPolicy{}
+	_ runtime.Object                   = &CredentialInjectionPolicy{}
+	_ resource.Object                  = &CredentialInjectionPolicy{}
+	_ rest.SingularNameProvider        = &CredentialInjectionPolicy{}
+	_ resourcestrategy.Defaulter       = &CredentialInjectionPolicy{}
+	_ resourcestrategy.Validater       = &CredentialInjectionPolicy{}
+	_ resourcestrategy.ValidateUpdater = &CredentialInjectionPolicy{}
 
 	_ runtime.Object                   = &FallbackRoutingPolicy{}
 	_ resource.Object                  = &FallbackRoutingPolicy{}

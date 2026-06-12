@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/robfig/cron"
@@ -471,6 +472,108 @@ func (p *FallbackRoutingPolicy) Validate(_ context.Context) field.ErrorList {
 
 func (p *FallbackRoutingPolicy) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
 	if prev, ok := old.(*FallbackRoutingPolicy); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &p.Spec) {
+		return nil
+	}
+	return p.Validate(ctx)
+}
+
+func (p *CredentialInjectionPolicy) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+
+	if len(p.Spec.ParentRefs) == 0 {
+		errs = append(errs, field.Required(specPath.Child("parentRefs"), "at least one parentRef is required"))
+	}
+	supportedKinds := []string{"AIProviderRoute", "MCPRoute", "EgressGateway"}
+	for i, ref := range p.Spec.ParentRefs {
+		rp := specPath.Child("parentRefs").Index(i)
+		// The credential table joins on an explicit clrk.apoxy.dev
+		// group + kind + name spelling (buildCredTable); a ref missing
+		// one is permanently inert. Reject at admission instead of
+		// letting the policy silently never inject.
+		if ref.Kind == nil || *ref.Kind == "" {
+			errs = append(errs, field.Required(rp.Child("kind"), "kind is required"))
+		} else if !slices.Contains(supportedKinds, string(*ref.Kind)) {
+			errs = append(errs, field.NotSupported(rp.Child("kind"), string(*ref.Kind), supportedKinds))
+		}
+		if ref.Group == nil || *ref.Group == "" {
+			errs = append(errs, field.Required(rp.Child("group"), "group must be "+SchemeGroupVersion.Group))
+		} else if string(*ref.Group) != SchemeGroupVersion.Group {
+			errs = append(errs, field.NotSupported(rp.Child("group"), string(*ref.Group), []string{SchemeGroupVersion.Group}))
+		}
+		if ref.Name == "" {
+			errs = append(errs, field.Required(rp.Child("name"), "name of the parent resource is required"))
+		}
+	}
+
+	if p.Spec.SecretRef.Name == "" {
+		errs = append(errs, field.Required(specPath.Child("secretRef", "name"), "the credential Secret name is required"))
+	}
+
+	// Target/field pairing. A selector set for a non-matching target is
+	// the failure mode worth catching at admission: the policy would
+	// resolve and silently not inject what the operator configured.
+	hasHeader := p.Spec.HeaderName != nil
+	hasQuery := p.Spec.QueryParamName != nil
+	hasProviderAuth := p.Spec.ProviderAuth != nil
+	switch p.Spec.Target {
+	case CredentialTargetHeader:
+		if !hasHeader || *p.Spec.HeaderName == "" {
+			errs = append(errs, field.Required(specPath.Child("headerName"), "required when target=Header"))
+		}
+		if hasQuery {
+			errs = append(errs, field.Forbidden(specPath.Child("queryParamName"), "only valid when target=QueryParam"))
+		}
+		if hasProviderAuth {
+			errs = append(errs, field.Forbidden(specPath.Child("providerAuth"), "only valid when target=ProviderAuth"))
+		}
+	case CredentialTargetQueryParam:
+		if !hasQuery || *p.Spec.QueryParamName == "" {
+			errs = append(errs, field.Required(specPath.Child("queryParamName"), "required when target=QueryParam"))
+		}
+		if hasHeader {
+			errs = append(errs, field.Forbidden(specPath.Child("headerName"), "only valid when target=Header"))
+		}
+		if hasProviderAuth {
+			errs = append(errs, field.Forbidden(specPath.Child("providerAuth"), "only valid when target=ProviderAuth"))
+		}
+	case CredentialTargetProviderAuth:
+		if hasHeader {
+			errs = append(errs, field.Forbidden(specPath.Child("headerName"), "only valid when target=Header"))
+		}
+		if hasQuery {
+			errs = append(errs, field.Forbidden(specPath.Child("queryParamName"), "only valid when target=QueryParam"))
+		}
+		if !hasProviderAuth {
+			errs = append(errs, field.Required(specPath.Child("providerAuth"), "required when target=ProviderAuth"))
+			break
+		}
+		pa := p.Spec.ProviderAuth
+		paPath := specPath.Child("providerAuth")
+		// Only AWSv4 is implemented; GCPServiceAccount is a reserved
+		// spelling with no resolver behind it yet — admitting it would
+		// produce a policy that never injects.
+		if pa.Type != ProviderAuthTypeAWSv4 {
+			errs = append(errs, field.NotSupported(paPath.Child("type"), pa.Type, []string{ProviderAuthTypeAWSv4}))
+		}
+		if pa.Region != nil && *pa.Region == "" {
+			errs = append(errs, field.Invalid(paPath.Child("region"), *pa.Region,
+				"region must be non-empty when set (omit it to derive from the target host)"))
+		}
+		if pa.Service != nil && *pa.Service == "" {
+			errs = append(errs, field.Invalid(paPath.Child("service"), *pa.Service,
+				"service must be non-empty when set (omit it for the bedrock default)"))
+		}
+	default:
+		errs = append(errs, field.NotSupported(specPath.Child("target"), string(p.Spec.Target),
+			[]string{string(CredentialTargetHeader), string(CredentialTargetQueryParam), string(CredentialTargetProviderAuth)}))
+	}
+
+	return errs
+}
+
+func (p *CredentialInjectionPolicy) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*CredentialInjectionPolicy); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &p.Spec) {
 		return nil
 	}
 	return p.Validate(ctx)
