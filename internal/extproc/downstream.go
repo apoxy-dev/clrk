@@ -77,6 +77,16 @@ type downstreamStream struct {
 	deferReselect bool
 	provMatch     *routeRule
 
+	// deferSign latches when a non-reselectable stream's header-time
+	// credential lookup contains a ProviderAuth/AWSv4 policy: the
+	// SigV4 signature covers the payload hash, so signing waits for
+	// the complete body at RequestBody EOS, and the request body mode
+	// is promoted to BUFFERED for the same body-phase-header-mutation
+	// reason as deferReselect. Reselectable streams never set it —
+	// their signing happens per attempt in the upstream filter.
+	deferSign bool
+	sigInjs   []credInjection
+
 	// finalRule is the rule that accepted this transaction at RequestBody
 	// EOS (model-aware match). It is threaded through to enrichRecord and
 	// budget charging instead of re-matching at emit time: a ModelRewrite
@@ -249,7 +259,20 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 			ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
 				"policies", collisions)
 		}
-		mut = applyInjections(mut, injs)
+		hdrInjs, sigInjs := splitInjections(injs)
+		mut = applyInjections(mut, hdrInjs)
+		if len(sigInjs) > 0 {
+			// A SigV4 policy can't inject at headers time — the
+			// signature covers the payload hash. Defer it to body
+			// EOS and promote the request body mode so the
+			// body-phase header mutation is honored.
+			ds.deferSign = true
+			ds.sigInjs = sigInjs
+			resp.ModeOverride = modeOverride(
+				extprocfilterv3.ProcessingMode_BUFFERED,
+				extprocfilterv3.ProcessingMode_BUFFERED,
+			)
+		}
 	}
 	if mut != nil {
 		resp.GetRequestHeaders().GetResponse().HeaderMutation = mut
@@ -373,7 +396,7 @@ func (ds *downstreamStream) onRequestBody(m *extprocv3.HttpBody, now time.Time) 
 	}
 	ds.rec.RequestBody = body
 	ds.rec.RequestTruncated = ds.rec.RequestTruncated || trunc
-	if ds.deferReselect {
+	if ds.deferReselect || ds.deferSign {
 		ds.fullReqBody = append(ds.fullReqBody, chunk...)
 	}
 	// Probe each chunk so multi-chunk BUFFERED_PARTIAL deliveries
@@ -395,37 +418,73 @@ func (ds *downstreamStream) onRequestBody(m *extprocv3.HttpBody, now time.Time) 
 		if ds.deferReselect {
 			return ds.pinAtBodyEOS(host, reqPath)
 		}
+		return ds.plainBodyEOS(host, reqPath)
+	}
+	return bodyContinue(true)
+}
 
-		// Non-reselectable stream: today's path, unchanged. Skip
-		// when truncation already kicked in — partial JSON can't
-		// be safely re-serialized or policy-gated.
-		if !ds.rec.RequestTruncated {
-			if newBody, mut := parsers.EnsureIncludeUsage(host, reqPath, ds.rec.RequestBody); mut {
-				// Update the captured copy so OTLP shows what the
-				// upstream actually received, not what the agent
-				// originally sent.
-				ds.rec.RequestBody = newBody
-				ds.rec.RequestBodyRewritten = true
-				return bodyMutation(true, newBody)
-			}
+// plainBodyEOS finishes the terminal body chunk of a non-reselectable
+// stream: the include-usage rewrite and MCP enforcement (the
+// pre-deferSign path, unchanged for streams without a SigV4 policy),
+// then — for deferSign streams — the SigV4 signature over the final
+// bytes, emitted as a body-phase header mutation.
+func (ds *downstreamStream) plainBodyEOS(host, reqPath string) *extprocv3.ProcessingResponse {
+	// deferSign streams accumulated the complete bytes regardless of
+	// the capture cap; everything else works from the capture, which
+	// is complete exactly when truncation didn't kick in.
+	body := ds.rec.RequestBody
+	complete := !ds.rec.RequestTruncated
+	if ds.deferSign {
+		body, complete = ds.fullReqBody, true
+	}
+	bodyChanged := false
+	// Skip the rewrite and policy gates on incomplete bytes — partial
+	// JSON can't be safely re-serialized or policy-gated.
+	if complete {
+		if newBody, mut := parsers.EnsureIncludeUsage(host, reqPath, body); mut {
+			body, bodyChanged = newBody, true
+			// Update the captured copy so OTLP shows what the
+			// upstream actually received, not what the agent
+			// originally sent.
+			left := ds.maxCaptureBytes
+			ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, newBody, &left)
+			ds.rec.RequestBodyRewritten = true
+		} else if mcpCandidate(ds.mcpRoutes, host, ds.rec.RequestHeaders["content-type"]) {
 			// MCP enforcement. Cheap host + content-type gate so
 			// non-MCP traffic pays nothing for the JSON-RPC parse.
 			// The include-usage rewrite (above) and an MCP deny
 			// are mutually exclusive — the former only fires for
 			// OpenAI-shaped requests, the latter only when a host
-			// falls under an MCPRoute.
-			if mcpCandidate(ds.mcpRoutes, host, ds.rec.RequestHeaders["content-type"]) {
-				res := ds.mcpRoutes.evaluate(host, parsers.Input{
-					ReqBody:      ds.rec.RequestBody,
-					ReqTruncated: ds.rec.RequestTruncated,
-					ReqHeaders:   ds.rec.RequestHeaders,
-				})
-				stampMCPResult(&ds.rec, res)
-				if res.decision == mcpDecisionDeny {
-					return immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)
-				}
+			// falls under an MCPRoute. A deny returns before
+			// signing: nothing goes upstream.
+			res := ds.mcpRoutes.evaluate(host, parsers.Input{
+				ReqBody:      body,
+				ReqTruncated: !complete,
+				ReqHeaders:   ds.rec.RequestHeaders,
+			})
+			stampMCPResult(&ds.rec, res)
+			if res.decision == mcpDecisionDeny {
+				return immediateResponse(typev3.StatusCode_Forbidden, res.denyDetail)
 			}
 		}
+	}
+	var mut *extprocv3.HeaderMutation
+	if ds.deferSign {
+		mut = applySigning(nil, ds.sigInjs, signInput{
+			method:    ds.rec.RequestHeaders[":method"],
+			authority: effectiveAuthority(ds.rec.RequestHeaders[":authority"]),
+			path:      reqPath,
+			body:      body,
+			headers:   ds.rec.RequestHeaders,
+		}, ds.logger)
+	}
+	switch {
+	case bodyChanged && mut != nil:
+		return bodyMutationWithHeaders(true, body, mut, false)
+	case bodyChanged:
+		return bodyMutation(true, body)
+	case mut != nil:
+		return bodyContinueWithHeaders(true, mut, false)
 	}
 	return bodyContinue(true)
 }
@@ -542,14 +601,20 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 		// apply the include-usage rewrite the non-reselectable path
 		// would have: without it, streamed traffic on an
 		// all-cross-schema rule would silently evade TokenBudget.
-		mut := injectFallbackCreds(ds.creds, final, ds.rec.RequestHeaders, ds.logger)
+		// The rewrite runs FIRST — a route-wide SigV4 credential
+		// signs the bytes that actually go out.
+		finalBody, bodyChanged := ds.fullReqBody, false
 		if newBody, changed := parsers.EnsureIncludeUsage(host, reqPath, ds.fullReqBody); changed {
+			finalBody, bodyChanged = newBody, true
 			left := ds.maxCaptureBytes
 			ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, newBody, &left)
 			ds.rec.RequestBodyRewritten = true
-			return bodyMutationWithHeaders(true, newBody, mut, false)
 		}
-		if mut != nil {
+		mut := injectFallbackCreds(ds.creds, final, ds.rec.RequestHeaders, finalBody, reqPath, ds.logger)
+		switch {
+		case bodyChanged:
+			return bodyMutationWithHeaders(true, finalBody, mut, false)
+		case mut != nil:
 			return bodyContinueWithHeaders(true, mut, false)
 		}
 		return bodyContinue(true)
@@ -564,11 +629,20 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 	var injUnion []credInjection
 	for _, c := range viable {
 		for _, inj := range ds.creds.lookupForBackend(final, c.name) {
-			if seen[inj.headerName] {
-				continue
+			// Dedupe on the header names the injection will set (the
+			// whole signature set for SigV4 policies) — redaction is
+			// per-name, so a policy contributing no new name is
+			// already covered.
+			fresh := false
+			for _, name := range inj.headerNames() {
+				if !seen[name] {
+					fresh = true
+					seen[name] = true
+				}
 			}
-			seen[inj.headerName] = true
-			injUnion = append(injUnion, inj)
+			if fresh {
+				injUnion = append(injUnion, inj)
+			}
 		}
 	}
 	if collisions := redactInjected(ds.rec.RequestHeaders, injUnion); len(collisions) > 0 {
@@ -829,8 +903,10 @@ func provisionalMatch(routes *routeTable, headers map[string]string) *routeRule 
 // (and gateway) credentials, redacting them from the captured record.
 // Used on the re-selection fallback paths (truncated body, no resolvable
 // candidate) so a deferred-credential request still authenticates against
-// its original host. Returns nil when there is nothing to inject.
-func injectFallbackCreds(creds *credTable, rr *routeRule, headers map[string]string, logger logr.Logger) *extprocv3.HeaderMutation {
+// its original host. Route-wide SigV4 policies sign here too — body and
+// reqPath must be the final wire values. Returns nil when there is
+// nothing to inject.
+func injectFallbackCreds(creds *credTable, rr *routeRule, headers map[string]string, body []byte, reqPath string, logger logr.Logger) *extprocv3.HeaderMutation {
 	injs := creds.lookup(rr)
 	if len(injs) == 0 {
 		return nil
@@ -839,7 +915,15 @@ func injectFallbackCreds(creds *credTable, rr *routeRule, headers map[string]str
 		logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
 			"policies", collisions)
 	}
-	return applyInjections(nil, injs)
+	hdrInjs, sigInjs := splitInjections(injs)
+	mut := applyInjections(nil, hdrInjs)
+	return applySigning(mut, sigInjs, signInput{
+		method:    headers[":method"],
+		authority: effectiveAuthority(headers[":authority"]),
+		path:      reqPath,
+		body:      body,
+		headers:   headers,
+	}, logger)
 }
 
 // rewriteRequestBody applies a selected backend's per-backend request

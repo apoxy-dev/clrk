@@ -122,6 +122,19 @@ func authorityPortMutation(authority string) *extprocv3.HeaderMutation {
 	}
 }
 
+// effectiveAuthority returns the :authority value as it will leave
+// Envoy: authorityPortMutation rewrites a portless authority to
+// host:443 at headers time, while the captured header map keeps the
+// agent's original value. A SigV4 signature must cover the wire value
+// — the signed `host` header has to byte-match what the upstream
+// receives.
+func effectiveAuthority(authority string) string {
+	if authority == "" || authorityPortRE.MatchString(authority) {
+		return authority
+	}
+	return authority + ":443"
+}
+
 // headersContinue / bodyContinue / trailersContinue build observability-
 // mode-safe responses that tell Envoy to forward unchanged.
 func headersContinue(isRequest bool) *extprocv3.ProcessingResponse {
