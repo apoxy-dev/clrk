@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/apoxy-dev/apoxy v0.20.1-0.20260528184144-a0701864af75
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
+	github.com/apoxy-dev/icx v0.16.1
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -52,7 +53,6 @@ require (
 	github.com/MicahParks/keyfunc/v3 v3.6.1 // indirect
 	github.com/alphadose/haxmap v1.4.1 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
-	github.com/apoxy-dev/icx v0.16.1 // indirect
 	github.com/apparentlymart/go-cidr v1.1.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
