@@ -76,9 +76,11 @@ func newDevCmd() *cobra.Command {
 	o := &devOpts{}
 	cmd := &cobra.Command{
 		Use:   "dev",
-		Short: "Run controller-manager and worker locally in Docker",
-		Long: "Starts a controller-manager container with an embedded apiserver " +
-			"and N worker containers on a shared docker network.",
+		Short: "Run a complete CLRK stack locally in a k3d cluster",
+		Long: "Brings up a k3d cluster (docker container k3d-clrk-dev-server-0 with an " +
+			"embedded apiserver), then applies the controller-manager Deployment and a " +
+			"default WorkerPool so the controller-manager and N workers run as in-cluster " +
+			"pods. No existing Kubernetes cluster required; state persists under ~/.clrk.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.tuiSet = cmd.Flags().Changed("tui")
 			return runDev(cmd.Context(), o)

@@ -25,6 +25,26 @@ func GenerateDocs(outDir string) error {
 		}
 	}
 
+	// Normalize the image-ref flag defaults. At runtime DefaultControllerManagerImage /
+	// DefaultWorkerImage are "<gar-path>:<8-char-vcs-sha>" (or "<gar-path>:latest" when the
+	// doc-gen binary carries no VCS info). The publish workflow never pushes a :latest tag,
+	// so rendering the literal default into the reference would document a ref that 404s.
+	// Replace the tag with a placeholder that says "matches the running clrk binary's SHA".
+	var normalizeImageDefaults func(cmd *cobra.Command)
+	normalizeImageDefaults = func(cmd *cobra.Command) {
+		for _, name := range []string{"controller-image", "worker-image"} {
+			if f := cmd.Flags().Lookup(name); f != nil {
+				if i := strings.LastIndex(f.DefValue, ":"); i >= 0 {
+					f.DefValue = f.DefValue[:i] + ":<clrk-commit-sha>"
+				}
+			}
+		}
+		for _, c := range cmd.Commands() {
+			normalizeImageDefaults(c)
+		}
+	}
+	normalizeImageDefaults(RootCmd)
+
 	anchorLinks := func(s string) string {
 		s = strings.ReplaceAll(s, "_", "-")
 		s = strings.ToLower(s)
