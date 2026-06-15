@@ -12,15 +12,15 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/apoxy-dev/clrk/internal/sentrystack"
+	"github.com/apoxy-dev/clrk/pkg/sandbox/sentrystack"
 )
 
-// Worker → runsc plumbing. Each lifecycle hook fork+exec's
+// Host → runsc plumbing. Each lifecycle hook fork+exec's
 // /proc/self/exe with the relevant runsc argv; the same binary
-// re-enters via cmd/worker/cli_linux.go::tryDispatchRunsc when invoked
+// re-enters via DispatchRunsc (dispatch_linux.go) when invoked
 // with a runsc subcommand. Subprocess (not in-process) because
 // gVisor's sandbox.New donates the calling process's stdio to the
-// Sentry boot child — incompatible with one worker serving many
+// Sentry boot child — incompatible with one host serving many
 // sandboxes that each need independent pipes.
 
 // runscNetwork is the --network value that makes the Sentry consult
@@ -32,10 +32,10 @@ const runscNetwork = "plugin"
 // (create, start, kill, etc.) shares.
 //
 //   - --ignore-cgroups: bypass runsc's own cgroup-v2 controller
-//     delegation. The worker owns the cgroup hierarchy directly: at
-//     startup InitWorkerCgroup moves the worker into <worker>/init
-//     and enables +memory +cpu on <worker>/cgroup.subtree_control,
-//     and each sandbox is created into its own <worker>/system/<id>
+//     delegation. The host owns the cgroup hierarchy directly: at
+//     startup InitHostCgroup moves the host into <host>/init
+//     and enables +memory +cpu on <host>/cgroup.subtree_control,
+//     and each sandbox is created into its own <host>/system/<id>
 //     cgroup via clone3 CLONE_INTO_CGROUP (see runscCreateOpts.
 //     cgroupDirFD). Letting runsc manage cgroups would race ours and
 //     re-trip the "no internal process" EBUSY that motivated this
@@ -59,9 +59,9 @@ const runscPlatform = "systrap"
 // runscCreateOpts carries the per-sandbox state runsc create needs in
 // addition to the bundle dir. initStr ships through the
 // CLRK_SENTRYSTACK_INITSTR env var so the Sentry's PluginStack PreInit
-// can read it (see internal/sentrystack/initstr.go).
+// can read it (see pkg/sandbox/sentrystack/initstr.go).
 //
-// cgroupDirFD is the worker-opened per-sandbox cgroup v2 directory
+// cgroupDirFD is the host-opened per-sandbox cgroup v2 directory
 // (see createSandboxCgroup). When non-nil it's passed through to the
 // runsc-create subprocess as SysProcAttr.CgroupFD with UseCgroupFD=true
 // so the kernel uses clone3 + CLONE_INTO_CGROUP to place the child —
@@ -104,7 +104,7 @@ func removeSandboxDebugLog(rootDir, id string) {
 // bundle is wiped on Delete, but we want the log to survive long
 // enough for runsc start/delete failures to fold its tail into the
 // returned error). The Sentry's own stderr (inherited via opts.stderr)
-// stays connected for the lifetime of the sandbox so the worker's
+// stays connected for the lifetime of the sandbox so the host's
 // drainSentryStdio can collect user-process stderr.
 func runscCreate(ctx context.Context, opts runscCreateOpts) error {
 	debugLog := sandboxDebugLog(opts.rootDir, opts.id)
@@ -129,7 +129,7 @@ func runscCreate(ctx context.Context, opts runscCreateOpts) error {
 	cmd.Env = append(os.Environ(), sentrystack.InitStrEnv+"="+opts.initStr)
 	if err := runCmdReapAware(cmd); err != nil {
 		// On failure read the tail of the debug log into the error
-		// message so callers don't have to ssh into the worker pod
+		// message so callers don't have to ssh into the host pod
 		// just to see why a 1-bit Sentry start refused.
 		tail := readLogTail(debugLog, 65536)
 		if tail != "" {
@@ -174,7 +174,7 @@ func runRunsc(ctx context.Context, rootDir string, args ...string) ([]byte, erro
 }
 
 // runRunscEnv is runRunsc plus extra env vars layered on top of the
-// worker's os.Environ(). Used by runscStart, which must inject
+// host's os.Environ(). Used by runscStart, which must inject
 // CLRK_SENTRYSTACK_INITSTR so the in-binary plugin-stack PreInit
 // (which gVisor calls from inside `runsc start`, not `runsc create`)
 // can find the per-sandbox payload.

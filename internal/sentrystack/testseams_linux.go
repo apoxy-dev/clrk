@@ -9,150 +9,39 @@ import (
 	"net/netip"
 	"sort"
 
-	"gvisor.dev/gvisor/pkg/sentry/socket/plugin"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// This file exposes a small surface that cross-module unit tests in
-// apoxy-cloud//clrk/sentrystack/ reach via the regular import path
-// `github.com/apoxy-dev/clrk/internal/sentrystack`. Bazel's go_test
-// targets don't pick up `_test.go` files from the imported library,
-// which is why these aren't in an `export_test.go`. Production code
-// shouldn't call NewForTest — the singleton is the supported entry
-// point; the lint convention is "tests only" by naming.
-//
-// Returns flat Go types (strings, bools) rather than gvisor.dev/...
-// types so the test target doesn't need to expose @dev_gvisor_gvisor
-// (which isn't `use_repo`'d into apoxy-cloud's main module).
+// This file exposes the egress-forwarder surface that cross-module unit
+// tests in apoxy-cloud//clrk/sentrystack/ reach via the regular import
+// path. The lo/eth0 NIC-wiring seams moved to the neutral core
+// (pkg/sandbox/sentrystack); only the egress data path this wrapper owns
+// is exercised here. go_test targets don't pick up `_test.go` files from
+// the imported library, which is why these aren't in an `export_test.go`.
 
-// NewForTest constructs a fresh Stack without registering it as the
-// global PluginStack. Use for tests that need to spin up isolated
-// stacks (Init wiring, NIC inspection) without touching the singleton.
-func NewForTest() *Stack {
-	return newStack()
-}
-
-// InitForTest invokes s.Init with the given encoded InitStr. Wraps the
-// gvisor-typed plugin.InitStackArgs so tests don't have to import the
-// gvisor package directly.
-func InitForTest(s *Stack, encodedInitStr string) error {
-	return s.Init(&plugin.InitStackArgs{InitStr: encodedInitStr})
-}
-
-// PreInitForTest invokes s.PreInit with the given pid and returns the
-// encoded InitStr the worker would ship to the Sentry. Fds are dropped
-// (PreInit never returns any in the current design).
-func PreInitForTest(s *Stack, pid int) (string, error) {
-	out, _, err := s.PreInit(&plugin.PreInitStackArgs{Pid: pid})
-	return out, err
-}
-
-// SingletonRegisteredForTest reports whether the package init() ran
-// and registered a PluginStack via plugin.RegisterPluginStack. A bare
-// import of sentrystack must always cause this to return true; if it
-// doesn't, every sandbox boot panics in setupNetwork.
-func SingletonRegisteredForTest() bool {
-	return plugin.GetPluginStack() != nil
-}
-
-// NICNamesForTest returns the names of all NICs on s, sorted.
-// Lo-only Init returns ["lo"]; eth0-wired Init returns ["eth0", "lo"].
-func NICNamesForTest(s *Stack) []string {
-	info := s.tcpipStack().NICInfo()
-	out := make([]string, 0, len(info))
-	for _, ni := range info {
-		out = append(out, ni.Name)
-	}
-	// NIC names come back unordered; sort for stable test assertions.
-	sort.Strings(out)
-	return out
-}
-
-// NICAddressesForTest returns the protocol addresses of the named NIC
-// in CIDR form (e.g. "127.0.0.1/8", "fd00:ec2::ffff/128"), sorted.
-// Returns nil if the NIC doesn't exist.
-func NICAddressesForTest(s *Stack, name string) []string {
-	info := s.tcpipStack().NICInfo()
-	for _, ni := range info {
-		if ni.Name != name {
-			continue
-		}
-		out := make([]string, 0, len(ni.ProtocolAddresses))
-		for _, pa := range ni.ProtocolAddresses {
-			out = append(out, fmt.Sprintf("%s/%d", pa.AddressWithPrefix.Address.String(), pa.AddressWithPrefix.PrefixLen))
-		}
-		sort.Strings(out)
-		return out
-	}
-	return nil
-}
-
-// HasDefaultRouteForTest reports whether the stack's route table has a
-// default route for the given family ("v4" or "v6") via the named NIC.
-func HasDefaultRouteForTest(s *Stack, family, nicName string) bool {
-	ts := s.tcpipStack()
-	nicID := nicIDByName(ts.NICInfo(), nicName)
-	if nicID == 0 {
-		return false
-	}
-	for _, r := range ts.GetRouteTable() {
-		if r.NIC != nicID {
-			continue
-		}
-		switch family {
-		case "v4":
-			if r.Destination == header.IPv4EmptySubnet {
-				return true
-			}
-		case "v6":
-			if r.Destination == header.IPv6EmptySubnet {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// nicIDByName looks up a NIC's ID from a NICInfo map. NIC IDs are
-// package-private (loNICID / eth0NICID); tests reach them by name so
-// that numeric constants don't bleed across the test boundary.
-// Returns 0 (an invalid NICID) when not found.
-func nicIDByName(info map[tcpip.NICID]stack.NICInfo, name string) tcpip.NICID {
-	for id, ni := range info {
-		if ni.Name == name {
-			return id
-		}
-	}
-	return 0
-}
-
-// RoutedTCPDialer aliases the unexported routedDialer so tests in
-// apoxy-cloud//clrk/sentrystack/ can name the value type without the
-// package exposing routedDialer to production callers.
+// RoutedTCPDialer aliases the unexported routedDialer so tests can name
+// the value type without the package exposing routedDialer to production
+// callers.
 type RoutedTCPDialer = routedDialer
 
-// NewRoutedTCPDialerForTest constructs a routedDialer the same way
-// Init does — see newRoutedTCPDialer in forwarder.go. dnsCache may be
-// nil to disable DstName lookup.
+// NewRoutedTCPDialerForTest constructs a routedDialer the same way the
+// egress forwarder install does — see newRoutedTCPDialer in forwarder.go.
+// dnsCache may be nil to disable DstName lookup.
 func NewRoutedTCPDialerForTest(init *InitStr, dnsCache *DNSCache) *RoutedTCPDialer {
 	return newRoutedTCPDialer(init, dnsCache)
 }
 
-// DialTCPForTest invokes (*routedDialer).DialTCP directly. The exported
-// method on the alias would work too, but a named seam keeps the test
-// boundary explicit.
+// DialTCPForTest invokes (*routedDialer).DialTCP directly.
 func (d *RoutedTCPDialer) DialTCPForTest(ctx context.Context, src, dst netip.AddrPort) (net.Conn, error) {
 	return d.DialTCP(ctx, src, dst)
 }
 
 // IMDSTargetsForTest returns the parsed IMDS target set so a test can
-// assert newRoutedTCPDialer correctly handled malformed IMDSV4/V6
-// without poking into the unexported field.
+// assert newRoutedTCPDialer correctly handled malformed IMDSV4/V6 without
+// poking into the unexported field.
 func (d *RoutedTCPDialer) IMDSTargetsForTest() []netip.AddrPort {
 	out := make([]netip.AddrPort, 0, len(d.imdsTargets))
 	for ap := range d.imdsTargets {
@@ -165,8 +54,8 @@ func (d *RoutedTCPDialer) IMDSTargetsForTest() []netip.AddrPort {
 // RoutedUDPDialer aliases routedUDPDialer for the test target.
 type RoutedUDPDialer = routedUDPDialer
 
-// NewRoutedUDPDialerForTest constructs a routedUDPDialer the same way
-// Init does (see newRoutedUDPDialer in udp_linux.go).
+// NewRoutedUDPDialerForTest constructs a routedUDPDialer the same way the
+// egress forwarder install does (see newRoutedUDPDialer in udp_linux.go).
 func NewRoutedUDPDialerForTest(init *InitStr) *RoutedUDPDialer {
 	return newRoutedUDPDialer(init)
 }
@@ -176,26 +65,24 @@ func (d *RoutedUDPDialer) DialUDPForTest(ctx context.Context, src, dst netip.Add
 	return d.DialUDP(ctx, src, dst)
 }
 
-// ResolversForTest returns the parsed resolver list so a test can
-// assert newRoutedUDPDialer skips unparseable entries.
+// ResolversForTest returns the parsed resolver list so a test can assert
+// newRoutedUDPDialer skips unparseable entries.
 func (d *RoutedUDPDialer) ResolversForTest() []netip.AddrPort {
 	out := make([]netip.AddrPort, len(d.resolvers))
 	copy(out, d.resolvers)
 	return out
 }
 
-// DialTCPThroughStackForTest opens a TCP connection from inside s to
-// dst, routed through the in-Sentry TCP forwarder that Init() installed.
-// Returns the sandbox-side net.Conn — read/write bytes through it to
-// exercise the splice loop. Caller is responsible for closing the conn.
+// DialTCPThroughStackForTest opens a TCP connection from inside s to dst,
+// routed through the in-Sentry TCP forwarder that the egress installer
+// registered. Returns the sandbox-side net.Conn — read/write bytes
+// through it to exercise the splice loop. Caller closes the conn.
 //
-// Drives the same code path a Sentry-attached process would: gonet
-// builds an endpoint on the stack, Connect emits a SYN, the loopether
+// Drives the same code path a Sentry-attached process would: gonet builds
+// an endpoint on the stack, Connect emits a SYN, the loopether
 // LinkEndpoint loops it back to DeliverNetworkPacket, the forwarder
 // catches it (no listening endpoint matches), and req.CreateEndpoint
-// completes the handshake. From the test's perspective this is the
-// only handle needed to drive installTCPForwarder + makeTCPHandler +
-// handleTCP end-to-end.
+// completes the handshake.
 func DialTCPThroughStackForTest(ctx context.Context, s *Stack, dst string) (net.Conn, error) {
 	dstAP, err := netip.ParseAddrPort(dst)
 	if err != nil {
@@ -207,18 +94,17 @@ func DialTCPThroughStackForTest(ctx context.Context, s *Stack, dst string) (net.
 		proto = ipv6.ProtocolNumber
 		dstAddr = tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
 	}
-	return gonet.DialContextTCP(ctx, s.tcpipStack(), tcpip.FullAddress{
+	return gonet.DialContextTCP(ctx, s.TCPIPStack(), tcpip.FullAddress{
 		Addr: dstAddr,
 		Port: dstAP.Port(),
 	}, proto)
 }
 
-// DialUDPThroughStackForTest opens a UDP socket on s pointed at dst.
-// The first datagram written through the returned conn flows out via
-// the sandbox-side eth0 (loopether), gets caught by the installed UDP
-// forwarder, and is dialed upstream by routedUDPDialer.DialUDP — i.e.
-// the test drives runUDPFlow + copyUDPPackets through their full
-// happy path.
+// DialUDPThroughStackForTest opens a UDP socket on s pointed at dst. The
+// first datagram written through the returned conn flows out via the
+// sandbox-side eth0 (loopether), gets caught by the installed UDP
+// forwarder, and is dialed upstream by routedUDPDialer.DialUDP — i.e. the
+// test drives runUDPFlow + copyUDPPackets through their full happy path.
 func DialUDPThroughStackForTest(s *Stack, dst string) (net.Conn, error) {
 	dstAP, err := netip.ParseAddrPort(dst)
 	if err != nil {
@@ -230,7 +116,7 @@ func DialUDPThroughStackForTest(s *Stack, dst string) (net.Conn, error) {
 		proto = ipv6.ProtocolNumber
 		dstAddr = tcpip.AddrFromSlice(dstAP.Addr().AsSlice())
 	}
-	return gonet.DialUDP(s.tcpipStack(), nil, &tcpip.FullAddress{
+	return gonet.DialUDP(s.TCPIPStack(), nil, &tcpip.FullAddress{
 		Addr: dstAddr,
 		Port: dstAP.Port(),
 	}, proto)

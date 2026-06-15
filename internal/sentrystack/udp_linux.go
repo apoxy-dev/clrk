@@ -142,8 +142,8 @@ func (t *udpFlowTable) remove(key udpFlowKey, f *udpFlow) {
 // every upstream response payload into IngestResponse before
 // forwarding it down to the sandbox, so the TCP forwarder can later
 // resolve dst IP → qname for PROXY v2 TLVDstName.
-func (s *Stack) installUDPForwarder(dial udpDialFunc, dnsCache *dnsCache) {
-	ts := s.tcpipStack()
+func installUDPForwarder(s *Stack, dial udpDialFunc, dnsCache *dnsCache) {
+	ts := s.TCPIPStack()
 	table := newUDPFlowTable()
 	ts.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 		defer func() {

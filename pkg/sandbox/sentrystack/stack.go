@@ -1,24 +1,32 @@
 //go:build linux
 
 // Package sentrystack registers a gVisor PluginStack that runs inside
-// each clrk-sandbox's Sentry. It owns the in-Sentry *tcpip.Stack — the
-// only network the sandboxed process ever sees — and is the future home
-// of the TCP/UDP forwarder callbacks that bridge outbound connections
-// to the worker's Envoy MITM and IMDS endpoints.
+// each sandbox's Sentry. It owns the in-Sentry *tcpip.Stack — the only
+// network the sandboxed process ever sees — and wires the loopback +
+// eth0 NICs the sandbox boots with.
+//
+// This is the tenant- and egress-neutral CORE carved out of clrk's
+// sandbox runtime. It wires addressing only; the egress/IMDS/DNS
+// forwarder data path is layered back on by an embedder through the
+// [ForwarderInstaller] hook (clrk's internal/sentrystack wrapper sets it
+// at package init() via a blank import — the standard Go extension
+// pattern, cf. database/sql drivers and image-format decoders). A
+// standalone consumer that imports only this package (e.g. workerd-host
+// before the egress track lands) leaves the hook nil and gets a sandbox
+// with lo + eth0 and no outbound forwarder.
 //
 // Lifecycle:
 //
 //   - Package init() constructs a singleton Stack with an empty
 //     *tcpip.Stack (no NICs) and registers it via plugin.RegisterPluginStack.
-//     The same init() runs in the worker process (which calls PreInit
+//     The same init() runs in the host process (which calls PreInit
 //     to compose the initStr per-sandbox) and in each Sentry boot
 //     child (which calls Init exactly once to wire up NICs).
-//   - PreInit runs in the worker process. Phase 1 returns a placeholder
-//     initStr; later phases populate per-sandbox addressing, MITM/IMDS
-//     endpoints, and policy.
-//   - Init runs in the Sentry boot child. It reads initStr, adds NICs
-//     to the singleton's *tcpip.Stack, and (in later phases) registers
-//     TCP/UDP forwarders.
+//   - PreInit runs in the host process. It validates and returns the
+//     per-sandbox initStr the host stashed in the InitStrEnv env var.
+//   - Init runs in the Sentry boot child. It reads initStr, adds lo +
+//     (when addressing is present) eth0 to the singleton's *tcpip.Stack,
+//     and finally invokes ForwarderInstaller if an embedder registered one.
 //
 // inet.Stack is satisfied by the embedded *netstack.Stack, which wraps
 // the same *tcpip.Stack. We don't reimplement Interfaces / InterfaceAddrs
@@ -47,6 +55,19 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
+// ForwarderInstaller, when non-nil, is invoked by Init after the lo/eth0
+// NICs are wired and the route table is set, to install transport-protocol
+// handlers (the egress/IMDS/DNS forwarder data path). Set it from an
+// embedder's package init() via a blank import — the standard Go
+// extension pattern. The core stays tenant- and egress-neutral; the
+// installer reaches the inner *tcpip.Stack via the [Stack.TCPIPStack]
+// accessor and reads the egress fields (IMDSHostAddr, EgressHostAddr,
+// IMDSV4/V6, DNSResolvers) the host stamped into the decoded InitStr.
+//
+// Left nil (standalone core), Init wires lo + eth0 with no outbound
+// forwarder: loopback works, egress awaits an installer.
+var ForwarderInstaller func(s *Stack, init *InitStr)
+
 // NIC IDs. Stable values so logs and forwarder-side code can refer to
 // them by symbol.
 const (
@@ -54,7 +75,7 @@ const (
 	eth0NICID tcpip.NICID = 2
 )
 
-// Stack is the clrk PluginStack implementation. Wraps an *netstack.Stack
+// Stack is the sandbox PluginStack implementation. Wraps an *netstack.Stack
 // (which in turn wraps the *tcpip.Stack) so inet.Stack is satisfied by
 // embedding; PreInit and Init are added on top to satisfy plugin.PluginStack.
 type Stack struct {
@@ -99,14 +120,22 @@ func (s *Stack) tcpipStack() *stack.Stack {
 	return s.Stack.Stack
 }
 
-// PreInit runs in the runsc subprocess (worker-spawned). Reads the
+// TCPIPStack exposes the inner *tcpip.Stack so a [ForwarderInstaller]
+// can register transport-protocol handlers (the egress forwarder data
+// path) on it. Exported for embedders only; the core never registers
+// transport handlers itself.
+func (s *Stack) TCPIPStack() *stack.Stack {
+	return s.tcpipStack()
+}
+
+// PreInit runs in the runsc subprocess (host-spawned). Reads the
 // InitStr from the InitStrEnv env var, validates it, and returns the
 // raw payload — urpc ships it to the Sentry boot child where Init
 // decodes it again. Empty env yields a valid empty envelope so manual
-// `worker run` invocations (no per-sandbox config) boot with just lo.
+// `run` invocations (no per-sandbox config) boot with just lo.
 func (s *Stack) PreInit(args *plugin.PreInitStackArgs) (string, []int, error) {
 	raw := os.Getenv(InitStrEnv)
-	// Validate roundtrip so a malformed worker-side payload fails fast
+	// Validate roundtrip so a malformed host-side payload fails fast
 	// in PreInit rather than confusingly later in Init.
 	if _, err := DecodeInitStr(raw); err != nil {
 		return "", nil, fmt.Errorf("sentrystack PreInit decode: %w", err)
@@ -125,8 +154,9 @@ func (s *Stack) PreInit(args *plugin.PreInitStackArgs) (string, []int, error) {
 }
 
 // Init runs in the Sentry boot child. Decodes the initStr and adds NICs
-// to the singleton's *tcpip.Stack. Phase 1 wires only lo; eth0 with the
-// per-sandbox addressing comes in Phase 2.
+// to the singleton's *tcpip.Stack. Wires lo always, eth0 when the host
+// provided per-sandbox addressing, then invokes the optional
+// ForwarderInstaller for the egress data path.
 func (s *Stack) Init(args *plugin.InitStackArgs) error {
 	s.initOnce.Do(func() {
 		s.initErr = s.doInit(args)
@@ -197,9 +227,9 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 		},
 	}
 
-	// eth0 is wired only when the worker provided addressing in initStr.
-	// Phase 1 callers (no addressing) get a lo-only sandbox; Phase 2+
-	// callers get eth0 routed via loopether with the per-sandbox IP.
+	// eth0 is wired only when the host provided addressing in initStr.
+	// lo-only callers (no addressing) get a lo-only sandbox; callers
+	// with addressing get eth0 routed via loopether with the per-sandbox IP.
 	if init.Eth0V4 != "" || init.Eth0V6 != "" {
 		ethRoutes, err := s.wireEth0(init)
 		if err != nil {
@@ -210,30 +240,19 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 
 	ts.SetRouteTable(routes)
 
-	// Install TCP + UDP forwarders. With promiscuous + spoofing on
-	// eth0, every outbound packet loops back into the protocol layer
-	// and falls through to a forwarder (no listening endpoint
-	// matches). The forwarders dial upstream from the Sentry
-	// process and bridge bytes both directions.
+	// Install the optional egress/forwarder data path. The core wires
+	// only lo + eth0 addressing; an embedder registers ForwarderInstaller
+	// at package init() to add the TCP/UDP forwarders that bridge
+	// outbound flows to the host's egress + IMDS + DNS planes. Left nil
+	// (standalone core) the sandbox gets lo + eth0 with no outbound
+	// forwarder — loopback works, egress awaits an installer.
 	//
-	// TCP: routedDialer branches on dst — IMDS dsts go to the
-	// worker's host-bound 127.0.0.1 listener with a PROXY v2 frame
-	// carrying SandboxID; everything else dials the egress bridge.
-	// The frame's TLVDstName is filled from dnsCache (populated by
-	// the UDP forwarder's :53 response path) so the worker bridge
-	// and Envoy MITM can attribute the connection by hostname.
-	//
-	// UDP: routedUDPDialer branches on port — :53 dials the worker's
-	// resolver list (from initStr); everything else is denied (worker-
-	// side UDP policy is not wired yet, so non-DNS UDP fails closed to
-	// prevent agents from bypassing SandboxPolicy via protocol switch).
-	// The forwarder feeds every :53 response payload into dnsCache
-	// before forwarding it back to the sandbox.
-	dns := newDNSCache()
-	tcpDial := newRoutedTCPDialer(init, dns)
-	s.installTCPForwarder(tcpDial.DialTCP)
-	udpDial := newRoutedUDPDialer(init)
-	s.installUDPForwarder(udpDial.DialUDP, dns)
+	// With promiscuous + spoofing on eth0, every outbound packet loops
+	// back into the protocol layer; an installed forwarder catches it
+	// (no listening endpoint matches) and bridges it upstream.
+	if ForwarderInstaller != nil {
+		ForwarderInstaller(s, init)
+	}
 
 	return nil
 }
@@ -242,7 +261,7 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 // returns the default routes that should be added to the stack-wide
 // route table. Caller must check init has at least one of Eth0V4 or
 // Eth0V6 populated before calling; an init with neither leaves eth0
-// off entirely (Phase 1 lo-only mode).
+// off entirely (lo-only mode).
 func (s *Stack) wireEth0(init *InitStr) ([]tcpip.Route, error) {
 	ts := s.tcpipStack()
 
@@ -324,7 +343,7 @@ func (s *Stack) wireEth0(init *InitStr) ([]tcpip.Route, error) {
 // every form net.ParseMAC accepts (colon, dash, dotted-quad). An empty
 // string returns a zero MAC — valid but presents as 00:00:00:00:00:00.
 //
-// Exported for unit tests in apoxy-cloud//clrk/sentrystack.
+// Exported for unit tests.
 func ParseMAC(s string) (tcpip.LinkAddress, error) {
 	if s == "" {
 		var zero [6]byte
@@ -344,7 +363,7 @@ func ParseMAC(s string) (tcpip.LinkAddress, error) {
 // of the expected byte width (4 or 16), returning the prefix length
 // (defaulting to /32 for v4 and /128 for v6 if the caller passed 0).
 //
-// Exported for unit tests in apoxy-cloud//clrk/sentrystack.
+// Exported for unit tests.
 func ParsePrefixed(s string, prefix, want int) (tcpip.Address, int, error) {
 	a, err := netip.ParseAddr(s)
 	if err != nil {

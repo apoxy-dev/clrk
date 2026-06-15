@@ -7,20 +7,20 @@ import (
 	"sync"
 )
 
-// reapExclusions tracks PIDs that worker is actively waiting on via
-// os/exec.Cmd.Wait(). The cmd/worker SIGCHLD reaper consults this set
+// reapExclusions tracks PIDs that the host is actively waiting on via
+// os/exec.Cmd.Wait(). The host binary's SIGCHLD reaper consults this set
 // (via ShouldSkipReap) to avoid racing waitid() against cmd.Wait()
 // and returning ECHILD ("waitid: no child processes") to the caller.
 //
 // Direct subprocesses (runsc create/start/kill/wait/delete) register
 // here; indirect descendants (the Sentry and gofer — re-parented to
-// worker when their runsc create parent exits) never get registered,
+// the host when their runsc create parent exits) never get registered,
 // so the reaper still collects them.
 var reapExclusions sync.Map // pid (int) -> struct{}
 
 // ShouldSkipReap reports whether the reaper should skip the given PID
-// because cmd.Wait() will collect it. Exported so cmd/worker can
-// import it.
+// because cmd.Wait() will collect it. Exported so the host binary's
+// SIGCHLD reaper can import it.
 func ShouldSkipReap(pid int) bool {
 	_, owned := reapExclusions.Load(pid)
 	return owned

@@ -13,11 +13,12 @@ import (
 // Subnet 2 = 10.200.0.8/30 → gw .9, ctr .10
 // ...etc. Wraps into the third octet as needed.
 //
-// The IPs are written into InitStr and used to populate the in-Sentry
-// PluginStack's eth0 + default-gateway-cosmetic; they no longer back
-// a real kernel TAP. The sandbox's /etc/resolv.conf still names the
-// gateway IP so glibc/musl have a syntactically valid resolver — the
-// in-Sentry UDP forwarder catches every :53 dial regardless of dst.
+// The IPs are written into the sentrystack init payload and used to
+// populate the in-Sentry PluginStack's eth0 + cosmetic default gateway;
+// they don't back a real kernel TAP. The sandbox's /etc/resolv.conf still
+// names the gateway IP so glibc/musl have a syntactically valid resolver
+// — an installed in-Sentry UDP/DNS forwarder catches every :53 dial
+// regardless of dst.
 var ipCounter atomic.Uint64
 
 // maxSubnets is the number of /30 subnets available in 10.200.0.0/16.

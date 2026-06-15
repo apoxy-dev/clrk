@@ -15,6 +15,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/config"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/worker"
+	"github.com/apoxy-dev/clrk/pkg/sandbox"
 )
 
 var scheme = runtime.NewScheme()
@@ -28,9 +29,12 @@ func main() {
 	// runsc subcommand demux runs before any other setup. Container.Start
 	// re-execs /proc/self/exe with argv[1] like "boot" or "gofer"; those
 	// invocations must reach gVisor's runsc main, not the controller-
-	// runtime manager. tryDispatchRunsc returns only if argv doesn't
-	// match a runsc subcommand.
-	tryDispatchRunsc()
+	// runtime manager. The dispatch (+ its subcommand table) lives in the
+	// sandbox core; sandbox.DispatchRunsc returns only if argv doesn't
+	// match a runsc subcommand. The cli_linux.go blank import of
+	// internal/sentrystack registers clrk's egress forwarder data path
+	// with the core PluginStack before this runs.
+	sandbox.DispatchRunsc()
 
 	// Reap orphan zombies. When `runsc create` exits, the Sentry and
 	// gofer it spawned are re-parented to us (we're PID 1 in our

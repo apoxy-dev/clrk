@@ -1,5 +1,3 @@
-//go:build linux
-
 package sandbox
 
 import (
@@ -12,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,14 +25,13 @@ import (
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	orasretry "oras.land/oras-go/v2/registry/remote/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// ImageStore manages OCI image pulling and rootfs extraction.
-// Images are pulled via ORAS and layers extracted to a shared rootfs directory.
-// APO-537 replaces the extraction path with nydusd FUSE mounts.
+// ImageStore manages OCI image pulling and rootfs extraction. Images are
+// pulled via ORAS and their layers extracted to a shared rootfs directory.
 type ImageStore struct {
-	baseDir string // e.g. /run/clrk/images
+	baseDir string // e.g. /run/apoxy/images
+	log     *slog.Logger
 
 	mu     sync.Mutex
 	images map[string]*ImageInfo // imageRef → info
@@ -47,18 +45,35 @@ type ImageInfo struct {
 	Cmd        []string // Default cmd from image config.
 }
 
-// NewImageStore creates a new ImageStore rooted at baseDir.
-func NewImageStore(baseDir string) *ImageStore {
-	return &ImageStore{
-		baseDir: baseDir,
-		images:  make(map[string]*ImageInfo),
+// ImageStoreOption configures an ImageStore.
+type ImageStoreOption func(*ImageStore)
+
+// WithImageStoreLogger sets the structured logger the store writes pull/extract
+// progress to. Defaults to slog.Default().
+func WithImageStoreLogger(l *slog.Logger) ImageStoreOption {
+	return func(s *ImageStore) {
+		if l != nil {
+			s.log = l
+		}
 	}
 }
 
-// CachedRefs returns the image references currently resident in the
-// store. The controller-side health-checker uses this list to prefer a
-// worker that already has a revision's image when picking a dispatch
-// target.
+// NewImageStore creates a new ImageStore rooted at baseDir.
+func NewImageStore(baseDir string, opts ...ImageStoreOption) *ImageStore {
+	s := &ImageStore{
+		baseDir: baseDir,
+		log:     slog.Default(),
+		images:  make(map[string]*ImageInfo),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// CachedRefs returns the image references currently resident in the store.
+// A caller can use this to prefer a host that already has a revision's image
+// when placing work (image affinity).
 func (s *ImageStore) CachedRefs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,7 +116,7 @@ func (s *ImageStore) EnsureImage(ctx context.Context, imageRef string) (*ImageIn
 
 // pullAndExtract does the actual OCI pull and layer extraction.
 func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*ImageInfo, error) {
-	log := ctrl.LoggerFrom(ctx).WithValues("image", imageRef)
+	log := s.log.With("image", imageRef)
 	log.Info("Pulling OCI image")
 
 	// Create a temp dir for ORAS file store.
@@ -130,10 +145,10 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 		Credential: auth.StaticCredential(repo.Reference.Registry, auth.EmptyCredential),
 	}
 
-	// Pull manifest + all layers. The platform pin matches what the worker
-	// host can actually exec; bump MaxMetadataBytes well above the 4 MiB
-	// default since oras-go uses the same limit for blob caching during
-	// copy, and most real images have layers larger than that.
+	// Pull manifest + all layers. The platform pin matches what the host can
+	// actually exec; bump MaxMetadataBytes well above the 4 MiB default since
+	// oras-go uses the same limit for blob caching during copy, and most real
+	// images have layers larger than that.
 	opts := oras.CopyOptions{
 		CopyGraphOptions: oras.CopyGraphOptions{MaxMetadataBytes: 1 << 30},
 	}
@@ -217,7 +232,7 @@ func ensureBaseSystemFiles(rootfs string) error {
 	// Many images (alpine, curlimages/curl) ship a 0-byte mode-0700
 	// placeholder for /etc/resolv.conf. The bind-mount source is what
 	// the sandbox actually reads, so the mount-point's content/mode
-	// don't matter — we only need the file to exist so libcontainer
+	// don't matter — we only need the file to exist so the runtime
 	// can attach a bind mount over it.
 	resolv := filepath.Join(etc, "resolv.conf")
 	if _, err := os.Stat(resolv); errors.Is(err, fs.ErrNotExist) {

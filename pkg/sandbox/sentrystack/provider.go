@@ -27,7 +27,7 @@ import (
 // *netstack.Stack (which it won't be for us — it's an *sentrystack.Stack).
 // The sentry then iterates to the next provider. That's how both stay
 // registered without conflict, and how a future "host-mode" sandbox in
-// the same binary could keep using netstack while clrk sandboxes use
+// the same binary could keep using netstack while sandboxes use
 // sentrystack.
 type provider struct {
 	family   int
@@ -38,7 +38,7 @@ type provider struct {
 // netstack/provider.go::Socket but switches the type assertion to
 // *sentrystack.Stack and reaches the inner stack via tcpipStack().
 //
-// We deliberately don't support AF_PACKET or SOCK_RAW: clrk sandboxes
+// We deliberately don't support AF_PACKET or SOCK_RAW: sandboxes
 // should never see raw frames, and CAP_NET_RAW is dropped in the
 // container config. If a sandbox somehow tries, the sentry returns
 // ENOPROTOOPT — matching the spirit of the threat model.

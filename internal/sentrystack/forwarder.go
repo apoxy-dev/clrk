@@ -39,9 +39,13 @@ type tcpDialFunc func(ctx context.Context, src, dst netip.AddrPort) (net.Conn, e
 // handles every TCP SYN. The forwarder is registered once at Init
 // time and lives for the stack's lifetime — there's nothing to
 // unregister at shutdown beyond closing the stack.
-func (s *Stack) installTCPForwarder(dial tcpDialFunc) {
-	ts := s.tcpipStack()
-	fwd := tcp.NewForwarder(ts, 0, tcpForwarderMaxInFlight, s.makeTCPHandler(dial))
+//
+// Free function (not a method) because Stack is now an alias to the
+// neutral core type, on which this package cannot define methods; it
+// reaches the inner *tcpip.Stack via the exported TCPIPStack accessor.
+func installTCPForwarder(s *Stack, dial tcpDialFunc) {
+	ts := s.TCPIPStack()
+	fwd := tcp.NewForwarder(ts, 0, tcpForwarderMaxInFlight, makeTCPHandler(dial))
 	ts.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
 }
 
@@ -51,7 +55,7 @@ func (s *Stack) installTCPForwarder(dial tcpDialFunc) {
 //  1. Creates the local (sandbox-side) endpoint via req.CreateEndpoint.
 //  2. Dials the upstream via dial, passing original src + dst.
 //  3. Bidirectionally splices until either side closes.
-func (s *Stack) makeTCPHandler(dial tcpDialFunc) func(req *tcp.ForwarderRequest) {
+func makeTCPHandler(dial tcpDialFunc) func(req *tcp.ForwarderRequest) {
 	return func(req *tcp.ForwarderRequest) {
 		details := req.ID()
 		srcAddrPort := netip.AddrPortFrom(unmap4in6(addrFromTcpip(details.RemoteAddress)), details.RemotePort)
@@ -70,12 +74,12 @@ func (s *Stack) makeTCPHandler(dial tcpDialFunc) func(req *tcp.ForwarderRequest)
 						slog.String("stack", string(debug.Stack())))
 				}
 			}()
-			s.handleTCP(req, srcAddrPort, dstAddrPort, dial, logger)
+			handleTCP(req, srcAddrPort, dstAddrPort, dial, logger)
 		}()
 	}
 }
 
-func (s *Stack) handleTCP(
+func handleTCP(
 	req *tcp.ForwarderRequest,
 	srcAddrPort, dstAddrPort netip.AddrPort,
 	dial tcpDialFunc,
@@ -293,4 +297,3 @@ func unmap4in6(a netip.Addr) netip.Addr {
 	}
 	return a
 }
-
