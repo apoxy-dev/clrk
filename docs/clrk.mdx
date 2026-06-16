@@ -391,7 +391,7 @@ Push an OCI tarball into the live clrk dev local registry
 
 ### Synopsis
 
-Loads <tar> (a docker-archive produced by rules_oci's oci_tarball, e.g. bazel-bin/clrk/worker_oci_tarball/tarball.tar or the per-arch tarball exported from `dagger call build-clrk`) and pushes it to localhost:<registry-port>/clrk/<component>:dev. The registry port is read from the running session's dev.json. <component> is `worker` or `controller-manager`. Pair with --reload to also roll the matching Deployment.
+Loads &lt;tar&gt; (a docker-archive produced by rules_oci's oci_tarball, e.g. bazel-bin/clrk/worker_oci_tarball/tarball.tar or the per-arch tarball exported from `dagger call build-clrk`) and pushes it to localhost:&lt;registry-port&gt;/clrk/&lt;component&gt;:dev. The registry port is read from the running session's dev.json. &lt;component&gt; is `worker` or `controller-manager`. Pair with --reload to also roll the matching Deployment.
 
 ```
 clrk dev push-image <component> [flags]

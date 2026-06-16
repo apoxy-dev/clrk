@@ -69,6 +69,12 @@ func GenerateDocs(outDir string) error {
 		}
 		combined += string(b) + "\n\n"
 	}
+	// The docs2 site compiles this Markdown as MDX. Cobra renders arg
+	// placeholders like `<component>` / `<tar>` verbatim into Synopsis
+	// prose, where MDX parses them as unclosed JSX tags and the build
+	// fails. Escape angle brackets outside fenced code blocks and inline
+	// code spans so any `<placeholder>` survives the MDX compiler.
+	combined = escapeAnglesForMDX(combined)
 	if err := os.WriteFile(files[0], []byte(combined), 0o644); err != nil {
 		return fmt.Errorf("writing combined doc: %w", err)
 	}
@@ -78,6 +84,50 @@ func GenerateDocs(outDir string) error {
 		}
 	}
 	return nil
+}
+
+// escapeAnglesForMDX replaces `<`/`>` with their HTML entities everywhere
+// except inside fenced code blocks and inline code spans, so the MDX
+// compiler used by the docs2 site doesn't treat cobra's `<arg>` placeholders
+// as JSX tags. Fenced blocks (flag tables, usage lines) keep raw brackets
+// because MDX renders them literally there.
+func escapeAnglesForMDX(md string) string {
+	lines := strings.Split(md, "\n")
+	inFence := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		var b strings.Builder
+		inCode := false
+		for _, r := range line {
+			switch r {
+			case '`':
+				inCode = !inCode
+				b.WriteRune(r)
+			case '<':
+				if inCode {
+					b.WriteRune(r)
+				} else {
+					b.WriteString("&lt;")
+				}
+			case '>':
+				if inCode {
+					b.WriteRune(r)
+				} else {
+					b.WriteString("&gt;")
+				}
+			default:
+				b.WriteRune(r)
+			}
+		}
+		lines[i] = b.String()
+	}
+	return strings.Join(lines, "\n")
 }
 
 func genMarkdownTreeCustom(
