@@ -99,6 +99,23 @@ type Spec struct {
 	// it never acts on them. Zero value = a sandbox with lo + eth0 and
 	// no egress routing (direct dial), which is the standalone-core path.
 	Egress EgressInit
+
+	// InboundListenAddr opts the sandbox into the ingress path: the
+	// in-sandbox "ip:port" a resident server listens on (e.g.
+	// "127.0.0.1:8080"). When set, Create seals it into the sentrystack
+	// init payload (InboundListenAddr + InboundFDIndex) before the Sentry
+	// boots, and Start opens a host AF_UNIX listening socket fronting the
+	// resident server, donating its fd so the in-Sentry inbound forwarder
+	// can accept on it. The host socket path is surfaced on
+	// [Instance.InboundSocket]. Unlike [Spec.Egress] this is tenant-neutral
+	// and acted on by the core directly, so a standalone consumer
+	// (workerd-host) gets ingress with no egress installer. Empty keeps the
+	// sandbox egress-only.
+	//
+	// It must be set here, not on the returned Instance: Create seals the
+	// initStr before returning, so a value assigned post-Create never
+	// reaches the Sentry's PreInit and the forwarder silently never installs.
+	InboundListenAddr string
 }
 
 // EgressInit is the opaque set of sentrystack egress-routing fields a
@@ -154,6 +171,15 @@ type Instance struct {
 	// PluginStack eth0 via the sentrystack init payload.
 	SandboxIP netip.Addr
 
+	// InboundSocket is the host filesystem path of the AF_UNIX listening
+	// socket that fronts the in-sandbox resident server, set at Start when
+	// [Spec.InboundListenAddr] was requested. Callers on the host (an Envoy
+	// upstream cluster, the backplane bridge, or an acceptance test) dial
+	// this path to reach the in-sandbox listener — there is no host route to
+	// the in-Sentry SandboxIP, so this socket is the ingress entry point.
+	// Empty when the sandbox is egress-only.
+	InboundSocket string
+
 	// GatewayIP is the per-sandbox default-route gateway. Cosmetic under
 	// sentrystack (the in-Sentry forwarder never delivers frames to it) but
 	// exposed so `ip route` inside the sandbox shows a sane default route and
@@ -181,6 +207,11 @@ type Instance struct {
 	// inside `runsc start` (not `runsc create`), so the create-time env
 	// doesn't reach where PreInit reads it.
 	initStr string
+
+	// inboundListenAddr mirrors [Spec.InboundListenAddr], stashed at Create
+	// so Start knows whether to open + donate the host inbound listener.
+	// Empty = egress-only.
+	inboundListenAddr string
 }
 
 // stdioPipes groups the host-side stdio plumbing FDs of an [Instance].

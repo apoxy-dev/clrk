@@ -37,6 +37,15 @@ func buildSandboxInitStr(sb *Instance, eg EgressInit) (string, error) {
 	if sb.GatewayIP.IsValid() && sb.GatewayIP.Is4() {
 		is.GatewayV4 = sb.GatewayIP.String()
 	}
+	// Inbound (ingress) path: when the caller asked for a resident listener,
+	// tell the Sentry where the server listens and at which fd to find the
+	// host listening socket. The fd is constant (inboundExtraFileFD) because
+	// runscStart passes exactly one ExtraFile; see its comment. Sealed here at
+	// Create — a value arriving after Create would never reach PreInit.
+	if sb.inboundListenAddr != "" {
+		is.InboundListenAddr = sb.inboundListenAddr
+		is.InboundFDIndex = inboundExtraFileFD
+	}
 	return is.Encode()
 }
 

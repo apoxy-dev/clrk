@@ -163,7 +163,11 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (*Instance, error) {
 		RootFS:    rootfs,
 		SandboxIP: sandboxIP,
 		GatewayIP: gw,
-		CreatedAt: time.Now(),
+		// Stash before buildSandboxInitStr below so the sealed initStr carries
+		// the inbound listen addr + fd index; a value arriving after Create
+		// would never reach the Sentry's PreInit. Empty = egress-only.
+		inboundListenAddr: spec.InboundListenAddr,
+		CreatedAt:         time.Now(),
 	}
 
 	if err := wireSandboxStdio(sb, spec.Stdio); err != nil {
@@ -242,7 +246,25 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	}
 
 	log.Info("Starting sandbox")
-	if err := runscStart(ctx, m.stateDir, string(id), sb.initStr); err != nil {
+
+	// Ingress: when a resident listener was requested, open the host AF_UNIX
+	// socket that fronts it and donate it to the start subprocess so the
+	// Sentry's PluginStack PreInit can wire the inbound forwarder. nil when
+	// inbound is disabled, leaving the sandbox egress-only.
+	var inboundFile *os.File
+	if sb.inboundListenAddr != "" {
+		path := inboundSockPath(m.stateDir, id)
+		f, err := openInboundListener(path)
+		if err != nil {
+			return fmt.Errorf("opening inbound listener: %w", err)
+		}
+		inboundFile = f
+		sb.InboundSocket = path
+		// The Sentry holds its own dup after start; drop ours either way.
+		defer inboundFile.Close()
+	}
+
+	if err := runscStart(ctx, m.stateDir, string(id), sb.initStr, inboundFile); err != nil {
 		return err
 	}
 
@@ -250,6 +272,17 @@ func (m *Manager) Start(ctx context.Context, id SandboxID) error {
 	sb.Phase = SandboxRunning
 	m.stdSinks[id] = sink
 	m.mu.Unlock()
+
+	// Ingress readiness gate: hold Start open until the resident server is
+	// actually accepting through the inbound forwarder, so a caller that gets
+	// a successful Start can route traffic immediately. Egress-only sandboxes
+	// skip this entirely. On timeout the sandbox is left Running for the
+	// caller to Delete — Start's contract is "ready or error".
+	if sb.inboundListenAddr != "" {
+		if err := waitInboundReady(ctx, sb.InboundSocket, inboundReadyTimeout); err != nil {
+			return fmt.Errorf("inbound readiness: %w", err)
+		}
+	}
 
 	log.Info("Sandbox started")
 	return nil
@@ -380,6 +413,10 @@ func (m *Manager) Delete(ctx context.Context, id SandboxID) error {
 
 	m.removeSandboxNetConfig(id)
 	m.removeRunscBundleDir(id)
+	// The inbound socket is a sibling of the per-sandbox state dir, so the
+	// runsc-side teardown above doesn't catch it — unlink it explicitly.
+	// No-op for egress-only sandboxes (the file won't exist).
+	removeInboundSock(m.stateDir, id)
 	// removeSandboxDebugLog intentionally NOT called — keep per-sandbox
 	// Sentry logs for post-mortem inspection.
 
@@ -485,6 +522,7 @@ func (m *Manager) Purge(ctx context.Context, id SandboxID) {
 		log.Error("RemoveAll of state dir failed", "error", err)
 	}
 	m.removeRunscBundleDir(id)
+	removeInboundSock(m.stateDir, id)
 }
 
 func (m *Manager) runscBundleDir(id SandboxID) string {

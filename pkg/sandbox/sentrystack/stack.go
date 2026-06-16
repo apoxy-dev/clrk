@@ -137,9 +137,22 @@ func (s *Stack) PreInit(args *plugin.PreInitStackArgs) (string, []int, error) {
 	raw := os.Getenv(InitStrEnv)
 	// Validate roundtrip so a malformed host-side payload fails fast
 	// in PreInit rather than confusingly later in Init.
-	if _, err := DecodeInitStr(raw); err != nil {
+	init, err := DecodeInitStr(raw)
+	if err != nil {
 		return "", nil, fmt.Errorf("sentrystack PreInit decode: %w", err)
 	}
+
+	// Surface the inbound host-listener fd so runsc ships it to the Sentry
+	// via the FilePayload → InitStackArgs.FDs path. The host handed this fd
+	// to the runsc-start subprocess via cmd.ExtraFiles, so it's already open
+	// at InboundFDIndex in this (PreInit's) process; runsc dups it across the
+	// urpc boundary into the Sentry. nil when no inbound is configured, which
+	// keeps the egress-only default untouched.
+	var fds []int
+	if init.InboundFDIndex > 0 {
+		fds = []int{init.InboundFDIndex}
+	}
+
 	if raw == "" {
 		// Re-encode an empty envelope so the Sentry side gets a
 		// well-formed string (Init's DecodeInitStr also handles ""
@@ -148,9 +161,9 @@ func (s *Stack) PreInit(args *plugin.PreInitStackArgs) (string, []int, error) {
 		if err != nil {
 			return "", nil, fmt.Errorf("sentrystack PreInit encode empty: %w", err)
 		}
-		return enc, nil, nil
+		return enc, fds, nil
 	}
-	return raw, nil, nil
+	return raw, fds, nil
 }
 
 // Init runs in the Sentry boot child. Decodes the initStr and adds NICs
@@ -252,6 +265,22 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 	// (no listening endpoint matches) and bridges it upstream.
 	if ForwarderInstaller != nil {
 		ForwarderInstaller(s, init)
+	}
+
+	// Inbound forwarder (the reverse of the egress forwarders an installer
+	// adds above): when the host passed a host AF_UNIX listener fd and an
+	// in-sandbox listen address, accept host-originated connections off that
+	// fd and splice each to a fresh in-stack dial toward the resident server.
+	// The dial is demuxed to the resident listener, not any egress catch-all,
+	// because a bound endpoint shadows the global TCP handler (see
+	// inbound_demux_test.go). Unlike egress, inbound is tenant-neutral, so the
+	// core installs it directly — a standalone consumer (workerd-host) that
+	// leaves ForwarderInstaller nil still gets ingress. Skipped entirely when
+	// no inbound fd/addr is configured, leaving the sandbox egress-only.
+	if len(args.FDs) > 0 && init.InboundListenAddr != "" {
+		if err := s.installInboundForwarder(args.FDs[0], init.InboundListenAddr); err != nil {
+			return fmt.Errorf("installing inbound forwarder: %w", err)
+		}
 	}
 
 	return nil
