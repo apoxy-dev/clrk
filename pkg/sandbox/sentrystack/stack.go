@@ -283,6 +283,20 @@ func (s *Stack) doInit(args *plugin.InitStackArgs) error {
 		}
 	}
 
+	// Control forwarder (resident → host manager): the guest→host mirror of
+	// inbound and, like inbound, tenant-neutral so the core installs it directly
+	// (a standalone consumer that leaves ForwarderInstaller nil still gets a
+	// control plane). When the host set both an in-sandbox control listen addr
+	// and a host control socket path, run an in-stack listener the dispatcher
+	// dials and splice each connection to the host manager's control socket.
+	// Needs no donated fd — the Sentry dials the host socket directly. Skipped
+	// when unset, leaving the resident with no WorkerLoader source.
+	if init.ControlForwardAddr != "" && init.ControlSocketPath != "" {
+		if err := s.installControlForwarder(init.ControlForwardAddr, init.ControlSocketPath); err != nil {
+			return fmt.Errorf("installing control forwarder: %w", err)
+		}
+	}
+
 	return nil
 }
 

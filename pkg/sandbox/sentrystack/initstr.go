@@ -145,6 +145,23 @@ type InitStr struct {
 	// no inbound fd was passed. See runscStart for why the fd rides the
 	// start subprocess and not create.
 	InboundFDIndex int `json:"inbound_fd_index,omitempty"`
+
+	// ControlForwardAddr is the in-sandbox "ip:port" a RESIDENT dispatcher dials
+	// to reach the host manager's control server (e.g. "127.0.0.2:80",
+	// deliberately distinct from InboundListenAddr's 127.0.0.1 data socket). When
+	// set together with ControlSocketPath, the Sentry installs a control
+	// forwarder: an in-stack listener on this address that splices each guest
+	// connection to a host net.Dial("unix", ControlSocketPath). It is the
+	// guest→host mirror of InboundListenAddr and, like inbound, tenant-neutral
+	// (acted on by the core, not by a ForwarderInstaller). It needs no fd
+	// donation — the Sentry shares the host mount+net namespaces and dials the
+	// host socket directly. Empty leaves the control plane unconfigured.
+	ControlForwardAddr string `json:"control_forward_addr,omitempty"`
+
+	// ControlSocketPath is the HOST AF_UNIX path of the manager's control server
+	// the control forwarder dials for each guest connection to ControlForwardAddr.
+	// Empty (regardless of ControlForwardAddr) disables control forwarding.
+	ControlSocketPath string `json:"control_socket_path,omitempty"`
 }
 
 // Encode serializes an InitStr. Empty SandboxID is allowed (lo-only).

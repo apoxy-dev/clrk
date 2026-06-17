@@ -46,6 +46,15 @@ func buildSandboxInitStr(sb *Instance, eg EgressInit) (string, error) {
 		is.InboundListenAddr = sb.inboundListenAddr
 		is.InboundFDIndex = inboundExtraFileFD
 	}
+	// Control (resident → host manager) path: when the caller asked for a control
+	// channel, tell the Sentry the in-sandbox addr the dispatcher dials and the
+	// host socket to splice it to. Sealed at Create alongside inbound; needs no
+	// fd (the Sentry dials the host socket directly), so there is no FDIndex
+	// analogue.
+	if sb.controlForwardAddr != "" && sb.controlSocketPath != "" {
+		is.ControlForwardAddr = sb.controlForwardAddr
+		is.ControlSocketPath = sb.controlSocketPath
+	}
 	return is.Encode()
 }
 

@@ -116,6 +116,27 @@ type Spec struct {
 	// initStr before returning, so a value assigned post-Create never
 	// reaches the Sentry's PreInit and the forwarder silently never installs.
 	InboundListenAddr string
+
+	// ControlForwardAddr opts the sandbox into the control path: the in-sandbox
+	// "ip:port" a resident dispatcher dials to reach the host manager's control
+	// server (e.g. "127.0.0.2:80", distinct from InboundListenAddr's 127.0.0.1
+	// data socket). When set together with ControlSocketPath, Create seals both
+	// into the sentrystack init payload and the in-Sentry control forwarder
+	// accepts the dispatcher's connections on an in-stack listener and splices
+	// each to the host control socket. Like InboundListenAddr this is
+	// tenant-neutral and acted on by the core; unlike inbound it needs no fd
+	// donation — the Sentry shares the host mount+net namespaces and dials the
+	// host socket directly. Empty leaves the sandbox without a control plane.
+	//
+	// Like InboundListenAddr it must be set here, not on the returned Instance:
+	// Create seals the initStr before returning.
+	ControlForwardAddr string
+
+	// ControlSocketPath is the HOST AF_UNIX path of the manager's control server
+	// the in-Sentry control forwarder dials for each guest connection to
+	// ControlForwardAddr. Empty (regardless of ControlForwardAddr) disables
+	// control forwarding.
+	ControlSocketPath string
 }
 
 // EgressInit is the opaque set of sentrystack egress-routing fields a
@@ -212,6 +233,14 @@ type Instance struct {
 	// so Start knows whether to open + donate the host inbound listener.
 	// Empty = egress-only.
 	inboundListenAddr string
+
+	// controlForwardAddr / controlSocketPath mirror [Spec.ControlForwardAddr] /
+	// [Spec.ControlSocketPath], stashed at Create so buildSandboxInitStr can seal
+	// them into the per-sandbox initStr. Empty = no control plane. Unlike inbound
+	// they need no Start-time action (no fd donation), so they are read only at
+	// Create.
+	controlForwardAddr string
+	controlSocketPath  string
 }
 
 // stdioPipes groups the host-side stdio plumbing FDs of an [Instance].
