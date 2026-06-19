@@ -1,0 +1,34 @@
+{
+  "name": "@clrk/clrk-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "routes:gen": "tsr generate",
+    "typecheck": "tsr generate && tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@apoxy/console-core": "github:apoxy-dev/apoxy#6de6a13c97a8c411f74739e2b6592b2c3d3a5775&path:console/packages/core",
+    "@carbon/icons-react": "^11.48.0",
+    "@tanstack/react-query": "^5.101.0",
+    "@tanstack/react-router": "^1.95.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@tanstack/router-cli": "^1.95.0",
+    "@tanstack/router-plugin": "^1.95.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^25.0.0",
+    "tailwindcss": "^4.0.0",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0"
+  }
+}

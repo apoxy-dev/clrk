@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/* Design tokens ship as plain CSS from core. */
+@import "@apoxy/console-core/tokens.css";
+
+/* console-core ships as source (consumed here as a SHA-pinned git dependency);
+   scan it so Tailwind emits the arbitrary utilities its primitives reference. */
+@source "../node_modules/@apoxy/console-core/src";
+
+/* Display density: the design renders at 90% zoom (CLRK app.css `body { zoom:
+   0.9 }`) so the rail, top bar, and page read at the intended scale rather than
+   ~11% oversized.
+
+   The design zooms `body` and sizes the shell in `100vh`, which isn't portable
+   (Chrome resolves `vh` against the *un-zoomed* viewport, leaving a gap), so we
+   zoom a viewport-locked root and size it in percentages instead:
+
+   - `position: fixed` + `inset: 0` pins #root to the viewport box.
+   - `zoom: 0.9` scales the subtree to 90%. Under the current, spec-compliant
+     CSS `zoom` (Chrome, Safari, Firefox), percentage lengths and the fixed
+     containing block already resolve in the *zoomed* coordinate space — so
+     `width/height: 100%` is 1/0.9 of the viewport pre-scale and lands at exactly
+     100% after the 0.9 scale.
+   - The app fills #root with `h-full`/flex and scrolls internally (the work
+     area), so the document itself never scrolls and no `vh` is needed. */
+#root {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  zoom: 0.9;
+}
+
+/* ============================================================
+   CLRK design view primitives
+   ------------------------------------------------------------
+   Ported verbatim from the CLRK Dashboard design (app.css) for
+   the bespoke feature views (Egress Gateways, …). Only the
+   page-content primitives live here — the shell (rail, topbar)
+   is console-core's chrome. Every color is a core token
+   (`--apx-*`, `--text-*`, `--border-*`), so these flip with the
+   dark theme; the design's `--fs-*` sizes map onto core's
+   `--t-*` scale.
+   ============================================================ */
+
+/* Page header — title + meta + actions */
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 24px;
+}
+.page-head-l {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+}
+.page-head-titles {
+  min-width: 0;
+}
+.page-h1-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.page-h1 {
+  font-family: var(--font-display);
+  font-size: 42px;
+  letter-spacing: -0.015em;
+  font-weight: 500;
+  margin: 0;
+  line-height: 1;
+}
+.page-head .meta {
+  font-size: var(--t-caption);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 6px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.page-head .meta .dot-sep {
+  color: var(--apx-fog);
+}
+.page-head-r {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  flex: none;
+}
+
+/* Buttons */
+.btn {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 14px;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1;
+}
+.btn--primary {
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+}
+.btn--primary:hover {
+  background: var(--apx-graphite);
+}
+.btn--secondary {
+  border-color: var(--apx-ink);
+  color: var(--apx-ink);
+  background: transparent;
+}
+.btn--secondary:hover {
+  background: var(--apx-bone);
+}
+
+/* Stat strip */
+.stat-strip {
+  display: grid;
+  grid-template-columns: repeat(var(--strip-cols, 6), 1fr);
+  gap: 0;
+  background: var(--apx-white);
+  border: 1px solid var(--border-default);
+  margin-bottom: 16px;
+}
+.stat-strip .stat {
+  padding: 14px 18px;
+  border-right: 1px solid var(--border-default);
+}
+.stat-strip .stat:last-child {
+  border-right: 0;
+}
+.stat-strip .lab {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.stat-strip .val {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  font-weight: 500;
+  margin-top: 4px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* Toolbar + filter search */
+.viz-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  background: var(--apx-white);
+  font-size: 14px;
+  flex: 1;
+  max-width: 420px;
+}
+.search > svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: block;
+  opacity: 0.5;
+}
+.search input {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.search > kbd {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Viz frame */
+.viz-frame {
+  background: var(--apx-white);
+  border: 1px solid var(--border-default);
+  position: relative;
+}
+.viz-empty-state {
+  padding: 64px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* Chips */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  border: 1px solid var(--border-default);
+  background: var(--apx-paper);
+  color: var(--text-secondary);
+}
+.chip--ink {
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+  border-color: var(--apx-ink);
+}
+
+/* Overview table */
+.ovw-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.ovw-table thead th {
+  text-align: left;
+  padding: 10px 18px;
+  background: var(--apx-mist);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border-default);
+}
+.ovw-table tbody td {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+  color: var(--text-primary);
+}
+.ovw-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.ovw-table tbody tr.gws-row {
+  cursor: pointer;
+}
+.ovw-table tbody tr.gws-row:hover {
+  background: var(--apx-bone);
+}
+.gws-pip {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--apx-leaf);
+}
+.gws-pip.warn {
+  background: var(--apx-amber);
+}
+.gws-pip.err {
+  background: var(--apx-coral);
+}

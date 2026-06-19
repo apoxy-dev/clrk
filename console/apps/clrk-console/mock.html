@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLRK Console (mock)</title>
+    <!-- Apply a stored dark choice before first paint to avoid a theme flash. -->
+    <script>
+      try {
+        if (localStorage.getItem('clrk.console.theme') === 'dark') document.documentElement.dataset.theme = 'dark'
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/mock-main.tsx"></script>
+  </body>
+</html>
