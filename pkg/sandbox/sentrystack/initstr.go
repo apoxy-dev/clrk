@@ -149,19 +149,23 @@ type InitStr struct {
 	// ControlForwardAddr is the in-sandbox "ip:port" a RESIDENT dispatcher dials
 	// to reach the host manager's control server (e.g. "127.0.0.2:80",
 	// deliberately distinct from InboundListenAddr's 127.0.0.1 data socket). When
-	// set together with ControlSocketPath, the Sentry installs a control
+	// set together with ControlHostAddr, the Sentry installs a control
 	// forwarder: an in-stack listener on this address that splices each guest
-	// connection to a host net.Dial("unix", ControlSocketPath). It is the
+	// connection to a host net.Dial("tcp", ControlHostAddr). It is the
 	// guest→host mirror of InboundListenAddr and, like inbound, tenant-neutral
 	// (acted on by the core, not by a ForwarderInstaller). It needs no fd
-	// donation — the Sentry shares the host mount+net namespaces and dials the
-	// host socket directly. Empty leaves the control plane unconfigured.
+	// donation — the Sentry shares the host net namespace and dials the manager's
+	// loopback control listener directly. Empty leaves the control plane
+	// unconfigured.
 	ControlForwardAddr string `json:"control_forward_addr,omitempty"`
 
-	// ControlSocketPath is the HOST AF_UNIX path of the manager's control server
-	// the control forwarder dials for each guest connection to ControlForwardAddr.
-	// Empty (regardless of ControlForwardAddr) disables control forwarding.
-	ControlSocketPath string `json:"control_socket_path,omitempty"`
+	// ControlHostAddr is the HOST loopback "ip:port" of the manager's control
+	// server (TCP) the control forwarder dials for each guest connection to
+	// ControlForwardAddr. TCP, not AF_UNIX: the Sentry's plugin seccomp filter
+	// only allows socket() for AF_INET/AF_INET6, so a host unix dial from inside
+	// the Sentry returns ENOSYS. Empty (regardless of ControlForwardAddr)
+	// disables control forwarding.
+	ControlHostAddr string `json:"control_host_addr,omitempty"`
 }
 
 // Encode serializes an InitStr. Empty SandboxID is allowed (lo-only).

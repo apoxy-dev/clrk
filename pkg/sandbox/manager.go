@@ -164,12 +164,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (*Instance, error) {
 		SandboxIP: sandboxIP,
 		GatewayIP: gw,
 		// Stash before buildSandboxInitStr below so the sealed initStr carries
-		// the inbound listen addr + fd index and the control addr/socket; a
+		// the inbound listen addr + fd index and the control forward/host addr; a
 		// value arriving after Create would never reach the Sentry's PreInit.
 		// Empty inbound = egress-only; empty control = no control plane.
 		inboundListenAddr:  spec.InboundListenAddr,
 		controlForwardAddr: spec.ControlForwardAddr,
-		controlSocketPath:  spec.ControlSocketPath,
+		controlHostAddr:    spec.ControlHostAddr,
 		CreatedAt:          time.Now(),
 	}
 

@@ -138,12 +138,12 @@ func TestInitStrControlRoundtrip(t *testing.T) {
 		name string
 		in   InitStr
 	}{
-		{name: "control_set", in: InitStr{ControlForwardAddr: "127.0.0.2:80", ControlSocketPath: "/run/wm/control.sock"}},
+		{name: "control_set", in: InitStr{ControlForwardAddr: "127.0.0.2:80", ControlHostAddr: "127.0.0.1:2024"}},
 		{name: "control_with_inbound", in: InitStr{
 			InboundListenAddr:  "127.0.0.1:8080",
 			InboundFDIndex:     3,
 			ControlForwardAddr: "127.0.0.2:80",
-			ControlSocketPath:  "/run/wm/control.sock",
+			ControlHostAddr:    "127.0.0.1:2024",
 		}},
 		{name: "control_unset", in: InitStr{SandboxID: "abc"}},
 	}
@@ -160,10 +160,10 @@ func TestInitStrControlRoundtrip(t *testing.T) {
 			if out.ControlForwardAddr != tc.in.ControlForwardAddr {
 				t.Errorf("ControlForwardAddr = %q, want %q", out.ControlForwardAddr, tc.in.ControlForwardAddr)
 			}
-			if out.ControlSocketPath != tc.in.ControlSocketPath {
-				t.Errorf("ControlSocketPath = %q, want %q", out.ControlSocketPath, tc.in.ControlSocketPath)
+			if out.ControlHostAddr != tc.in.ControlHostAddr {
+				t.Errorf("ControlHostAddr = %q, want %q", out.ControlHostAddr, tc.in.ControlHostAddr)
 			}
-			if tc.in.ControlForwardAddr == "" && tc.in.ControlSocketPath == "" {
+			if tc.in.ControlForwardAddr == "" && tc.in.ControlHostAddr == "" {
 				if strings.Contains(enc, "control_") {
 					t.Errorf("control-less payload unexpectedly encodes control keys: %s", enc)
 				}
