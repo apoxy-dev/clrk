@@ -144,6 +144,13 @@ func (s *ImageStore) pullAndExtract(ctx context.Context, imageRef string) (*Imag
 		Cache:      auth.NewCache(),
 		Credential: auth.StaticCredential(repo.Reference.Registry, auth.EmptyCredential),
 	}
+	// dev: pull over plain HTTP when the registry is listed in
+	// CLRK_INSECURE_REGISTRIES (host[:port], comma-separated). Lets a local
+	// `clrk`/`apoxy dev` registry on the docker network serve images without TLS;
+	// unset in production, so every pull stays HTTPS.
+	if isInsecureRegistry(repo.Reference.Registry) {
+		repo.PlainHTTP = true
+	}
 
 	// Pull manifest + all layers. The platform pin matches what the host can
 	// actually exec; bump MaxMetadataBytes well above the 4 MiB default since
@@ -366,6 +373,19 @@ func extractLayer(rootFS string, data []byte, mediaType string) error {
 		}
 	}
 	return nil
+}
+
+// isInsecureRegistry reports whether registry (host[:port]) is listed in the
+// CLRK_INSECURE_REGISTRIES env var, in which case the image store pulls from it
+// over plain HTTP. This is a dev affordance for a local registry on the docker
+// network; it is unset in production.
+func isInsecureRegistry(registry string) bool {
+	for _, r := range strings.Split(os.Getenv("CLRK_INSECURE_REGISTRIES"), ",") {
+		if r = strings.TrimSpace(r); r != "" && r == registry {
+			return true
+		}
+	}
+	return false
 }
 
 // tarFileMode extracts the 9 permission bits from a tar header mode.
