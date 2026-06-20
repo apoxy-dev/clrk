@@ -6,26 +6,12 @@
 // egress-data.ts). Styling uses the design's component classes (styles.css).
 
 import { useState } from 'react'
+import { Add, ChevronDown, Search } from '@carbon/icons-react'
 import { fmtK, type EgGatewayRow, type EgressTotals } from './egress-data'
 
-const SearchIcon = (
-  <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth={1.4} aria-hidden="true">
-    <circle cx="6" cy="6" r="4" />
-    <path d="M9 9l3 3" />
-  </svg>
-)
-
-const PlusIcon = (
-  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-    <path d="M6 1v10M1 6h10" />
-  </svg>
-)
-
-const CaretIcon = (
-  <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
-    <path d="M1.5 3l3 3 3-3" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-)
+const SearchIcon = <Search size={16} />
+const PlusIcon = <Add size={14} />
+const CaretIcon = <ChevronDown size={14} />
 
 export interface EgressListViewProps {
   rows: EgGatewayRow[]
@@ -35,12 +21,19 @@ export interface EgressListViewProps {
   onOpen?: (id: string) => void
 }
 
-export function EgressListView({ rows, totals, isLoading, onOpen }: EgressListViewProps) {
+export function EgressListView({
+  rows,
+  totals,
+  isLoading,
+  onOpen,
+}: EgressListViewProps) {
   const [q, setQ] = useState('')
 
   const filtered = rows.filter((g) => {
     if (!q) return true
-    return `${g.name} ${g.namespace} ${g.description ?? ''}`.toLowerCase().includes(q.toLowerCase())
+    return `${g.name} ${g.namespace} ${g.description ?? ''}`
+      .toLowerCase()
+      .includes(q.toLowerCase())
   })
 
   return (
@@ -94,7 +87,10 @@ export function EgressListView({ rows, totals, isLoading, onOpen }: EgressListVi
         </div>
         <div className="stat">
           <div className="lab">Degraded</div>
-          <div className="val" style={totals.degraded ? { color: 'var(--apx-coral)' } : undefined}>
+          <div
+            className="val"
+            style={totals.degraded ? { color: 'var(--apx-coral)' } : undefined}
+          >
             {totals.degraded}
           </div>
         </div>
@@ -103,7 +99,11 @@ export function EgressListView({ rows, totals, isLoading, onOpen }: EgressListVi
       <div className="viz-toolbar">
         <div className="search">
           {SearchIcon}
-          <input placeholder="Filter gateways…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input
+            placeholder="Filter gateways…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
           <kbd>/</kbd>
         </div>
       </div>
@@ -131,36 +131,91 @@ export function EgressListView({ rows, totals, isLoading, onOpen }: EgressListVi
                 onClick={onOpen ? () => onOpen(g.id) : undefined}
               >
                 <td style={{ width: 24 }}>
-                  <span className={'gws-pip' + (g.ready ? '' : ' err')} title={g.statusReason ?? (g.ready ? 'Ready' : 'Degraded')} />
+                  <span
+                    className={'gws-pip' + (g.ready ? '' : ' err')}
+                    title={g.statusReason ?? (g.ready ? 'Ready' : 'Degraded')}
+                  />
                 </td>
                 <td>
                   <div style={{ fontWeight: 500 }}>{g.name}</div>
                   {g.description && (
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: 'var(--text-muted)',
+                        fontFamily: 'var(--font-mono)',
+                        marginTop: 2,
+                      }}
+                    >
                       {g.description}
                     </div>
                   )}
                 </td>
-                <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{g.namespace}</td>
-                <td>
-                  <span className={'chip' + (g.defaultPolicy === 'deny-all' ? ' chip--ink' : '')}>{g.defaultPolicy}</span>
+                <td
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  {g.namespace}
                 </td>
-                <td style={{ fontFamily: 'var(--font-mono)' }}>{g.listenersCount}</td>
+                <td>
+                  <span
+                    className={
+                      'chip' +
+                      (g.defaultPolicy === 'deny-all' ? ' chip--ink' : '')
+                    }
+                  >
+                    {g.defaultPolicy}
+                  </span>
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)' }}>
+                  {g.listenersCount}
+                </td>
                 <td style={{ fontFamily: 'var(--font-mono)' }}>
                   {g.routesCount}
                   {g.routeKinds.length > 0 && (
-                    <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 12 }}>{g.routeKinds.join(' · ')}</span>
+                    <span
+                      style={{
+                        color: 'var(--text-muted)',
+                        marginLeft: 6,
+                        fontSize: 12,
+                      }}
+                    >
+                      {g.routeKinds.join(' · ')}
+                    </span>
                   )}
                 </td>
-                <td style={{ fontFamily: 'var(--font-mono)' }}>{g.rps == null ? '—' : fmtK(g.rps)}</td>
-                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--text-muted)' }}>{g.address}</td>
-                <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{g.age}</td>
+                <td style={{ fontFamily: 'var(--font-mono)' }}>
+                  {g.rps == null ? '—' : fmtK(g.rps)}
+                </td>
+                <td
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 14,
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  {g.address}
+                </td>
+                <td
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  {g.age}
+                </td>
               </tr>
             ))}
             {filtered.length === 0 && (
               <tr>
                 <td colSpan={9} className="viz-empty-state">
-                  {isLoading ? 'Loading egress gateways…' : q ? 'No gateways match your filter.' : 'No egress gateways yet.'}
+                  {isLoading
+                    ? 'Loading egress gateways…'
+                    : q
+                      ? 'No gateways match your filter.'
+                      : 'No egress gateways yet.'}
                 </td>
               </tr>
             )}

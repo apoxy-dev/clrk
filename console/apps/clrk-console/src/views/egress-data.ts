@@ -45,7 +45,10 @@ interface ListenerStatus {
 }
 interface GatewayObj extends K8sObject {
   spec?: { defaultPolicy?: string; listeners?: ListenerSpec[] }
-  status?: { conditions?: Array<{ type?: string; status?: string; message?: string }>; listeners?: ListenerStatus[] }
+  status?: {
+    conditions?: Array<{ type?: string; status?: string; message?: string }>
+    listeners?: ListenerStatus[]
+  }
 }
 interface ParentRef {
   name?: string
@@ -75,15 +78,30 @@ export function fmtK(n: number): string {
   return String(n)
 }
 
-function ready(gw: GatewayObj): { ready: boolean; reason?: string } {
+/** Read an EgressGateway's readiness from its conditions (Programmed, then Accepted). */
+export function readiness(gw: {
+  status?: {
+    conditions?: Array<{ type?: string; status?: string; message?: string }>
+  }
+}): {
+  ready: boolean
+  reason?: string
+} {
   const conds = gw.status?.conditions ?? []
   const programmed = conds.find((c) => c.type === 'Programmed')
-  if (programmed) return { ready: programmed.status === 'True', reason: programmed.status === 'True' ? undefined : programmed.message }
+  if (programmed)
+    return {
+      ready: programmed.status === 'True',
+      reason: programmed.status === 'True' ? undefined : programmed.message,
+    }
   const accepted = conds.find((c) => c.type === 'Accepted')
-  return { ready: accepted?.status === 'True', reason: accepted?.status === 'True' ? undefined : accepted?.message }
+  return {
+    ready: accepted?.status === 'True',
+    reason: accepted?.status === 'True' ? undefined : accepted?.message,
+  }
 }
 
-function age(creationTimestamp?: string): string {
+export function fmtAge(creationTimestamp?: string): string {
   if (!creationTimestamp) return '—'
   const ms = Date.now() - Date.parse(creationTimestamp)
   if (Number.isNaN(ms)) return '—'
@@ -96,7 +114,10 @@ function age(creationTimestamp?: string): string {
 }
 
 /** Map live EgressGateways + their attaching routes to table rows + strip totals. */
-export function mapEgress(gateways: K8sObject[], routes: K8sObject[]): { rows: EgGatewayRow[]; totals: EgressTotals } {
+export function mapEgress(
+  gateways: K8sObject[],
+  routes: K8sObject[],
+): { rows: EgGatewayRow[]; totals: EgressTotals } {
   const byGateway = new Map<string, RouteObj[]>()
   for (const r of routes as RouteObj[]) {
     for (const p of r.spec?.parentRefs ?? []) {
@@ -112,8 +133,10 @@ export function mapEgress(gateways: K8sObject[], routes: K8sObject[]): { rows: E
     const namespace = gw.metadata.namespace ?? 'default'
     const attached = byGateway.get(name) ?? []
     const statusListeners = gw.status?.listeners ?? []
-    const routesCount = statusListeners.reduce((s, l) => s + (l.attachedRoutes ?? 0), 0) || attached.length
-    const r = ready(gw)
+    const routesCount =
+      statusListeners.reduce((s, l) => s + (l.attachedRoutes ?? 0), 0) ||
+      attached.length
+    const r = readiness(gw)
     const rpsRaw = gw.metadata.annotations?.['clrk.apoxy.dev/demo-rps']
     return {
       id: name,
@@ -124,7 +147,7 @@ export function mapEgress(gateways: K8sObject[], routes: K8sObject[]): { rows: E
       ready: r.ready,
       statusReason: r.reason,
       address: `${name}.${namespace}.eg.clrk.local`,
-      age: age(gw.metadata.creationTimestamp),
+      age: fmtAge(gw.metadata.creationTimestamp),
       rps: rpsRaw != null ? Number(rpsRaw) : null,
       listenersCount: gw.spec?.listeners?.length ?? 0,
       routesCount,
@@ -132,7 +155,8 @@ export function mapEgress(gateways: K8sObject[], routes: K8sObject[]): { rows: E
     }
   })
 
-  const kindCount = (k: string) => (routes as RouteObj[]).filter((r) => r.kind === k).length
+  const kindCount = (k: string) =>
+    (routes as RouteObj[]).filter((r) => r.kind === k).length
   const totals: EgressTotals = {
     gateways: rows.length,
     listeners: rows.reduce((s, g) => s + g.listenersCount, 0),

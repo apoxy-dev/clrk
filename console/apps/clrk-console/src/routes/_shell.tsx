@@ -10,7 +10,12 @@
 // is an APO-785 polish for the clrk feature views.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createFileRoute, Outlet, useLocation, useRouter } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  Outlet,
+  useLocation,
+  useRouter,
+} from '@tanstack/react-router'
 import {
   AppShell,
   Breadcrumbs,
@@ -29,20 +34,41 @@ import {
   useCommandKeyBindings,
   useCreate,
   useDiscovery,
+  useK8sList,
   useKeyboardScope,
   type Command,
+  type GVR,
 } from '@apoxy/console-core'
-import { SidePanelClose, SidePanelOpen } from '@carbon/icons-react'
+import {
+  Asleep,
+  Document,
+  Light,
+  Notification,
+  SidePanelClose,
+  SidePanelOpen,
+} from '@carbon/icons-react'
 import { registry } from '../registry'
+import wordmark from '../assets/apoxy-wordmark.svg'
 import { RouterLink } from '../router-link'
 import { rootCrumbLabel } from '../project-context'
-import { applyTheme, readTheme, storeTheme, THEME_KEY, type Theme } from '../theme'
+import {
+  applyTheme,
+  readTheme,
+  storeTheme,
+  THEME_KEY,
+  type Theme,
+} from '../theme'
 
 const DOCS_URL = 'https://docs.apoxy.dev'
+
 // One prompt shared by the top-bar trigger and the palette input.
 const SEARCH_PLACEHOLDER = 'Search resources, actions…'
 
 export const Route = createFileRoute('/_shell')({ component: Shell })
+
+// A never-served GVR placeholder so the breadcrumb sibling query can be declared
+// unconditionally (rules of hooks) and simply disabled off detail views.
+const EMPTY_GVR: GVR = { group: '', version: '', resource: '' }
 
 const COLLAPSE_KEY = 'clrk.console.sidebar-collapsed'
 function readCollapsed(): boolean {
@@ -101,9 +127,36 @@ function ShellBody() {
 
   const { isServed } = useDiscovery()
   const model = useMemo(() => buildSidebar(registry, { isServed }), [isServed])
+
+  // Breadcrumb object-switcher: on a detail view (slug + name) offer a dropdown
+  // of sibling objects of the same kind. The list is only queried there; lists
+  // and the overview pass `enabled: false`, so the leaf crumb stays plain.
+  const siblings = useK8sList(entry?.gvr ?? EMPTY_GVR, {
+    enabled: Boolean(entry && name),
+  })
+  const leafSwitch = useMemo(() => {
+    if (!entry || !name) return undefined
+    const options = (siblings.data?.items ?? [])
+      .map((o) => o.metadata?.name)
+      .filter((n): n is string => Boolean(n))
+      .map((n) => ({ id: n, label: n }))
+    if (options.length < 2) return undefined
+    return {
+      value: name,
+      options,
+      ariaLabel: `Switch ${entry.kind}`,
+      onSelect: (id: string) => {
+        if (id !== name) navigate(`/${entry.path}/${id}`)
+      },
+    }
+  }, [entry, name, siblings.data, navigate])
+
   // The root crumb names the deployment: the project slug, or `localhost` when
   // self-hosted — not a fixed brand label.
-  const crumbs = buildBreadcrumbs(entry, name, { root: { label: rootCrumbLabel, to: '/' } })
+  const crumbs = buildBreadcrumbs(entry, name, {
+    root: { label: rootCrumbLabel, to: '/' },
+    leafSwitch,
+  })
   const activePath = slug ? `/${slug}` : '/'
 
   // ⌘K command palette, fed by the registry (+ an Overview entry). `onCreate`
@@ -112,8 +165,19 @@ function ShellBody() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const commands = useMemo<Command[]>(
     () => [
-      { id: 'home', title: 'Overview', group: 'Go to', keywords: ['home', 'dashboard'], keys: 'g h', run: () => navigate('/') },
-      ...buildResourceCommands(registry, { navigate, isServed, onCreate: openCreate }),
+      {
+        id: 'home',
+        title: 'Overview',
+        group: 'Go to',
+        keywords: ['home', 'dashboard'],
+        keys: 'g h',
+        run: () => navigate('/'),
+      },
+      ...buildResourceCommands(registry, {
+        navigate,
+        isServed,
+        onCreate: openCreate,
+      }),
     ],
     [navigate, isServed, openCreate],
   )
@@ -136,7 +200,13 @@ function ShellBody() {
             activePath={activePath}
             collapsed={collapsed}
             onToggleCollapsed={toggleCollapsed}
-            toggleIcon={collapsed ? <SidePanelOpen size={16} /> : <SidePanelClose size={16} />}
+            toggleIcon={
+              collapsed ? (
+                <SidePanelOpen size={16} />
+              ) : (
+                <SidePanelClose size={16} />
+              )
+            }
             brand={<Brand />}
             footer={<UserFooter collapsed={collapsed} />}
           />
@@ -146,7 +216,10 @@ function ShellBody() {
             breadcrumbs={<Breadcrumbs items={crumbs} />}
             actions={
               <>
-                <CommandButton placeholder={SEARCH_PLACEHOLDER} onOpen={() => setPaletteOpen(true)} />
+                <CommandButton
+                  placeholder={SEARCH_PLACEHOLDER}
+                  onOpen={() => setPaletteOpen(true)}
+                />
                 <IconButton label="Documentation" href={DOCS_URL}>
                   {DocsIcon}
                 </IconButton>
@@ -173,44 +246,28 @@ function ShellBody() {
 }
 
 function Brand() {
-  // A text wordmark — "clrk console" — on the dark rail. (The design's art-based
-  // wordmark can replace this once a clrk asset exists.)
+  // The Apoxy wordmark (near-black art) inverted to read white on the dark rail,
+  // with the product suffix — "apoxy CLRK" — matching the CLRK dashboard design.
   return (
     <>
-      <span className="font-mono text-[length:var(--t-body-sm)] font-semibold lowercase tracking-[0.04em] text-[color:var(--rail-text)]">
-        clrk
-      </span>
+      <img
+        src={wordmark}
+        alt="Apoxy"
+        className="h-[20px] w-auto [filter:invert(1)_brightness(2)]"
+      />
       <span className="font-mono text-[length:var(--t-micro)] uppercase tracking-[0.14em] text-[color:var(--rail-text-dim)]">
-        console
+        clrk
       </span>
     </>
   )
 }
 
-// Sun / moon glyphs for the theme toggle, hand-rolled so the core IconButton
-// stays icon-library-agnostic.
-const SunIcon = (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-    <circle cx="8" cy="8" r="3" />
-    <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" />
-  </svg>
-)
-const MoonIcon = (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true">
-    <path d="M13.2 9.6A5.5 5.5 0 116.4 2.8a4.4 4.4 0 006.8 6.8z" />
-  </svg>
-)
-const DocsIcon = (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-    <path d="M3 2h7l3 3v9H3z" />
-    <path d="M10 2v3h3M5 8h6M5 11h4" />
-  </svg>
-)
-const BellIcon = (
-  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-    <path d="M4 6a4 4 0 018 0v3l1 2H3l1-2zM6 13a2 2 0 004 0" />
-  </svg>
-)
+// Topbar glyphs — IBM Carbon, matching the rail icons and the CLRK dashboard
+// design. (Sun/moon swap with the theme; docs + notifications are static.)
+const SunIcon = <Light size={16} />
+const MoonIcon = <Asleep size={16} />
+const DocsIcon = <Document size={16} />
+const BellIcon = <Notification size={16} />
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(readTheme)
@@ -234,7 +291,11 @@ function ThemeToggle() {
     })
   }
   return (
-    <IconButton label={dark ? 'Switch to light mode' : 'Switch to dark mode'} pressed={dark} onClick={toggle}>
+    <IconButton
+      label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+      pressed={dark}
+      onClick={toggle}
+    >
       {dark ? SunIcon : MoonIcon}
     </IconButton>
   )
@@ -242,14 +303,23 @@ function ThemeToggle() {
 
 function UserFooter({ collapsed }: { collapsed: boolean }) {
   return (
-    <div className={cn('flex items-center', collapsed ? 'justify-center gap-0' : 'gap-[10px]')}>
+    <div
+      className={cn(
+        'flex items-center',
+        collapsed ? 'justify-center gap-0' : 'gap-[10px]',
+      )}
+    >
       <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-[var(--rail-text)] text-[length:var(--t-overline)] font-semibold text-[color:var(--rail-bg)]">
         U
       </span>
       {!collapsed && (
         <div className="min-w-0">
-          <div className="truncate text-[length:var(--t-body-sm)] font-medium text-[color:var(--rail-text)]">Signed in</div>
-          <div className="truncate font-mono text-[length:var(--t-overline)] text-[color:var(--rail-text-dim)]">console</div>
+          <div className="truncate text-[length:var(--t-body-sm)] font-medium text-[color:var(--rail-text)]">
+            Signed in
+          </div>
+          <div className="truncate font-mono text-[length:var(--t-overline)] text-[color:var(--rail-text-dim)]">
+            console
+          </div>
         </div>
       )}
     </div>
