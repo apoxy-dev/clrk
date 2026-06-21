@@ -8,9 +8,10 @@
 
 import { useMemo } from 'react'
 import { createFileRoute, useRouter } from '@tanstack/react-router'
-import { useK8sList, type GVR, type K8sObject } from '@apoxy/console-core'
+import { useCan, useCreate, useK8sList, type GVR, type K8sObject } from '@apoxy/console-core'
 import { EgressListView } from '../views/egress-list'
 import { mapEgress } from '../views/egress-data'
+import { registry } from '../registry'
 
 const v1alpha1 = (resource: string): GVR => ({ group: 'clrk.apoxy.dev', version: 'v1alpha1', resource })
 const EG_GVR = v1alpha1('egressgateways')
@@ -24,6 +25,11 @@ export const Route = createFileRoute('/_shell/egress')({ component: EgressPage }
 
 function EgressPage() {
   const router = useRouter()
+  const create = useCreate()
+  const entry = registry.byPath('egress')
+  // Gate the "New gateway" affordance on a create SelfSubjectAccessReview, as core's
+  // generic ResourceListView does — don't show it to a viewer who can't create.
+  const canCreate = useCan('create', EG_GVR, { enabled: !!create && !!entry })
   const gateways = useK8sList(EG_GVR)
   const mcp = useK8sList(MCP_GVR)
   const ai = useK8sList(AI_GVR)
@@ -50,6 +56,7 @@ function EgressPage() {
       totals={totals}
       isLoading={gateways.isLoading}
       onOpen={(id) => void router.navigate({ to: `/egress/${id}` as never })}
+      onNew={create && entry && canCreate.allowed ? () => create.openCreate(entry) : undefined}
     />
   )
 }

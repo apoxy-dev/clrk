@@ -38,6 +38,13 @@ describe('clrk registry', () => {
     expect(registry.byPath('daemonagents')?.schema).toBeDefined()
   })
 
+  it('gives EgressGateway a create/edit wizard and its tray schema', () => {
+    const eg = registry.byPath('egress')
+    expect(eg?.createWizard).toBeDefined()
+    expect(eg?.schema).toBeDefined()
+    expect(eg?.yamlEditable).toBe(true)
+  })
+
   it('classifies clrk phases, never green on a terminal failure', () => {
     expect(phaseVariant('Running')).toBe('success')
     expect(phaseVariant('Succeeded')).toBe('success')

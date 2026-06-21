@@ -19,6 +19,8 @@ export interface EgressListViewProps {
   isLoading?: boolean
   /** Open a gateway's detail; rows are non-interactive when omitted. */
   onOpen?: (id: string) => void
+  /** Open the new-gateway wizard; the "New gateway" action is hidden when omitted. */
+  onNew?: () => void
 }
 
 export function EgressListView({
@@ -26,6 +28,7 @@ export function EgressListView({
   totals,
   isLoading,
   onOpen,
+  onNew,
 }: EgressListViewProps) {
   const [q, setQ] = useState('')
 
@@ -57,10 +60,12 @@ export function EgressListView({
           <button type="button" className="btn btn--secondary">
             YAML {CaretIcon}
           </button>
-          <button type="button" className="btn btn--primary">
-            {PlusIcon}
-            New gateway
-          </button>
+          {onNew && (
+            <button type="button" className="btn btn--primary" onClick={onNew}>
+              {PlusIcon}
+              New gateway
+            </button>
+          )}
         </div>
       </div>
 

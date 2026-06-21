@@ -15,6 +15,7 @@ import {
 import { Activity, Application, Bot, Gateway } from '@carbon/icons-react'
 import type { ReactNode } from 'react'
 import { schemaFor } from './schema/schema-for'
+import { EgressGatewayWizard } from './views/egress-gateway-wizard'
 
 /** Objects that carry a coarse status phase we can badge (plus the free-form
  *  status/spec fields the columns read). */
@@ -152,7 +153,9 @@ export const registry = createRegistry([
   // Egress Gateways surface as a bespoke list (`/_shell/egress` shadows the
   // generic splat for `/egress`), but the kind is still registered here so the
   // rail item, breadcrumb, and ⌘K "Go to" all derive from the registry. The
-  // generic `columns` below are unused by the shadowing list view.
+  // generic `columns` below are unused by the shadowing list view. The bespoke
+  // wizard powers both create (list "New gateway" + ⌘K) and edit (detail "Edit"
+  // + the YAML tray's Edit), and the schema drives its tray validation.
   defineResource<Phased>({
     kind: 'EgressGateway',
     displayName: 'Egress Gateways',
@@ -164,6 +167,8 @@ export const registry = createRegistry([
     icon: egressIcon,
     shortcut: 'e',
     yamlEditable: true,
+    schema: schemaFor('clrk.apoxy.dev', 'v1alpha1', 'EgressGateway'),
+    createWizard: EgressGatewayWizard,
     columns: [nameCol, statusCol, createdCol],
   }),
   defineResource<Phased>({
