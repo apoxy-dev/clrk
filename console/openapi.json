@@ -507,7 +507,7 @@
         }
       },
       "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.BackendSpec": {
-        "description": "BackendSpec defines the desired state of a Backend.\n\nExactly one destination is set per the Type discriminator: Upstream when Type=Upstream, InferencePoolRef when Type=InferencePool. The API server does not enforce this exclusivity (clrk does not use CEL validation markers); the AIProviderRoute status controller surfaces a violation as ResolvedRefs=False and ext_proc refuses an under-specified backend.\n\nCredentials are NOT declared here. A Backend names no secret and holds no key: the credential injected when this backend is selected comes from a CredentialInjectionPolicy whose parentRef targets the route with a sectionName equal to this Backend's ref name. This keeps the architectural invariant that keys live only in policy + Secret, never in a routing object.",
+        "description": "BackendSpec defines the desired state of a Backend.\n\nExactly one destination is set per the Type discriminator: Upstream when Type=Upstream, InferencePoolRef when Type=InferencePool. The API server does not enforce this exclusivity (clrk does not use CEL validation markers); the AIProviderRoute status controller surfaces a violation as ResolvedRefs=False and ext_proc refuses an under-specified backend.\n\nCredentials are NOT declared here. A Backend names no secret and holds no key: the credential injected when this backend is selected comes from a CredentialInjectionPolicy whose targetRef names the route with a sectionName equal to this Backend's ref name. This keeps the architectural invariant that keys live only in policy + Secret, never in a routing object.",
         "type": "object",
         "required": [
           "type",
@@ -639,6 +639,10 @@
           "spec": {
             "default": {},
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionSpec"
+          },
+          "status": {
+            "default": {},
+            "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionPolicyStatus"
           }
         }
       },
@@ -670,11 +674,28 @@
           }
         }
       },
+      "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionPolicyStatus": {
+        "description": "CredentialInjectionPolicyStatus reports attachment acceptance for a CredentialInjectionPolicy. It embeds the Gateway API GEP-2649 PolicyStatus so every clrk policy reports through one uniform shape: one PolicyAncestorStatus per resolved attachment, carrying Accepted / Conflicted conditions.",
+        "type": "object",
+        "required": [
+          "ancestors"
+        ],
+        "properties": {
+          "ancestors": {
+            "description": "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.PolicyAncestorStatus"
+            }
+          }
+        }
+      },
       "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionSpec": {
         "description": "CredentialInjectionSpec defines the desired state of a CredentialInjectionPolicy.",
         "type": "object",
         "required": [
-          "parentRefs",
+          "targetRefs",
           "secretRef",
           "target"
         ],
@@ -682,14 +703,6 @@
           "headerName": {
             "description": "HeaderName — required when target=Header.",
             "type": "string"
-          },
-          "parentRefs": {
-            "description": "ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or EgressGateway listeners. The proxy applies the credential to traffic matching the referenced parent.\n\nMatch semantics by parent kind:\n  - AIProviderRoute: applies when the request matches that APR's\n    rules (provider + endpoint + model gates).\n  - MCPRoute: applies when the request matches that route\n    (no-op until MCPRoute consumption ships).\n  - EgressGateway: catch-all for any traffic on the gateway that\n    no narrower policy claimed.",
-            "type": "array",
-            "items": {
-              "default": {},
-              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1.ParentReference"
-            }
           },
           "providerAuth": {
             "description": "ProviderAuth — required when target=ProviderAuth.",
@@ -712,6 +725,14 @@
             "description": "Target defines where to inject the credential.",
             "type": "string",
             "default": ""
+          },
+          "targetRefs": {
+            "description": "TargetRefs attaches this policy DOWN onto AIProviderRoute, MCPRoute, or EgressGateway targets (GEP-2648 Direct Policy Attachment). The proxy applies the credential to traffic matching the referenced target. Plural so one policy can cover several targets; LocalPolicyTargetReferenceWithSectionName is same-namespace by construction (cross-namespace attachment requires a ReferenceGrant).\n\nMatch semantics by target kind:\n  - AIProviderRoute: applies when the request matches that APR's\n    rules (provider + endpoint + model gates). A sectionName names a\n    specific BackendRef and gates injection to post-selection of that\n    backend; an empty sectionName injects route-wide.\n  - MCPRoute: applies when the request matches that route\n    (no-op until MCPRoute consumption ships).\n  - EgressGateway: catch-all for any traffic on the gateway that\n    no narrower policy claimed.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            }
           }
         }
       },
@@ -881,7 +902,7 @@
         }
       },
       "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.EgressDenyPolicy": {
-        "description": "EgressDenyPolicy attaches to any route via targetRef to invert it from \"allow\" to \"deny\".",
+        "description": "EgressDenyPolicy attaches to routes via targetRefs to invert them from \"allow\" to \"deny\".",
         "type": "object",
         "required": [
           "spec"
@@ -902,6 +923,10 @@
           "spec": {
             "default": {},
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.EgressDenyPolicySpec"
+          },
+          "status": {
+            "default": {},
+            "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.EgressDenyPolicyStatus"
           }
         }
       },
@@ -937,17 +962,37 @@
         "description": "EgressDenyPolicySpec defines the desired state of an EgressDenyPolicy.",
         "type": "object",
         "required": [
-          "targetRef"
+          "targetRefs"
         ],
         "properties": {
           "denyResponse": {
             "description": "DenyResponse configures the rejection returned to the caller.",
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.DenyResponseConfig"
           },
-          "targetRef": {
-            "description": "TargetRef identifies the route this policy attaches to.",
-            "default": {},
-            "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReference"
+          "targetRefs": {
+            "description": "TargetRefs identifies the routes this policy attaches to. Plural (GEP-2648 Direct Policy Attachment) so one policy can deny several routes; LocalPolicyTargetReferenceWithSectionName is same-namespace by construction and section-scopable (an empty sectionName denies the whole route).",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            }
+          }
+        }
+      },
+      "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.EgressDenyPolicyStatus": {
+        "description": "EgressDenyPolicyStatus reports attachment acceptance for an EgressDenyPolicy via the GEP-2649 PolicyStatus shape shared by every clrk policy.",
+        "type": "object",
+        "required": [
+          "ancestors"
+        ],
+        "properties": {
+          "ancestors": {
+            "description": "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.PolicyAncestorStatus"
+            }
           }
         }
       },
@@ -1373,6 +1418,10 @@
           "spec": {
             "default": {},
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackRoutingPolicySpec"
+          },
+          "status": {
+            "default": {},
+            "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackRoutingPolicyStatus"
           }
         }
       },
@@ -1408,24 +1457,41 @@
         "description": "FallbackRoutingPolicySpec defines the desired state of a FallbackRoutingPolicy.",
         "type": "object",
         "required": [
-          "parentRefs"
+          "targetRefs"
         ],
         "properties": {
           "ejection": {
             "description": "Ejection tunes passive outlier ejection of failing backends. Nil applies the per-field defaults documented on FallbackEjection.",
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackEjection"
           },
-          "parentRefs": {
-            "description": "ParentRefs attaches this policy to AIProviderRoutes. Attachment changes how the referenced routes' rules distribute traffic across their BackendRefs: without a policy, BackendRef.Weight splits traffic and each request gets a single attempt; with one, BackendRefs list ORDER becomes the fallback priority — the first viable backend serves all traffic while healthy, and a failed attempt retries against the next, walking the list in order (weights are ignored). Whole-route attachment only for now; sectionName scoping may follow.",
-            "type": "array",
-            "items": {
-              "default": {},
-              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1.ParentReference"
-            }
-          },
           "retry": {
             "description": "Retry tunes the retry behavior. Nil applies the per-field defaults documented on FallbackRetry.",
             "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackRetry"
+          },
+          "targetRefs": {
+            "description": "TargetRefs attaches this policy DOWN onto AIProviderRoutes (GEP-2648 Direct Policy Attachment, same-namespace by construction). Attachment changes how the referenced routes' rules distribute traffic across their BackendRefs: without a policy, BackendRef.Weight splits traffic and each request gets a single attempt; with one, BackendRefs list ORDER becomes the fallback priority — the first viable backend serves all traffic while healthy, and a failed attempt retries against the next, walking the list in order (weights are ignored). Whole-route attachment only: AIProviderRoute rules are unnamed, so a sectionName has no section to bind to and is rejected at admission until per-rule scoping is designed.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            }
+          }
+        }
+      },
+      "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackRoutingPolicyStatus": {
+        "description": "FallbackRoutingPolicyStatus reports attachment acceptance for a FallbackRoutingPolicy via the GEP-2649 PolicyStatus shape shared by every clrk policy.",
+        "type": "object",
+        "required": [
+          "ancestors"
+        ],
+        "properties": {
+          "ancestors": {
+            "description": "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/io.k8s.sigs.gateway-api.apis.v1alpha2.PolicyAncestorStatus"
+            }
           }
         }
       },
@@ -2049,9 +2115,11 @@
         ],
         "properties": {
           "region": {
+            "description": "Region scopes the AWSv4 signature. When unset, the region is derived from the target hostname at signing time (bedrock-runtime.\u003cregion\u003e.amazonaws.com) — the derived value is the only one guaranteed to agree with the endpoint actually hit when one policy covers Backends in multiple regions.",
             "type": "string"
           },
           "service": {
+            "description": "Service is the AWSv4 credential-scope service name. Defaults to \"bedrock\".",
             "type": "string"
           },
           "type": {

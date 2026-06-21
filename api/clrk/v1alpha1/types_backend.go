@@ -124,7 +124,7 @@ type BackendBodyMutation struct {
 //
 // Credentials are NOT declared here. A Backend names no secret and holds
 // no key: the credential injected when this backend is selected comes from
-// a CredentialInjectionPolicy whose parentRef targets the route with a
+// a CredentialInjectionPolicy whose targetRef names the route with a
 // sectionName equal to this Backend's ref name. This keeps the
 // architectural invariant that keys live only in policy + Secret, never in
 // a routing object.

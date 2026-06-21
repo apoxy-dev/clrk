@@ -1421,7 +1421,7 @@ func schema_clrk_api_clrk_v1alpha1_BackendSpec(ref common.ReferenceCallback) com
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "BackendSpec defines the desired state of a Backend.\n\nExactly one destination is set per the Type discriminator: Upstream when Type=Upstream, InferencePoolRef when Type=InferencePool. The API server does not enforce this exclusivity (clrk does not use CEL validation markers); the AIProviderRoute status controller surfaces a violation as ResolvedRefs=False and ext_proc refuses an under-specified backend.\n\nCredentials are NOT declared here. A Backend names no secret and holds no key: the credential injected when this backend is selected comes from a CredentialInjectionPolicy whose parentRef targets the route with a sectionName equal to this Backend's ref name. This keeps the architectural invariant that keys live only in policy + Secret, never in a routing object.",
+				Description: "BackendSpec defines the desired state of a Backend.\n\nExactly one destination is set per the Type discriminator: Upstream when Type=Upstream, InferencePoolRef when Type=InferencePool. The API server does not enforce this exclusivity (clrk does not use CEL validation markers); the AIProviderRoute status controller surfaces a violation as ResolvedRefs=False and ext_proc refuses an under-specified backend.\n\nCredentials are NOT declared here. A Backend names no secret and holds no key: the credential injected when this backend is selected comes from a CredentialInjectionPolicy whose targetRef names the route with a sectionName equal to this Backend's ref name. This keeps the architectural invariant that keys live only in policy + Secret, never in a routing object.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"type": {
@@ -1736,15 +1736,15 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref common.ReferenceC
 				Description: "CredentialInjectionSpec defines the desired state of a CredentialInjectionPolicy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"parentRefs": {
+					"targetRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or EgressGateway listeners. The proxy applies the credential to traffic matching the referenced parent.\n\nMatch semantics by parent kind:\n  - AIProviderRoute: applies when the request matches that APR's\n    rules (provider + endpoint + model gates).\n  - MCPRoute: applies when the request matches that route\n    (no-op until MCPRoute consumption ships).\n  - EgressGateway: catch-all for any traffic on the gateway that\n    no narrower policy claimed.",
+							Description: "TargetRefs attaches this policy DOWN onto AIProviderRoute, MCPRoute, or EgressGateway targets (GEP-2648 Direct Policy Attachment). The proxy applies the credential to traffic matching the referenced target. Plural so one policy can cover several targets; LocalPolicyTargetReferenceWithSectionName is same-namespace by construction (cross-namespace attachment requires a ReferenceGrant).\n\nMatch semantics by target kind:\n  - AIProviderRoute: applies when the request matches that APR's\n    rules (provider + endpoint + model gates). A sectionName names a\n    specific BackendRef and gates injection to post-selection of that\n    backend; an empty sectionName injects route-wide.\n  - MCPRoute: applies when the request matches that route\n    (no-op until MCPRoute consumption ships).\n  - EgressGateway: catch-all for any traffic on the gateway that\n    no narrower policy claimed.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Default: map[string]interface{}{},
-										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1.ParentReference"),
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"),
 									},
 								},
 							},
@@ -1793,11 +1793,11 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref common.ReferenceC
 						},
 					},
 				},
-				Required: []string{"parentRefs", "secretRef", "target"},
+				Required: []string{"targetRefs", "secretRef", "target"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig", "sigs.k8s.io/gateway-api/apis/v1.ParentReference", "sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig", "sigs.k8s.io/gateway-api/apis/v1.SecretObjectReference", "sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"},
 	}
 }
 
@@ -3051,15 +3051,15 @@ func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref common.Referenc
 				Description: "FallbackRoutingPolicySpec defines the desired state of a FallbackRoutingPolicy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"parentRefs": {
+					"targetRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ParentRefs attaches this policy to AIProviderRoutes. Attachment changes how the referenced routes' rules distribute traffic across their BackendRefs: without a policy, BackendRef.Weight splits traffic and each request gets a single attempt; with one, BackendRefs list ORDER becomes the fallback priority — the first viable backend serves all traffic while healthy, and a failed attempt retries against the next, walking the list in order (weights are ignored). Whole-route attachment only for now; sectionName scoping may follow.",
+							Description: "TargetRefs attaches this policy DOWN onto AIProviderRoutes (GEP-2648 Direct Policy Attachment, same-namespace by construction). Attachment changes how the referenced routes' rules distribute traffic across their BackendRefs: without a policy, BackendRef.Weight splits traffic and each request gets a single attempt; with one, BackendRefs list ORDER becomes the fallback priority — the first viable backend serves all traffic while healthy, and a failed attempt retries against the next, walking the list in order (weights are ignored). Whole-route attachment only: AIProviderRoute rules are unnamed, so a sectionName has no section to bind to and is rejected at admission until per-rule scoping is designed.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Default: map[string]interface{}{},
-										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1.ParentReference"),
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"),
 									},
 								},
 							},
@@ -3078,11 +3078,11 @@ func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref common.Referenc
 						},
 					},
 				},
-				Required: []string{"parentRefs"},
+				Required: []string{"targetRefs"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1.ParentReference"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"},
 	}
 }
 
@@ -22167,7 +22167,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_BackendRef(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.\n\n<gateway:experimental:description>\n\nWhen the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.\n\nImplementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.\n\nIf a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.\n\nIf a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the \"ResolvedRefs\" condition to \"False\" with the \"UnsupportedProtocol\" reason.\n\n</gateway:experimental:description>\n\nNote that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.",
+				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {
@@ -24787,7 +24787,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_ParentReference(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with \"Core\" support:\n\n* Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)\n\nThis API may be extended in the future to support additional kinds of parent resources.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
+				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with \"Core\" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.\n\nNote that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {

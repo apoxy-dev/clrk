@@ -419,29 +419,28 @@ func (p *FallbackRoutingPolicy) Validate(_ context.Context) field.ErrorList {
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
 
-	if len(p.Spec.ParentRefs) == 0 {
-		errs = append(errs, field.Required(specPath.Child("parentRefs"), "at least one parentRef is required"))
+	if len(p.Spec.TargetRefs) == 0 {
+		errs = append(errs, field.Required(specPath.Child("targetRefs"), "at least one targetRef is required"))
 	}
-	for i, ref := range p.Spec.ParentRefs {
-		rp := specPath.Child("parentRefs").Index(i)
+	for i, ref := range p.Spec.TargetRefs {
+		rp := specPath.Child("targetRefs").Index(i)
 		// Attachment (llmroute.PolicyAttachesTo) joins on an explicit
-		// clrk.apoxy.dev/AIProviderRoute spelling plus a name, so any
-		// ref missing one of those is permanently inert. Reject it at
-		// admission instead of letting it silently never attach: only
-		// AIProviderRoute parents carry backendRef candidate sets, so
-		// nothing else can ever gain fallback semantics.
-		if ref.Kind == nil || *ref.Kind == "" {
-			errs = append(errs, field.Required(rp.Child("kind"), "kind must be AIProviderRoute"))
-		} else if string(*ref.Kind) != "AIProviderRoute" {
-			errs = append(errs, field.NotSupported(rp.Child("kind"), string(*ref.Kind), []string{"AIProviderRoute"}))
-		}
-		if ref.Group == nil || *ref.Group == "" {
-			errs = append(errs, field.Required(rp.Child("group"), "group must be "+SchemeGroupVersion.Group))
-		} else if string(*ref.Group) != SchemeGroupVersion.Group {
-			errs = append(errs, field.NotSupported(rp.Child("group"), string(*ref.Group), []string{SchemeGroupVersion.Group}))
-		}
-		if ref.Name == "" {
-			errs = append(errs, field.Required(rp.Child("name"), "name of the parent AIProviderRoute is required"))
+		// clrk.apoxy.dev/AIProviderRoute spelling plus a name, so any ref
+		// missing one of those is permanently inert. Reject it at admission
+		// instead of letting it silently never attach: only AIProviderRoute
+		// targets carry backendRef candidate sets, so nothing else can ever
+		// gain fallback semantics.
+		errs = append(errs, validateClrkRef(string(ref.Group), string(ref.Kind), string(ref.Name),
+			[]string{"AIProviderRoute"}, rp)...)
+		// AIProviderRoute rules are unnamed, so a sectionName cannot resolve
+		// to a section and would silently never scope. Reject it until
+		// per-rule scoping is designed (whole-route attachment only). Only
+		// flagged once the kind is the valid AIProviderRoute — otherwise the
+		// kind error above already covers the ref and a second sectionName
+		// error is just noise.
+		if string(ref.Kind) == "AIProviderRoute" && ref.SectionName != nil && *ref.SectionName != "" {
+			errs = append(errs, field.Invalid(rp.Child("sectionName"), string(*ref.SectionName),
+				"sectionName scoping is not supported for FallbackRoutingPolicy (AIProviderRoute rules are unnamed)"))
 		}
 	}
 
@@ -483,28 +482,27 @@ func (p *CredentialInjectionPolicy) Validate(_ context.Context) field.ErrorList 
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
 
-	if len(p.Spec.ParentRefs) == 0 {
-		errs = append(errs, field.Required(specPath.Child("parentRefs"), "at least one parentRef is required"))
+	if len(p.Spec.TargetRefs) == 0 {
+		errs = append(errs, field.Required(specPath.Child("targetRefs"), "at least one targetRef is required"))
 	}
 	supportedKinds := []string{"AIProviderRoute", "MCPRoute", "EgressGateway"}
-	for i, ref := range p.Spec.ParentRefs {
-		rp := specPath.Child("parentRefs").Index(i)
+	for i, ref := range p.Spec.TargetRefs {
+		rp := specPath.Child("targetRefs").Index(i)
 		// The credential table joins on an explicit clrk.apoxy.dev
 		// group + kind + name spelling (buildCredTable); a ref missing
 		// one is permanently inert. Reject at admission instead of
 		// letting the policy silently never inject.
-		if ref.Kind == nil || *ref.Kind == "" {
-			errs = append(errs, field.Required(rp.Child("kind"), "kind is required"))
-		} else if !slices.Contains(supportedKinds, string(*ref.Kind)) {
-			errs = append(errs, field.NotSupported(rp.Child("kind"), string(*ref.Kind), supportedKinds))
-		}
-		if ref.Group == nil || *ref.Group == "" {
-			errs = append(errs, field.Required(rp.Child("group"), "group must be "+SchemeGroupVersion.Group))
-		} else if string(*ref.Group) != SchemeGroupVersion.Group {
-			errs = append(errs, field.NotSupported(rp.Child("group"), string(*ref.Group), []string{SchemeGroupVersion.Group}))
-		}
-		if ref.Name == "" {
-			errs = append(errs, field.Required(rp.Child("name"), "name of the parent resource is required"))
+		errs = append(errs, validateClrkRef(string(ref.Group), string(ref.Kind), string(ref.Name),
+			supportedKinds, rp)...)
+		// A sectionName names a BackendRef on an AIProviderRoute target and
+		// gates injection to that backend; on a supported-but-non-APR kind
+		// (EgressGateway/MCPRoute) it has nothing to bind to and would
+		// silently never scope. Only flagged for a recognized non-APR kind —
+		// an unsupported kind is already covered by the kind error above.
+		if slices.Contains(supportedKinds, string(ref.Kind)) && string(ref.Kind) != "AIProviderRoute" &&
+			ref.SectionName != nil && *ref.SectionName != "" {
+			errs = append(errs, field.Invalid(rp.Child("sectionName"), string(*ref.SectionName),
+				"sectionName is only valid on an AIProviderRoute target (it names a BackendRef)"))
 		}
 	}
 

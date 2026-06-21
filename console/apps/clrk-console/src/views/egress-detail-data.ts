@@ -86,6 +86,8 @@ export interface EgDetail {
 
 // ── Loosely-typed views over the erased k8s objects ──────────────────────────
 interface ParentRef {
+  group?: string
+  kind?: string
   name?: string
   sectionName?: string
 }
@@ -274,14 +276,30 @@ function inlineFilters(kind: string, rule: RawRule): EgFilter[] {
   return out
 }
 
-/** Policy CRDs that attach to `routeName` via parentRef / targetRef → chips. */
-function attachedFilters(routeName: string, policies: PolicyObj[]): EgFilter[] {
+/** Policy CRDs that attach to `routeName` (of `routeKind`) via targetRefs → chips. */
+function attachedFilters(
+  routeName: string,
+  routeKind: string,
+  policies: PolicyObj[],
+): EgFilter[] {
   const out: EgFilter[] = []
+  // Match on kind too, not just name: an EgressGateway and an AIProviderRoute
+  // can share a name (different kinds), and a gateway-scoped CIP must not chip
+  // onto the same-named route's row. targetRefs always carry a kind; legacy
+  // parentRefs / singular targetRef may omit it, so a missing kind is tolerated.
+  const matches = (r: ParentRef): boolean =>
+    r.name === routeName && (r.kind === undefined || r.kind === routeKind)
   const attachesTo = (p: PolicyObj): boolean => {
+    // clrk Direct Policy Attachment policies (CredentialInjection, Fallback,
+    // EgressDeny) attach via spec.targetRefs (GEP-2648). Tolerate the legacy
+    // parentRefs and the pre-consolidation singular targetRef for objects or
+    // mocks not yet migrated.
+    const targetRefs = (p.spec?.targetRefs as ParentRef[] | undefined) ?? []
+    if (targetRefs.some(matches)) return true
     const refs = (p.spec?.parentRefs as ParentRef[] | undefined) ?? []
-    if (refs.some((r) => r.name === routeName)) return true
-    const target = p.spec?.targetRef as { name?: string } | undefined
-    return target?.name === routeName
+    if (refs.some(matches)) return true
+    const target = p.spec?.targetRef as ParentRef | undefined
+    return target !== undefined && matches(target)
   }
   for (const p of policies) {
     if (!attachesTo(p)) continue
@@ -418,7 +436,11 @@ export function mapEgressDetail(
   )
 
   const egRoutes: EgRoute[] = mine.map((route): EgRoute => {
-    const attached = attachedFilters(route.metadata.name ?? '', policyObjs)
+    const attached = attachedFilters(
+      route.metadata.name ?? '',
+      route.kind,
+      policyObjs,
+    )
     const rawRules = route.spec?.rules ?? []
     return {
       id: route.metadata.name ?? '',

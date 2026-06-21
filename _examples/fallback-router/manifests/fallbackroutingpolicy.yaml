@@ -9,9 +9,10 @@ metadata:
   name: fallback-router
 spec:
   # Whole-route attachment: every rule on the referenced
-  # AIProviderRoute switches to ordered fallback (sectionName scoping
-  # is a follow-up).
-  parentRefs:
+  # AIProviderRoute switches to ordered fallback. sectionName scoping is
+  # rejected at admission — AIProviderRoute rules are unnamed, so there
+  # is no section for it to bind to.
+  targetRefs:
     - group: clrk.apoxy.dev
       kind: AIProviderRoute
       name: fallback-router

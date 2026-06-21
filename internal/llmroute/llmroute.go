@@ -21,6 +21,7 @@ import (
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
+	"github.com/apoxy-dev/clrk/internal/policyattach"
 )
 
 // PinHeader is the request header the downstream ext_proc sets at
@@ -45,9 +46,10 @@ const RetryBodyBufferBytes = 1 << 20
 // Group/kind spellings for ref checks. The API group doubles as the
 // dynamic-metadata namespace carrying clrk endpoint identity.
 const (
-	clrkAPIGroup      = "clrk.apoxy.dev"
-	backendKind       = "Backend"
-	egressGatewayKind = "EgressGateway"
+	clrkAPIGroup        = "clrk.apoxy.dev"
+	backendKind         = "Backend"
+	egressGatewayKind   = "EgressGateway"
+	aiProviderRouteKind = "AIProviderRoute"
 )
 
 // RuleKey derives the stable identifier of one AIProviderRoute rule on
@@ -104,7 +106,7 @@ func CanonicalProvider(provider string) string {
 // fallback priority.
 type Candidate struct {
 	// Name is the BackendRef name (== the Backend's metadata.name). It
-	// doubles as the CredentialInjectionPolicy parentRef sectionName
+	// doubles as the CredentialInjectionPolicy targetRef sectionName
 	// key for per-backend credential injection, the endpoint's
 	// transport-socket-match key, and the envoy.lb subset key.
 	Name      string
@@ -315,47 +317,39 @@ func parentRefIsClrkEgressGateway(ref gwapiv1.ParentReference) bool {
 	return group == clrkAPIGroup && kind == egressGatewayKind
 }
 
-// PolicyAttachesTo reports whether any of policy's parentRefs point at
-// the AIProviderRoute (routeNamespace, routeName). Used to join
-// FallbackRoutingPolicies onto the routes they modify; CIP-style
-// semantics (group+kind must spell out clrk.apoxy.dev/AIProviderRoute,
-// namespace defaults to the policy's own).
+// PolicyAttachesTo reports whether any of policy's targetRefs attach DOWN
+// onto the AIProviderRoute (routeNamespace, routeName). GEP-2648 Direct
+// Policy Attachment via the shared policyattach.Match rule: group+kind must
+// spell out clrk.apoxy.dev/AIProviderRoute and the target is same-namespace
+// (cross-namespace requires a ReferenceGrant).
 func PolicyAttachesTo(policy clrkv1alpha1.FallbackRoutingPolicy, routeNamespace, routeName string) bool {
-	for _, ref := range policy.Spec.ParentRefs {
-		group := ""
-		if ref.Group != nil {
-			group = string(*ref.Group)
-		}
-		kind := ""
-		if ref.Kind != nil {
-			kind = string(*ref.Kind)
-		}
-		if group != clrkAPIGroup || kind != "AIProviderRoute" {
-			continue
-		}
-		if string(ref.Name) != routeName {
-			continue
-		}
-		ns := policy.Namespace
-		if ref.Namespace != nil && *ref.Namespace != "" {
-			ns = string(*ref.Namespace)
-		}
-		if ns == routeNamespace {
-			return true
-		}
-	}
-	return false
+	matched, _ := policyattach.Match(policy.Namespace, policy.Spec.TargetRefs, policyattach.Target{
+		Group:     clrkAPIGroup,
+		Kind:      aiProviderRouteKind,
+		Namespace: routeNamespace,
+		Name:      routeName,
+	})
+	return matched
 }
 
-// FallbackFor returns the first FallbackRoutingPolicy attached to the
-// given AIProviderRoute, or nil. Multiple attached policies have no
-// defined precedence; first (list order) wins, matching the credTable
-// convention for duplicate CIPs.
+// FallbackFor returns the FallbackRoutingPolicy attached to the given
+// AIProviderRoute, or nil. Multiple attached policies are resolved
+// deterministically by (namespace, name) — the lowest-sorting policy wins —
+// so the chosen fallback does not depend on the cached client's list order
+// (which is not guaranteed stable). Whole-route attachment only, so there is
+// no narrower-scope precedence to apply yet.
 func FallbackFor(policies []clrkv1alpha1.FallbackRoutingPolicy, routeNamespace, routeName string) *clrkv1alpha1.FallbackRoutingPolicy {
+	var winner *clrkv1alpha1.FallbackRoutingPolicy
 	for i := range policies {
-		if PolicyAttachesTo(policies[i], routeNamespace, routeName) {
-			return &policies[i]
+		p := &policies[i]
+		if !PolicyAttachesTo(*p, routeNamespace, routeName) {
+			continue
+		}
+		if winner == nil ||
+			p.Namespace < winner.Namespace ||
+			(p.Namespace == winner.Namespace && p.Name < winner.Name) {
+			winner = p
 		}
 	}
-	return nil
+	return winner
 }

@@ -63,18 +63,23 @@ type ProviderAuthConfig struct {
 
 // CredentialInjectionSpec defines the desired state of a CredentialInjectionPolicy.
 type CredentialInjectionSpec struct {
-	// ParentRefs attaches this policy to AIProviderRoute, MCPRoute, or
-	// EgressGateway listeners. The proxy applies the credential to
-	// traffic matching the referenced parent.
+	// TargetRefs attaches this policy DOWN onto AIProviderRoute, MCPRoute,
+	// or EgressGateway targets (GEP-2648 Direct Policy Attachment). The
+	// proxy applies the credential to traffic matching the referenced
+	// target. Plural so one policy can cover several targets;
+	// LocalPolicyTargetReferenceWithSectionName is same-namespace by
+	// construction (cross-namespace attachment requires a ReferenceGrant).
 	//
-	// Match semantics by parent kind:
+	// Match semantics by target kind:
 	//   - AIProviderRoute: applies when the request matches that APR's
-	//     rules (provider + endpoint + model gates).
+	//     rules (provider + endpoint + model gates). A sectionName names a
+	//     specific BackendRef and gates injection to post-selection of that
+	//     backend; an empty sectionName injects route-wide.
 	//   - MCPRoute: applies when the request matches that route
 	//     (no-op until MCPRoute consumption ships).
 	//   - EgressGateway: catch-all for any traffic on the gateway that
 	//     no narrower policy claimed.
-	ParentRefs []gwapiv1.ParentReference `json:"parentRefs"`
+	TargetRefs []gwapiv1a2.LocalPolicyTargetReferenceWithSectionName `json:"targetRefs"`
 
 	// SecretRef points at a K8s Secret containing the credential. The
 	// `namespace` field is ignored: the Secret must live in the same
@@ -186,16 +191,18 @@ type FallbackEjection struct {
 // FallbackRoutingPolicySpec defines the desired state of a
 // FallbackRoutingPolicy.
 type FallbackRoutingPolicySpec struct {
-	// ParentRefs attaches this policy to AIProviderRoutes. Attachment
-	// changes how the referenced routes' rules distribute traffic
-	// across their BackendRefs: without a policy, BackendRef.Weight
+	// TargetRefs attaches this policy DOWN onto AIProviderRoutes (GEP-2648
+	// Direct Policy Attachment, same-namespace by construction).
+	// Attachment changes how the referenced routes' rules distribute
+	// traffic across their BackendRefs: without a policy, BackendRef.Weight
 	// splits traffic and each request gets a single attempt; with one,
 	// BackendRefs list ORDER becomes the fallback priority — the first
 	// viable backend serves all traffic while healthy, and a failed
 	// attempt retries against the next, walking the list in order
-	// (weights are ignored). Whole-route attachment only for now;
-	// sectionName scoping may follow.
-	ParentRefs []gwapiv1.ParentReference `json:"parentRefs"`
+	// (weights are ignored). Whole-route attachment only: AIProviderRoute
+	// rules are unnamed, so a sectionName has no section to bind to and is
+	// rejected at admission until per-rule scoping is designed.
+	TargetRefs []gwapiv1a2.LocalPolicyTargetReferenceWithSectionName `json:"targetRefs"`
 
 	// Retry tunes the retry behavior. Nil applies the per-field
 	// defaults documented on FallbackRetry.

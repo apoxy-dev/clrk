@@ -435,6 +435,24 @@ func main() {
 			log.Error(err, "Unable to register controller", "controller", "AIProviderRouteStatus")
 			os.Exit(1)
 		}
+		// Direct Policy Attachment status: write GEP-2649 PolicyStatus for the
+		// policies that attach DOWN onto egress routes/gateways, so a dangling
+		// targetRef surfaces as Accepted=False instead of silently never
+		// applying. Status-only; the worker resolves the policy off its spec.
+		if err := (&controller.CredentialInjectionPolicyStatusReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "CredentialInjectionPolicyStatus")
+			os.Exit(1)
+		}
+		if err := (&controller.FallbackRoutingPolicyStatusReconciler{
+			Client: cm.GetClient(),
+			Scheme: cm.GetScheme(),
+		}).SetupWithManager(cm); err != nil {
+			log.Error(err, "Unable to register controller", "controller", "FallbackRoutingPolicyStatus")
+			os.Exit(1)
+		}
 	}
 
 	grpcLis, err := net.Listen("tcp", *grpcAddr)

@@ -462,12 +462,6 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           "headerName": {
             "type": "string"
           },
-          "parentRefs": {
-            "items": {
-              "$ref": "io.k8s.sigs.gateway-api.apis.v1.ParentReference"
-            },
-            "type": "array"
-          },
           "providerAuth": {
             "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.ProviderAuthConfig"
           },
@@ -482,10 +476,16 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           },
           "target": {
             "type": "string"
+          },
+          "targetRefs": {
+            "items": {
+              "$ref": "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "parentRefs",
+          "targetRefs",
           "secretRef",
           "target"
         ],
@@ -508,32 +508,6 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
         ],
         "type": "object"
       },
-      "io.k8s.sigs.gateway-api.apis.v1.ParentReference": {
-        "properties": {
-          "group": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "namespace": {
-            "type": "string"
-          },
-          "port": {
-            "type": "integer"
-          },
-          "sectionName": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "type": "object"
-      },
       "io.k8s.sigs.gateway-api.apis.v1.SecretObjectReference": {
         "properties": {
           "group": {
@@ -550,6 +524,28 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           }
         },
         "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName": {
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sectionName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "group",
+          "kind",
           "name"
         ],
         "type": "object"
@@ -942,16 +938,19 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           "denyResponse": {
             "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.DenyResponseConfig"
           },
-          "targetRef": {
-            "$ref": "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReference"
+          "targetRefs": {
+            "items": {
+              "$ref": "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "targetRef"
+          "targetRefs"
         ],
         "type": "object"
       },
-      "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReference": {
+      "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName": {
         "properties": {
           "group": {
             "type": "string"
@@ -960,6 +959,9 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
             "type": "string"
           },
           "name": {
+            "type": "string"
+          },
+          "sectionName": {
             "type": "string"
           }
         },
@@ -1478,25 +1480,25 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           "ejection": {
             "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackEjection"
           },
-          "parentRefs": {
-            "items": {
-              "$ref": "io.k8s.sigs.gateway-api.apis.v1.ParentReference"
-            },
-            "type": "array"
-          },
           "retry": {
             "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.FallbackRetry"
+          },
+          "targetRefs": {
+            "items": {
+              "$ref": "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "parentRefs"
+          "targetRefs"
         ],
         "type": "object"
       },
       "io.k8s.apimachinery.pkg.apis.meta.v1.Duration": {
         "type": "string"
       },
-      "io.k8s.sigs.gateway-api.apis.v1.ParentReference": {
+      "io.k8s.sigs.gateway-api.apis.v1alpha2.LocalPolicyTargetReferenceWithSectionName": {
         "properties": {
           "group": {
             "type": "string"
@@ -1507,17 +1509,13 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
           "name": {
             "type": "string"
           },
-          "namespace": {
-            "type": "string"
-          },
-          "port": {
-            "type": "integer"
-          },
           "sectionName": {
             "type": "string"
           }
         },
         "required": [
+          "group",
+          "kind",
           "name"
         ],
         "type": "object"

@@ -88,7 +88,7 @@ func (rr *routeRule) trustsOperator() bool {
 // can't drift); this struct is the extproc-local projection.
 type resolvedBackend struct {
 	// name is the BackendRef name (== the Backend's metadata.name). It
-	// doubles as the CredentialInjectionPolicy parentRef sectionName key
+	// doubles as the CredentialInjectionPolicy targetRef sectionName key
 	// for post-selection credential injection.
 	name      string
 	namespace string

@@ -315,7 +315,7 @@ export class MockBackend {
           creationTimestamp: daysAgo(g.ageDays - 1),
         },
         spec: {
-          parentRefs: [{ name: r.name }],
+          targetRefs: [{ group: GROUP, kind: r.kind, name: r.name }],
           secretRef: { name: r.cred.secret },
           secretKey: r.cred.key ?? 'token',
           target: r.cred.target,
@@ -369,7 +369,7 @@ export class MockBackend {
           creationTimestamp: daysAgo(g.ageDays - 1),
         },
         spec: {
-          targetRef: { group: GROUP, kind: r.kind, name: r.name },
+          targetRefs: [{ group: GROUP, kind: r.kind, name: r.name }],
           denyResponse: { statusCode: r.deny.statusCode ?? 403 },
         },
       })

@@ -13,13 +13,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/extproc/awssigv4"
+	"github.com/apoxy-dev/clrk/internal/policyattach"
 )
 
-// Parent-ref kind names CredentialInjectionPolicy may target.
+// Target-ref kind names CredentialInjectionPolicy may attach to.
 const (
 	aiProviderRouteKind = "AIProviderRoute"
 	mcpRouteKind        = "MCPRoute"
@@ -40,7 +40,7 @@ type credInjection struct {
 	// deferSign body-EOS path. headerName/headerValue are unused.
 	sigv4 *sigv4Cred
 
-	// section is the parentRef sectionName the CIP targeted, naming a
+	// section is the targetRef sectionName the CIP targeted, naming a
 	// specific backend (BackendRef name) on the route. Empty means the
 	// CIP is route-wide: injected at RequestHeaders for every request the
 	// route matches (today's behavior). A non-empty section is injected
@@ -118,35 +118,33 @@ func buildCredTable(
 	tbl := newEmptyCredTable()
 	for i := range cips {
 		cip := &cips[i]
-		for _, ref := range cip.Spec.ParentRefs {
-			group, kind := refGroupKind(ref)
-			if group != clrkAPIGroup {
+		for _, ref := range cip.Spec.TargetRefs {
+			if string(ref.Group) != clrkAPIGroup {
 				continue
 			}
-			refNS := cip.Namespace
-			if ref.Namespace != nil && *ref.Namespace != "" {
-				refNS = string(*ref.Namespace)
-			}
+			// targetRefs are same-namespace by construction: the target
+			// lives in the CIP's own namespace. Cross-namespace attachment
+			// is deferred to ReferenceGrant (the old parentRef.Namespace
+			// override is intentionally gone).
 			refName := string(ref.Name)
-
-			switch kind {
+			switch string(ref.Kind) {
 			case egressGatewayKind:
-				if refNS != egNamespace || refName != egName {
+				if cip.Namespace != egNamespace || refName != egName {
 					continue
 				}
 				if inj := resolveCIP(ctx, c, cip, log); inj != nil {
 					tbl.gateway = append(tbl.gateway, *inj)
 				}
 			case aiProviderRouteKind:
-				key := types.NamespacedName{Namespace: refNS, Name: refName}
+				key := types.NamespacedName{Namespace: cip.Namespace, Name: refName}
 				if !aprAttached[key] {
 					continue
 				}
 				if inj := resolveCIP(ctx, c, cip, log); inj != nil {
-					// A sectionName on the route parentRef targets a
-					// specific backend; it gates injection to
-					// post-selection of that backend (see lookupForBackend).
-					inj.section = sectionOf(ref)
+					// A sectionName on the route targetRef names a specific
+					// backend; it gates injection to post-selection of that
+					// backend (see lookupForBackend).
+					inj.section = policyattach.Section(ref)
 					tbl.byRoute[key] = append(tbl.byRoute[key], *inj)
 				}
 			case mcpRouteKind:
@@ -301,15 +299,6 @@ func (t *credTable) lookupForBackend(rr *routeRule, backend string) []credInject
 	return out
 }
 
-// sectionOf returns the parentRef sectionName as a plain string, or ""
-// when unset. For a route parentRef the sectionName names a backend.
-func sectionOf(ref gwapiv1.ParentReference) string {
-	if ref.SectionName != nil {
-		return string(*ref.SectionName)
-	}
-	return ""
-}
-
 // applyInjections appends SetHeaders entries to (or builds) a
 // HeaderMutation that injects the supplied static header credentials.
 // SigV4 entries are skipped — they have no static pair and are applied
@@ -377,16 +366,6 @@ func redactInjected(headers map[string]string, injs []credInjection) (collisions
 	return collisions
 }
 
-func refGroupKind(ref gwapiv1.ParentReference) (group, kind string) {
-	if ref.Group != nil {
-		group = string(*ref.Group)
-	}
-	if ref.Kind != nil {
-		kind = string(*ref.Kind)
-	}
-	return
-}
-
 // CredPoliciesVersion fingerprints the CIPs that attach to the given
 // EG (directly or via an APR). Mirrors aiproviderRoutesVersion in
 // shape: sorted parts list, one per matched CIP, encoding the CIP's
@@ -423,22 +402,20 @@ func CredPoliciesVersion(
 	for i := range cips {
 		cip := &cips[i]
 		matched := false
-		for _, ref := range cip.Spec.ParentRefs {
-			group, kind := refGroupKind(ref)
-			if group != clrkAPIGroup {
+		for _, ref := range cip.Spec.TargetRefs {
+			if string(ref.Group) != clrkAPIGroup {
 				continue
 			}
-			refNS := cip.Namespace
-			if ref.Namespace != nil && *ref.Namespace != "" {
-				refNS = string(*ref.Namespace)
-			}
-			switch kind {
+			// Same-namespace targetRefs: the target is in the CIP's own
+			// namespace (mirrors buildCredTable, which the fingerprint must
+			// agree with or the cached sink desyncs from the built table).
+			switch string(ref.Kind) {
 			case egressGatewayKind:
-				if refNS == eg.Namespace && string(ref.Name) == eg.Name {
+				if cip.Namespace == eg.Namespace && string(ref.Name) == eg.Name {
 					matched = true
 				}
 			case aiProviderRouteKind:
-				if aprAttached[types.NamespacedName{Namespace: refNS, Name: string(ref.Name)}] {
+				if aprAttached[types.NamespacedName{Namespace: cip.Namespace, Name: string(ref.Name)}] {
 					matched = true
 				}
 			}

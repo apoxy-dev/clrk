@@ -128,7 +128,9 @@ func (r *sinkRegistry) get(ctx context.Context) (*egSink, error) {
 	mcpVersion := mcpRoutesVersion(mcprs.Items, key)
 
 	// Same shape for CredentialInjectionPolicies. Cluster-wide list
-	// because policies can attach across namespaces via parentRefs.
+	// because CIPs live in arbitrary namespaces; each attaches only to
+	// same-namespace targets via targetRefs (the per-EG selection happens
+	// in buildCredTable / CredPoliciesVersion).
 	var cips clrkv1alpha1.CredentialInjectionPolicyList
 	if err := r.client.List(ctx, &cips); err != nil {
 		return nil, fmt.Errorf("list CredentialInjectionPolicies: %w", err)
