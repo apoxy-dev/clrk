@@ -1,11 +1,12 @@
 package sentrystack
 
 import (
-	sandboxsentrystack "github.com/apoxy-dev/clrk/pkg/sandbox/sentrystack"
+	sandboxsentrystack "github.com/apoxy-dev/apoxy/pkg/sandbox/sentrystack"
 )
 
-// This package is now the tenant/egress WRAPPER around the neutral
-// sentrystack core in pkg/sandbox/sentrystack (APO-713). The core owns the
+// This package is the tenant/egress WRAPPER around the neutral sentrystack
+// core in apoxy's pkg/sandbox/sentrystack (github.com/apoxy-dev/apoxy/pkg/
+// sandbox/sentrystack). The core owns the
 // PluginStack singleton + lo/eth0 NIC wiring; this package keeps the
 // egress/IMDS/DNS forwarder data path and plugs it back into the core's
 // Init via the ForwarderInstaller hook (see install_linux.go). These

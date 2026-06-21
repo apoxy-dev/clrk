@@ -3,13 +3,13 @@ module github.com/apoxy-dev/clrk
 go 1.25.5
 
 require (
-	github.com/apoxy-dev/apoxy v0.20.1-0.20260528184144-a0701864af75
+	github.com/apoxy-dev/apoxy v0.20.1-0.20260621204753-14d2f79bfe15
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
 	github.com/bytedance/sonic v1.15.1
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/docker/docker v28.2.2+incompatible
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/dpeckett/contextio v0.5.1
 	github.com/envoyproxy/gateway v1.4.0 // KEEP IN SYNC: internal/eg.Version + internal/crds/envoy-gateway/crds-vX.Y.Z.yaml + apoxy-cloud//clrk/BUILD.bazel EG_IMAGE_REF — see apoxy-cloud//docs/clrk-envoy-gateway.md
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
@@ -44,16 +44,18 @@ require (
 	sigs.k8s.io/gateway-api v1.3.0
 )
 
-require github.com/k3d-io/k3d/v5 v5.8.3
+require (
+	github.com/ClickHouse/ch-go v0.72.0
+	github.com/k3d-io/k3d/v5 v5.8.3
+)
 
 require (
-	github.com/ClickHouse/ch-go v0.72.0 // indirect
-	github.com/ClickHouse/clickhouse-go/v2 v2.23.2 // indirect
+	github.com/ClickHouse/clickhouse-go/v2 v2.46.0 // indirect
 	github.com/MicahParks/jwkset v0.9.6 // indirect
 	github.com/MicahParks/keyfunc/v3 v3.6.1 // indirect
 	github.com/alphadose/haxmap v1.4.1 // indirect
-	github.com/andybalholm/brotli v1.1.1 // indirect
-	github.com/apoxy-dev/icx v0.16.1 // indirect
+	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/apoxy-dev/icx v0.17.1-0.20260615171738-e5278a0a64d3 // indirect
 	github.com/apparentlymart/go-cidr v1.1.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
@@ -114,14 +116,14 @@ require (
 	github.com/onsi/ginkgo/v2 v2.22.2 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pascaldekloe/name v1.0.1 // indirect
-	github.com/paulmach/orb v0.11.1 // indirect
+	github.com/paulmach/orb v0.12.0 // indirect
 	github.com/pborman/uuid v1.2.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
 	github.com/phemmer/go-iptrie v0.0.0-20240326174613-ba542f5282c9 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/quic-go/connect-ip-go v0.0.0-20241112091351-321f13c3d203 // indirect
-	github.com/quic-go/qpack v0.5.1 // indirect
-	github.com/quic-go/quic-go v0.50.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rancher/wharfie v0.6.2 // indirect
 	github.com/redis/go-redis/v9 v9.10.0 // indirect
 	github.com/safchain/ethtool v0.6.1 // indirect
@@ -152,7 +154,7 @@ require (
 	go.temporal.io/api v1.29.2 // indirect
 	go.temporal.io/sdk v1.26.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	go.uber.org/mock v0.5.0 // indirect
+	go.uber.org/mock v0.5.2 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
@@ -251,8 +253,8 @@ require (
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/nats-io/jsm.go v0.3.0 // indirect
 	github.com/nats-io/jwt/v2 v2.8.0 // indirect
-	github.com/nats-io/nats-server/v2 v2.12.2 // indirect
-	github.com/nats-io/nats.go v1.48.0 // indirect
+	github.com/nats-io/nats-server/v2 v2.12.2
+	github.com/nats-io/nats.go v1.48.0
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect

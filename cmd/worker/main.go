@@ -15,7 +15,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/config"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 	"github.com/apoxy-dev/clrk/internal/worker"
-	"github.com/apoxy-dev/clrk/pkg/sandbox"
+	"github.com/apoxy-dev/apoxy/pkg/sandbox"
 )
 
 var scheme = runtime.NewScheme()

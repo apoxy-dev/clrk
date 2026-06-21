@@ -3,11 +3,12 @@ package sandbox
 import (
 	"errors"
 
-	sandboxcore "github.com/apoxy-dev/clrk/pkg/sandbox"
+	sandboxcore "github.com/apoxy-dev/apoxy/pkg/sandbox"
 )
 
-// This package is now the tenant/egress WRAPPER around the neutral sandbox
-// runtime core in pkg/sandbox (APO-713). The core owns the gVisor/runsc
+// This package is the tenant/egress WRAPPER around the neutral sandbox
+// runtime core in apoxy's pkg/sandbox (github.com/apoxy-dev/apoxy/pkg/
+// sandbox). The core owns the gVisor/runsc
 // lifecycle (image pull, OCI bundle, cgroup, runsc create/start/wait/
 // delete) over a neutral Spec/Instance; this package adapts clrk's CRD
 // CreateRequest down to that Spec, re-adds the egress data path + OTLP

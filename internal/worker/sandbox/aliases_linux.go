@@ -3,7 +3,7 @@
 package sandbox
 
 import (
-	sandboxcore "github.com/apoxy-dev/clrk/pkg/sandbox"
+	sandboxcore "github.com/apoxy-dev/apoxy/pkg/sandbox"
 )
 
 // Linux-only re-exports: these reference core symbols defined only on

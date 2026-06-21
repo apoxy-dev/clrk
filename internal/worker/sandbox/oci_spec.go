@@ -10,7 +10,7 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
-	sandboxcore "github.com/apoxy-dev/clrk/pkg/sandbox"
+	sandboxcore "github.com/apoxy-dev/apoxy/pkg/sandbox"
 )
 
 // This file holds the clrk-specific mount + annotation builders the

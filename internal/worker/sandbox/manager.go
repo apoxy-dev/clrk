@@ -16,7 +16,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
 	"github.com/apoxy-dev/clrk/internal/ports"
-	sandboxcore "github.com/apoxy-dev/clrk/pkg/sandbox"
+	sandboxcore "github.com/apoxy-dev/apoxy/pkg/sandbox"
 )
 
 // Manager is clrk's tenant/egress wrapper around the neutral

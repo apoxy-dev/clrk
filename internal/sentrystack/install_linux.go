@@ -3,7 +3,7 @@
 package sentrystack
 
 import (
-	sandboxsentrystack "github.com/apoxy-dev/clrk/pkg/sandbox/sentrystack"
+	sandboxsentrystack "github.com/apoxy-dev/apoxy/pkg/sandbox/sentrystack"
 )
 
 // Stack is the sentrystack PluginStack. Aliased from the neutral core; the
