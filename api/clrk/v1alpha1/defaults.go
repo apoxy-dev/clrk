@@ -116,6 +116,27 @@ func (r *RateLimitPolicy) Default() {
 	}
 }
 
+// Default stamps the documented PerAgent default on each inline tool rate
+// limit's Scope. The +kubebuilder:default marker on ToolRateLimit.Scope is
+// inert under the aggregated apiserver (see the package comment), so without
+// this an omitted scope persists as "" rather than PerAgent. Nested defaults
+// are applied only where the parent ToolPolicy already exists.
+func (r *MCPRoute) Default() {
+	for i := range r.Spec.Rules {
+		for j := range r.Spec.Rules[i].Filters {
+			tp := r.Spec.Rules[i].Filters[j].ToolPolicy
+			if tp == nil {
+				continue
+			}
+			for k := range tp.RateLimits {
+				if tp.RateLimits[k].Scope == "" {
+					tp.RateLimits[k].Scope = RateLimitScopePerAgent
+				}
+			}
+		}
+	}
+}
+
 // Default sets the deny response status to 403 when a denyResponse block is
 // present without an explicit code. It does not allocate an absent denyResponse.
 func (r *EgressDenyPolicy) Default() {

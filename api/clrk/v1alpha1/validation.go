@@ -23,11 +23,13 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/robfig/cron"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	// Provider registration: schema-name validation resolves spellings
@@ -588,12 +590,238 @@ func (r *AIProviderRoute) Validate(_ context.Context) field.ErrorList {
 			errs = append(errs, validateProviderSchemaName(r.Spec.Rules[i].Matches[j].Provider,
 				matches.Index(j).Child("provider"))...)
 		}
+		filters := rules.Index(i).Child("filters")
+		for j := range r.Spec.Rules[i].Filters {
+			f := r.Spec.Rules[i].Filters[j]
+			fp := filters.Index(j)
+			switch f.Type {
+			case AIProviderFilterExtensionRef:
+				// AIProviderRoute's extensionRef is open-kinded: besides the
+				// cross-cutting policies it is also the classifier-driven
+				// backend-selection seam (APO-480), so accept any clrk kind
+				// rather than the RateLimit/Logging-only set the MCP and L4
+				// filters use.
+				errs = append(errs, validateExtensionRef(f.ExtensionRef, nil, fp.Child("extensionRef"))...)
+			case AIProviderFilterTokenBudget:
+				if f.TokenBudget == nil {
+					errs = append(errs, field.Required(fp.Child("tokenBudget"), "tokenBudget is required when type=TokenBudget"))
+				}
+			}
+		}
 	}
 	return errs
 }
 
 func (r *AIProviderRoute) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
 	if prev, ok := old.(*AIProviderRoute); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &r.Spec) {
+		return nil
+	}
+	return r.Validate(ctx)
+}
+
+// extensionRefPolicyKinds enumerates the clrk policy kinds a route filter's
+// extensionRef may resolve to on MCPRoute and EgressL4Route. The data plane
+// dereferences the ref by group+kind+name to dispatch the right resolver
+// (RateLimitPolicy vs LoggingPolicy); the gwapiv1.LocalObjectReference type
+// already carries those fields, but nothing populates them by default, so a
+// ref that omits group/kind or names an unknown kind is permanently inert.
+// Reject it at admission. AIProviderRoute filters pass nil (open-kinded)
+// because that extensionRef is also the classifier-driven backend-selection
+// seam (APO-480), which accepts kinds outside this set.
+var extensionRefPolicyKinds = []string{"RateLimitPolicy", "LoggingPolicy"}
+
+// validateClrkRef applies the attachment/extension reference checks shared by
+// every clrk policy and route filter that points at a clrk object: the group
+// must be this API group, the name is required, and -- when supportedKinds is
+// non-nil -- the kind must be one of them. A nil supportedKinds enforces only
+// that kind is non-empty, for refs whose accepted kind set is open-ended.
+func validateClrkRef(group, kind, name string, supportedKinds []string, fp *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if group == "" {
+		errs = append(errs, field.Required(fp.Child("group"), "group must be "+SchemeGroupVersion.Group))
+	} else if group != SchemeGroupVersion.Group {
+		errs = append(errs, field.NotSupported(fp.Child("group"), group, []string{SchemeGroupVersion.Group}))
+	}
+	if kind == "" {
+		errs = append(errs, field.Required(fp.Child("kind"), "kind is required"))
+	} else if supportedKinds != nil && !slices.Contains(supportedKinds, kind) {
+		errs = append(errs, field.NotSupported(fp.Child("kind"), kind, supportedKinds))
+	}
+	if name == "" {
+		errs = append(errs, field.Required(fp.Child("name"), "name is required"))
+	}
+	return errs
+}
+
+// validateExtensionRef checks that a route filter's extensionRef carries a
+// resolvable clrk policy reference. An ExtensionRef-typed filter with a nil
+// or under-specified ref would silently never apply. allowedKinds restricts
+// the kind (nil = any clrk kind, for the AIProviderRoute classifier seam).
+func validateExtensionRef(ref *gwapiv1.LocalObjectReference, allowedKinds []string, fp *field.Path) field.ErrorList {
+	if ref == nil {
+		return field.ErrorList{field.Required(fp, "extensionRef is required when type=ExtensionRef")}
+	}
+	return validateClrkRef(string(ref.Group), string(ref.Kind), string(ref.Name), allowedKinds, fp)
+}
+
+// validateRegexList rejects any pattern the data plane could not compile.
+// mcproutetable's compileRegexList does regexp.Compile and DROPS the whole
+// rule on the first error, so a bad pattern silently disables that rule's
+// tool governance -- catch it at admission instead. The engine
+// (regexp.Compile) matches the data plane's exactly.
+func validateRegexList(patterns []string, fp *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	for i, p := range patterns {
+		if _, err := regexp.Compile(p); err != nil {
+			errs = append(errs, field.Invalid(fp.Index(i), p, "must be a valid Go regular expression: "+err.Error()))
+		}
+	}
+	return errs
+}
+
+// validateWindow requires a non-empty Go duration string, matching the
+// documented "1m"/"1h"/"24h" vocabulary on RateLimitSpec.Window and
+// ToolRateLimit.Window.
+func validateWindow(window string, fp *field.Path) field.ErrorList {
+	if window == "" {
+		return field.ErrorList{field.Required(fp, "window is required")}
+	}
+	if _, err := time.ParseDuration(window); err != nil {
+		return field.ErrorList{field.Invalid(fp, window, `window must be a Go duration string (e.g. "1m", "1h", "24h")`)}
+	}
+	return nil
+}
+
+// validateRateLimitScope replaces the (inert, aggregated-apiserver-ignored)
+// kubebuilder Enum marker on RateLimitScope. An empty scope is valid: both
+// callers default it to PerAgent at decode time (RateLimitPolicy.Default and
+// MCPRoute.Default) before validation runs.
+func validateRateLimitScope(scope RateLimitScope, fp *field.Path) field.ErrorList {
+	switch scope {
+	case "", RateLimitScopePerAgent, RateLimitScopePerExecution, RateLimitScopePerRoute:
+		return nil
+	default:
+		return field.ErrorList{field.NotSupported(fp, string(scope), []string{
+			string(RateLimitScopePerAgent), string(RateLimitScopePerExecution), string(RateLimitScopePerRoute)})}
+	}
+}
+
+func (p *RateLimitPolicy) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+	if p.Spec.Requests <= 0 {
+		errs = append(errs, field.Invalid(specPath.Child("requests"), p.Spec.Requests, "requests must be > 0"))
+	}
+	errs = append(errs, validateWindow(p.Spec.Window, specPath.Child("window"))...)
+	errs = append(errs, validateRateLimitScope(p.Spec.Scope, specPath.Child("scope"))...)
+	return errs
+}
+
+func (p *RateLimitPolicy) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*RateLimitPolicy); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &p.Spec) {
+		return nil
+	}
+	return p.Validate(ctx)
+}
+
+func (p *EgressDenyPolicy) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	specPath := field.NewPath("spec")
+	if len(p.Spec.TargetRefs) == 0 {
+		errs = append(errs, field.Required(specPath.Child("targetRefs"), "at least one targetRef is required"))
+	}
+	// The deny resolver joins on an explicit clrk.apoxy.dev route spelling;
+	// only the route kinds below carry traffic an EgressDenyPolicy can invert.
+	supportedKinds := []string{"AIProviderRoute", "MCPRoute", "EgressL4Route"}
+	for i, ref := range p.Spec.TargetRefs {
+		errs = append(errs, validateClrkRef(string(ref.Group), string(ref.Kind), string(ref.Name),
+			supportedKinds, specPath.Child("targetRefs").Index(i))...)
+	}
+	return errs
+}
+
+func (p *EgressDenyPolicy) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*EgressDenyPolicy); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &p.Spec) {
+		return nil
+	}
+	return p.Validate(ctx)
+}
+
+// validateToolRateLimit applies the same windowing/scope checks as
+// RateLimitPolicy.Validate to an inline MCP ToolRateLimit, plus its regex
+// tool selector (compiled and rule-dropping in the data plane).
+func validateToolRateLimit(rl *ToolRateLimit, fp *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if rl.Requests <= 0 {
+		errs = append(errs, field.Invalid(fp.Child("requests"), rl.Requests, "requests must be > 0"))
+	}
+	errs = append(errs, validateWindow(rl.Window, fp.Child("window"))...)
+	errs = append(errs, validateRateLimitScope(rl.Scope, fp.Child("scope"))...)
+	errs = append(errs, validateRegexList(rl.ToolsRegex, fp.Child("toolsRegex"))...)
+	return errs
+}
+
+func (r *MCPRoute) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	rules := field.NewPath("spec").Child("rules")
+	for i := range r.Spec.Rules {
+		rule := &r.Spec.Rules[i]
+		rp := rules.Index(i)
+		// Match selectors compile to regexps in the data plane; a bad
+		// pattern drops the whole rule.
+		for j := range rule.Matches {
+			errs = append(errs, validateRegexList(rule.Matches[j].ToolsRegex,
+				rp.Child("matches").Index(j).Child("toolsRegex"))...)
+		}
+		filters := rp.Child("filters")
+		for j := range rule.Filters {
+			f := rule.Filters[j]
+			fp := filters.Index(j)
+			switch f.Type {
+			case MCPFilterExtensionRef:
+				errs = append(errs, validateExtensionRef(f.ExtensionRef, extensionRefPolicyKinds, fp.Child("extensionRef"))...)
+			case MCPFilterToolPolicy:
+				if f.ToolPolicy == nil {
+					errs = append(errs, field.Required(fp.Child("toolPolicy"), "toolPolicy is required when type=ToolPolicy"))
+					continue
+				}
+				tp := f.ToolPolicy
+				tpp := fp.Child("toolPolicy")
+				errs = append(errs, validateRegexList(tp.AllowedToolsRegex, tpp.Child("allowedToolsRegex"))...)
+				errs = append(errs, validateRegexList(tp.DeniedToolsRegex, tpp.Child("deniedToolsRegex"))...)
+				for k := range tp.RateLimits {
+					errs = append(errs, validateToolRateLimit(&tp.RateLimits[k], tpp.Child("rateLimits").Index(k))...)
+				}
+			}
+		}
+	}
+	return errs
+}
+
+func (r *MCPRoute) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*MCPRoute); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &r.Spec) {
+		return nil
+	}
+	return r.Validate(ctx)
+}
+
+func (r *EgressL4Route) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	rules := field.NewPath("spec").Child("rules")
+	for i := range r.Spec.Rules {
+		filters := rules.Index(i).Child("filters")
+		for j := range r.Spec.Rules[i].Filters {
+			f := r.Spec.Rules[i].Filters[j]
+			if f.Type == L4FilterExtensionRef {
+				errs = append(errs, validateExtensionRef(f.ExtensionRef, extensionRefPolicyKinds, filters.Index(j).Child("extensionRef"))...)
+			}
+		}
+	}
+	return errs
+}
+
+func (r *EgressL4Route) ValidateUpdate(ctx context.Context, old runtime.Object) field.ErrorList {
+	if prev, ok := old.(*EgressL4Route); ok && apiequality.Semantic.DeepEqual(&prev.Spec, &r.Spec) {
 		return nil
 	}
 	return r.Validate(ctx)

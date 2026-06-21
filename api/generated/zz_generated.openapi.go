@@ -61,6 +61,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyExtractor":                       schema_clrk_api_clrk_v1alpha1_BodyExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicy":           schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyList":       schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyList(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyStatus":     schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionSpec":             schema_clrk_api_clrk_v1alpha1_CredentialInjectionSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DaemonAgent":                         schema_clrk_api_clrk_v1alpha1_DaemonAgent(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DaemonAgentList":                     schema_clrk_api_clrk_v1alpha1_DaemonAgentList(ref),
@@ -71,6 +72,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicy":                    schema_clrk_api_clrk_v1alpha1_EgressDenyPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicyList":                schema_clrk_api_clrk_v1alpha1_EgressDenyPolicyList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicySpec":                schema_clrk_api_clrk_v1alpha1_EgressDenyPolicySpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicyStatus":              schema_clrk_api_clrk_v1alpha1_EgressDenyPolicyStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressGateway":                       schema_clrk_api_clrk_v1alpha1_EgressGateway(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressGatewayList":                   schema_clrk_api_clrk_v1alpha1_EgressGatewayList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressGatewaySpec":                   schema_clrk_api_clrk_v1alpha1_EgressGatewaySpec(ref),
@@ -90,6 +92,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicy":               schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyList":           schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec":           schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyStatus":         schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.HeaderExtractor":                     schema_clrk_api_clrk_v1alpha1_HeaderExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.IdentityExtractor":                   schema_clrk_api_clrk_v1alpha1_IdentityExtractor(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ImageCacheConfig":                    schema_clrk_api_clrk_v1alpha1_ImageCacheConfig(ref),
@@ -1632,12 +1635,18 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicy(ref common.Referenc
 							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionSpec"),
 						},
 					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyStatus"),
+						},
+					},
 				},
 				Required: []string{"spec"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionSpec", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyStatus", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionSpec", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
 	}
 }
 
@@ -1687,6 +1696,36 @@ func schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyList(ref common.Refe
 		},
 		Dependencies: []string{
 			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicy", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CredentialInjectionPolicyStatus reports attachment acceptance for a CredentialInjectionPolicy. It embeds the Gateway API GEP-2649 PolicyStatus so every clrk policy reports through one uniform shape: one PolicyAncestorStatus per resolved attachment, carrying Accepted / Conflicted conditions.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"ancestors": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"ancestors"},
+			},
+		},
+		Dependencies: []string{
+			"sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"},
 	}
 }
 
@@ -2049,7 +2088,7 @@ func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicy(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "EgressDenyPolicy attaches to any route via targetRef to invert it from \"allow\" to \"deny\".",
+				Description: "EgressDenyPolicy attaches to routes via targetRefs to invert them from \"allow\" to \"deny\".",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -2078,12 +2117,18 @@ func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicy(ref common.ReferenceCallback
 							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicySpec"),
 						},
 					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicyStatus"),
+						},
+					},
 				},
 				Required: []string{"spec"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicySpec", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicySpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.EgressDenyPolicyStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
 	}
 }
 
@@ -2143,11 +2188,18 @@ func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicySpec(ref common.ReferenceCall
 				Description: "EgressDenyPolicySpec defines the desired state of an EgressDenyPolicy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"targetRef": {
+					"targetRefs": {
 						SchemaProps: spec.SchemaProps{
-							Description: "TargetRef identifies the route this policy attaches to.",
-							Default:     map[string]interface{}{},
-							Ref:         ref("sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReference"),
+							Description: "TargetRefs identifies the routes this policy attaches to. Plural (GEP-2648 Direct Policy Attachment) so one policy can deny several routes; LocalPolicyTargetReferenceWithSectionName is same-namespace by construction and section-scopable (an empty sectionName denies the whole route).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"),
+									},
+								},
+							},
 						},
 					},
 					"denyResponse": {
@@ -2157,11 +2209,41 @@ func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicySpec(ref common.ReferenceCall
 						},
 					},
 				},
-				Required: []string{"targetRef"},
+				Required: []string{"targetRefs"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DenyResponseConfig", "sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReference"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.DenyResponseConfig", "sigs.k8s.io/gateway-api/apis/v1alpha2.LocalPolicyTargetReferenceWithSectionName"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_EgressDenyPolicyStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EgressDenyPolicyStatus reports attachment acceptance for an EgressDenyPolicy via the GEP-2649 PolicyStatus shape shared by every clrk policy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"ancestors": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"ancestors"},
+			},
+		},
+		Dependencies: []string{
+			"sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"},
 	}
 }
 
@@ -2898,12 +2980,18 @@ func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicy(ref common.ReferenceCal
 							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec"),
 						},
 					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyStatus"),
+						},
+					},
 				},
 				Required: []string{"spec"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicySpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRoutingPolicyStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
 	}
 }
 
@@ -2995,6 +3083,36 @@ func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicySpec(ref common.Referenc
 		},
 		Dependencies: []string{
 			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackEjection", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.FallbackRetry", "sigs.k8s.io/gateway-api/apis/v1.ParentReference"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_FallbackRoutingPolicyStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "FallbackRoutingPolicyStatus reports attachment acceptance for a FallbackRoutingPolicy via the GEP-2649 PolicyStatus shape shared by every clrk policy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"ancestors": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ancestors is a list of ancestor resources (usually Gateways) that are associated with the policy, and the status of the policy with respect to each ancestor. When this policy attaches to a parent, the controller that manages the parent and the ancestors MUST add an entry to this list when the controller first sees the policy and SHOULD update the entry as appropriate when the relevant ancestor is modified.\n\nNote that choosing the relevant ancestor is left to the Policy designers; an important part of Policy design is designing the right object level at which to namespace this status.\n\nNote also that implementations MUST ONLY populate ancestor status for the Ancestor resources they are responsible for. Implementations MUST use the ControllerName field to uniquely identify the entries in this list that they are responsible for.\n\nNote that to achieve this, the list of PolicyAncestorStatus structs MUST be treated as a map with a composite key, made up of the AncestorRef and ControllerName fields combined.\n\nA maximum of 16 ancestors will be represented in this list. An empty list means the Policy is not relevant for any ancestors.\n\nIf this slice is full, implementations MUST NOT add further entries. Instead they MUST consider the policy unimplementable and signal that on any related resources such as the ancestor that would be referenced here. For example, if this list was full on BackendTLSPolicy, no additional Gateways would be able to reference the Service targeted by the BackendTLSPolicy.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"ancestors"},
+			},
+		},
+		Dependencies: []string{
+			"sigs.k8s.io/gateway-api/apis/v1alpha2.PolicyAncestorStatus"},
 	}
 }
 
@@ -4100,14 +4218,16 @@ func schema_clrk_api_clrk_v1alpha1_ProviderAuthConfig(ref common.ReferenceCallba
 					},
 					"region": {
 						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
+							Description: "Region scopes the AWSv4 signature. When unset, the region is derived from the target hostname at signing time (bedrock-runtime.<region>.amazonaws.com) — the derived value is the only one guaranteed to agree with the endpoint actually hit when one policy covers Backends in multiple regions.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"service": {
 						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
+							Description: "Service is the AWSv4 credential-scope service name. Defaults to \"bedrock\".",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},
@@ -22047,7 +22167,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_BackendRef(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.",
+				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.\n\n<gateway:experimental:description>\n\nWhen the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.\n\nImplementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.\n\nIf a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.\n\nIf a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the \"ResolvedRefs\" condition to \"False\" with the \"UnsupportedProtocol\" reason.\n\n</gateway:experimental:description>\n\nNote that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {
@@ -24667,7 +24787,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_ParentReference(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with \"Core\" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.\n\nNote that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
+				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with \"Core\" support:\n\n* Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)\n\nThis API may be extended in the future to support additional kinds of parent resources.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {

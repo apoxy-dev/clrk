@@ -39,6 +39,8 @@ type CredentialInjectionPoliciesGetter interface {
 type CredentialInjectionPolicyInterface interface {
 	Create(ctx context.Context, credentialInjectionPolicy *clrkv1alpha1.CredentialInjectionPolicy, opts v1.CreateOptions) (*clrkv1alpha1.CredentialInjectionPolicy, error)
 	Update(ctx context.Context, credentialInjectionPolicy *clrkv1alpha1.CredentialInjectionPolicy, opts v1.UpdateOptions) (*clrkv1alpha1.CredentialInjectionPolicy, error)
+	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
+	UpdateStatus(ctx context.Context, credentialInjectionPolicy *clrkv1alpha1.CredentialInjectionPolicy, opts v1.UpdateOptions) (*clrkv1alpha1.CredentialInjectionPolicy, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
 	Get(ctx context.Context, name string, opts v1.GetOptions) (*clrkv1alpha1.CredentialInjectionPolicy, error)

@@ -102,16 +102,27 @@ type CredentialInjectionSpec struct {
 	ProviderAuth *ProviderAuthConfig `json:"providerAuth,omitempty"`
 }
 
+// CredentialInjectionPolicyStatus reports attachment acceptance for a
+// CredentialInjectionPolicy. It embeds the Gateway API GEP-2649
+// PolicyStatus so every clrk policy reports through one uniform shape:
+// one PolicyAncestorStatus per resolved attachment, carrying Accepted /
+// Conflicted conditions.
+type CredentialInjectionPolicyStatus struct {
+	gwapiv1a2.PolicyStatus `json:",inline"`
+}
+
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=cip
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.target`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type CredentialInjectionPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              CredentialInjectionSpec `json:"spec"`
+	Spec              CredentialInjectionSpec         `json:"spec"`
+	Status            CredentialInjectionPolicyStatus `json:"status,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -197,6 +208,13 @@ type FallbackRoutingPolicySpec struct {
 	Ejection *FallbackEjection `json:"ejection,omitempty"`
 }
 
+// FallbackRoutingPolicyStatus reports attachment acceptance for a
+// FallbackRoutingPolicy via the GEP-2649 PolicyStatus shape shared by
+// every clrk policy.
+type FallbackRoutingPolicyStatus struct {
+	gwapiv1a2.PolicyStatus `json:",inline"`
+}
+
 // FallbackRoutingPolicy opts AIProviderRoutes into ordered inter-backend
 // fallback: a request whose attempt fails (connect failure, reset, or a
 // retriable status) is retried against the next backend in the rule's
@@ -214,11 +232,13 @@ type FallbackRoutingPolicySpec struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=frp
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type FallbackRoutingPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              FallbackRoutingPolicySpec `json:"spec"`
+	Spec              FallbackRoutingPolicySpec   `json:"spec"`
+	Status            FallbackRoutingPolicyStatus `json:"status,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -235,8 +255,11 @@ type FallbackRoutingPolicyList struct {
 // RateLimitPolicy
 // ============================================================================
 
-// RateLimitScope defines the scope of rate limiting.
-// +kubebuilder:validation:Enum=PerAgent;PerExecution;PerRoute
+// RateLimitScope defines the scope of rate limiting. The kubebuilder Enum
+// marker is intentionally omitted: this group is served by the aggregated
+// apiserver, which does not honor CRD validation markers (see defaults.go),
+// so scope validity is enforced in the Validate hooks via
+// validateRateLimitScope instead.
 type RateLimitScope string
 
 const (
@@ -324,26 +347,39 @@ type DenyResponseConfig struct {
 
 // EgressDenyPolicySpec defines the desired state of an EgressDenyPolicy.
 type EgressDenyPolicySpec struct {
-	// TargetRef identifies the route this policy attaches to.
-	TargetRef gwapiv1a2.LocalPolicyTargetReference `json:"targetRef"`
+	// TargetRefs identifies the routes this policy attaches to. Plural
+	// (GEP-2648 Direct Policy Attachment) so one policy can deny several
+	// routes; LocalPolicyTargetReferenceWithSectionName is same-namespace
+	// by construction and section-scopable (an empty sectionName denies
+	// the whole route).
+	TargetRefs []gwapiv1a2.LocalPolicyTargetReferenceWithSectionName `json:"targetRefs"`
 
 	// DenyResponse configures the rejection returned to the caller.
 	// +optional
 	DenyResponse *DenyResponseConfig `json:"denyResponse,omitempty"`
 }
 
-// EgressDenyPolicy attaches to any route via targetRef to invert it from
+// EgressDenyPolicyStatus reports attachment acceptance for an
+// EgressDenyPolicy via the GEP-2649 PolicyStatus shape shared by every
+// clrk policy.
+type EgressDenyPolicyStatus struct {
+	gwapiv1a2.PolicyStatus `json:",inline"`
+}
+
+// EgressDenyPolicy attaches to routes via targetRefs to invert them from
 // "allow" to "deny".
 //
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=edp
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type EgressDenyPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              EgressDenyPolicySpec `json:"spec"`
+	Spec              EgressDenyPolicySpec   `json:"spec"`
+	Status            EgressDenyPolicyStatus `json:"status,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

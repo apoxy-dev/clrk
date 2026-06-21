@@ -81,12 +81,17 @@ var (
 	_ resource.ObjectWithStatusSubResource = &EgressL4Route{}
 	_ rest.SingularNameProvider            = &EgressL4Route{}
 	_ resource.StatusSubResource           = &EgressL4RouteStatus{}
+	_ resourcestrategy.Validater           = &EgressL4Route{}
+	_ resourcestrategy.ValidateUpdater     = &EgressL4Route{}
 
 	_ runtime.Object                       = &MCPRoute{}
 	_ resource.Object                      = &MCPRoute{}
 	_ resource.ObjectWithStatusSubResource = &MCPRoute{}
 	_ rest.SingularNameProvider            = &MCPRoute{}
 	_ resource.StatusSubResource           = &MCPRouteStatus{}
+	_ resourcestrategy.Defaulter           = &MCPRoute{}
+	_ resourcestrategy.Validater           = &MCPRoute{}
+	_ resourcestrategy.ValidateUpdater     = &MCPRoute{}
 
 	_ runtime.Object                       = &AIProviderRoute{}
 	_ resource.Object                      = &AIProviderRoute{}
@@ -105,32 +110,42 @@ var (
 	_ resourcestrategy.ValidateUpdater     = &Backend{}
 	_ resource.StatusSubResource           = &BackendStatus{}
 
-	_ runtime.Object                   = &CredentialInjectionPolicy{}
-	_ resource.Object                  = &CredentialInjectionPolicy{}
-	_ rest.SingularNameProvider        = &CredentialInjectionPolicy{}
-	_ resourcestrategy.Defaulter       = &CredentialInjectionPolicy{}
-	_ resourcestrategy.Validater       = &CredentialInjectionPolicy{}
-	_ resourcestrategy.ValidateUpdater = &CredentialInjectionPolicy{}
+	_ runtime.Object                       = &CredentialInjectionPolicy{}
+	_ resource.Object                      = &CredentialInjectionPolicy{}
+	_ resource.ObjectWithStatusSubResource = &CredentialInjectionPolicy{}
+	_ rest.SingularNameProvider            = &CredentialInjectionPolicy{}
+	_ resource.StatusSubResource           = &CredentialInjectionPolicyStatus{}
+	_ resourcestrategy.Defaulter           = &CredentialInjectionPolicy{}
+	_ resourcestrategy.Validater           = &CredentialInjectionPolicy{}
+	_ resourcestrategy.ValidateUpdater     = &CredentialInjectionPolicy{}
 
-	_ runtime.Object                   = &FallbackRoutingPolicy{}
-	_ resource.Object                  = &FallbackRoutingPolicy{}
-	_ rest.SingularNameProvider        = &FallbackRoutingPolicy{}
-	_ resourcestrategy.Validater       = &FallbackRoutingPolicy{}
-	_ resourcestrategy.ValidateUpdater = &FallbackRoutingPolicy{}
+	_ runtime.Object                       = &FallbackRoutingPolicy{}
+	_ resource.Object                      = &FallbackRoutingPolicy{}
+	_ resource.ObjectWithStatusSubResource = &FallbackRoutingPolicy{}
+	_ rest.SingularNameProvider            = &FallbackRoutingPolicy{}
+	_ resource.StatusSubResource           = &FallbackRoutingPolicyStatus{}
+	_ resourcestrategy.Validater           = &FallbackRoutingPolicy{}
+	_ resourcestrategy.ValidateUpdater     = &FallbackRoutingPolicy{}
 
-	_ runtime.Object             = &RateLimitPolicy{}
-	_ resource.Object            = &RateLimitPolicy{}
-	_ rest.SingularNameProvider  = &RateLimitPolicy{}
-	_ resourcestrategy.Defaulter = &RateLimitPolicy{}
+	_ runtime.Object                   = &RateLimitPolicy{}
+	_ resource.Object                  = &RateLimitPolicy{}
+	_ rest.SingularNameProvider        = &RateLimitPolicy{}
+	_ resourcestrategy.Defaulter       = &RateLimitPolicy{}
+	_ resourcestrategy.Validater       = &RateLimitPolicy{}
+	_ resourcestrategy.ValidateUpdater = &RateLimitPolicy{}
 
 	_ runtime.Object            = &LoggingPolicy{}
 	_ resource.Object           = &LoggingPolicy{}
 	_ rest.SingularNameProvider = &LoggingPolicy{}
 
-	_ runtime.Object             = &EgressDenyPolicy{}
-	_ resource.Object            = &EgressDenyPolicy{}
-	_ rest.SingularNameProvider  = &EgressDenyPolicy{}
-	_ resourcestrategy.Defaulter = &EgressDenyPolicy{}
+	_ runtime.Object                       = &EgressDenyPolicy{}
+	_ resource.Object                      = &EgressDenyPolicy{}
+	_ resource.ObjectWithStatusSubResource = &EgressDenyPolicy{}
+	_ rest.SingularNameProvider            = &EgressDenyPolicy{}
+	_ resource.StatusSubResource           = &EgressDenyPolicyStatus{}
+	_ resourcestrategy.Defaulter           = &EgressDenyPolicy{}
+	_ resourcestrategy.Validater           = &EgressDenyPolicy{}
+	_ resourcestrategy.ValidateUpdater     = &EgressDenyPolicy{}
 
 	_ runtime.Object            = &Invocation{}
 	_ resource.Object           = &Invocation{}
@@ -325,7 +340,7 @@ func (s *BackendStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
 	}
 }
 
-// CredentialInjectionPolicy (no status subresource).
+// CredentialInjectionPolicy.
 
 func (r *CredentialInjectionPolicy) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
 func (r *CredentialInjectionPolicy) NamespaceScoped() bool             { return true }
@@ -336,10 +351,18 @@ func (r *CredentialInjectionPolicy) NewList() runtime.Object {
 func (r *CredentialInjectionPolicy) GetGroupVersionResource() schema.GroupVersionResource {
 	return gvr("credentialinjectionpolicies")
 }
-func (r *CredentialInjectionPolicy) IsStorageVersion() bool  { return true }
-func (r *CredentialInjectionPolicy) GetSingularName() string { return "credentialinjectionpolicy" }
+func (r *CredentialInjectionPolicy) IsStorageVersion() bool                { return true }
+func (r *CredentialInjectionPolicy) GetSingularName() string               { return "credentialinjectionpolicy" }
+func (r *CredentialInjectionPolicy) GetStatus() resource.StatusSubResource { return &r.Status }
 
-// FallbackRoutingPolicy (no status subresource).
+func (s *CredentialInjectionPolicyStatus) SubResourceName() string { return "status" }
+func (s *CredentialInjectionPolicyStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
+	if p, ok := obj.(*CredentialInjectionPolicy); ok {
+		p.Status = *s
+	}
+}
+
+// FallbackRoutingPolicy.
 
 func (r *FallbackRoutingPolicy) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
 func (r *FallbackRoutingPolicy) NamespaceScoped() bool             { return true }
@@ -348,8 +371,16 @@ func (r *FallbackRoutingPolicy) NewList() runtime.Object           { return &Fal
 func (r *FallbackRoutingPolicy) GetGroupVersionResource() schema.GroupVersionResource {
 	return gvr("fallbackroutingpolicies")
 }
-func (r *FallbackRoutingPolicy) IsStorageVersion() bool  { return true }
-func (r *FallbackRoutingPolicy) GetSingularName() string { return "fallbackroutingpolicy" }
+func (r *FallbackRoutingPolicy) IsStorageVersion() bool                { return true }
+func (r *FallbackRoutingPolicy) GetSingularName() string               { return "fallbackroutingpolicy" }
+func (r *FallbackRoutingPolicy) GetStatus() resource.StatusSubResource { return &r.Status }
+
+func (s *FallbackRoutingPolicyStatus) SubResourceName() string { return "status" }
+func (s *FallbackRoutingPolicyStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
+	if p, ok := obj.(*FallbackRoutingPolicy); ok {
+		p.Status = *s
+	}
+}
 
 // RateLimitPolicy (no status subresource).
 
@@ -375,7 +406,7 @@ func (r *LoggingPolicy) GetGroupVersionResource() schema.GroupVersionResource {
 func (r *LoggingPolicy) IsStorageVersion() bool  { return true }
 func (r *LoggingPolicy) GetSingularName() string { return "loggingpolicy" }
 
-// EgressDenyPolicy (no status subresource).
+// EgressDenyPolicy.
 
 func (r *EgressDenyPolicy) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
 func (r *EgressDenyPolicy) NamespaceScoped() bool             { return true }
@@ -384,8 +415,16 @@ func (r *EgressDenyPolicy) NewList() runtime.Object           { return &EgressDe
 func (r *EgressDenyPolicy) GetGroupVersionResource() schema.GroupVersionResource {
 	return gvr("egressdenypolicies")
 }
-func (r *EgressDenyPolicy) IsStorageVersion() bool  { return true }
-func (r *EgressDenyPolicy) GetSingularName() string { return "egressdenypolicy" }
+func (r *EgressDenyPolicy) IsStorageVersion() bool                { return true }
+func (r *EgressDenyPolicy) GetSingularName() string               { return "egressdenypolicy" }
+func (r *EgressDenyPolicy) GetStatus() resource.StatusSubResource { return &r.Status }
+
+func (s *EgressDenyPolicyStatus) SubResourceName() string { return "status" }
+func (s *EgressDenyPolicyStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
+	if p, ok := obj.(*EgressDenyPolicy); ok {
+		p.Status = *s
+	}
+}
 
 // Invocation (no status subresource; system-written, immutable from clients).
 
