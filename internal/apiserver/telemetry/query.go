@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/apoxy-dev/clrk/internal/apiserver/chsql"
 )
 
 // List limit bounds, mirroring the invocation read model: "unset" is
@@ -197,32 +199,14 @@ func whereOf(clauses []string) string {
 	return " WHERE " + strings.Join(clauses, " AND ")
 }
 
-// dt64Nano renders a unix-nano value as a DateTime64(9) literal CH can
-// compare against the Timestamp column.
-func dt64Nano(nano int64) string {
-	return "fromUnixTimestamp64Nano(toInt64(" + strconv.FormatInt(nano, 10) + "))"
-}
-
-// sqlString wraps s as a ClickHouse single-quoted string literal,
-// escaping backslash and single-quote with a backslash. Same helper as
-// the invocation read model; ch-go has no parameter binding for the
-// chpool.Pool.Do raw-SQL access pattern.
-func sqlString(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('\'')
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; c {
-		case '\\', '\'':
-			b.WriteByte('\\')
-			b.WriteByte(c)
-		default:
-			b.WriteByte(c)
-		}
-	}
-	b.WriteByte('\'')
-	return b.String()
-}
+// dt64Nano / sqlString alias the shared chsql helpers (the DateTime64
+// literal and the ClickHouse string-literal escaper), single-sourced
+// with the invocation and agentmetrics read models. ch-go has no
+// parameter binding for the chpool.Pool.Do raw-SQL access pattern.
+var (
+	dt64Nano  = chsql.DateTime64Nano
+	sqlString = chsql.String
+)
 
 // hexDecode decodes a lowercase-hex id back to bytes, returning nil for
 // empty or malformed input (the writer stored ids via hexOrEmpty, so a

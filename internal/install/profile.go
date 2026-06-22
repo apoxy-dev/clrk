@@ -24,6 +24,11 @@ const (
 	// APIServiceName is the aggregated APIService routing
 	// clrk.apoxy.dev/v1alpha1 to the cm.
 	APIServiceName = "v1alpha1.clrk.apoxy.dev"
+	// MetricsAPIServiceName is the aggregated APIService routing the
+	// Tier-1 metrics group (metrics.clrk.apoxy.dev/v1alpha1) to the cm.
+	// Served by the same apiserver as APIServiceName; kube-aggregator
+	// keys one APIService per group, so the metrics group needs its own.
+	MetricsAPIServiceName = "v1alpha1.metrics.clrk.apoxy.dev"
 	// DefaultWorkerPoolName is the name of the WorkerPool the installer creates
 	// (its Deployment is WorkerDeploymentName, "default-workers").
 	DefaultWorkerPoolName = "default"

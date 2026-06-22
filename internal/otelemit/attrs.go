@@ -153,6 +153,16 @@ const (
 	RetryIneligibleBodyTooLarge = "body_too_large"
 )
 
+// SpanName* are the wire-frozen span names clrk producers emit, declared
+// once so the producer and any span-name-sensitive reader share a single
+// constant. SpanNameIngressDispatch names the ingress routing span: the
+// ingress ext_proc opens it to pick a worker and rewrite :authority, and
+// it always carries a synthesized trace parent, so it is never a trace
+// root.
+const (
+	SpanNameIngressDispatch = "ingress.dispatch"
+)
+
 // IngressOutcome* are the enumerated values for AttrIngressOutcome.
 // Operator dashboards filter on these verbatim, so they're frozen.
 const (

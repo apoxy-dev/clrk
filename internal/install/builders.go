@@ -285,11 +285,37 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		},
 	}
 
+	// Both aggregated groups the cm serves route to the same Service/port;
+	// kube-aggregator keys an APIService per group, so each needs its own
+	// registration. The metrics group is the Tier-1 snapshot surface
+	// (metrics.clrk.apoxy.dev), served by the same apiserver as
+	// clrk.apoxy.dev, so it shares the cm's serving cert and TLS posture.
+	apiSvc := newControllerManagerAPIService(APIServiceName, "clrk.apoxy.dev", p)
+	metricsAPISvc := newControllerManagerAPIService(MetricsAPIServiceName, "metrics.clrk.apoxy.dev", p)
+
+	// Order: SA, then its (Cluster)Role(Binding), then the Services/APIServices/
+	// PVCs, then the NetworkPolicy. A Dev profile yields the same set the dev
+	// bootstrap applied before this refactor (cluster-admin binding, no policy).
+	preDeploy = []client.Object{sa}
+	preDeploy = append(preDeploy, flattenRBAC(controllerManagerRBAC(p))...)
+	preDeploy = append(preDeploy, svc, egSvc, apiSvc, metricsAPISvc, chPVC, natsPVC, kinePVC)
+	if np := controllerManagerNetworkPolicy(p); np != nil {
+		preDeploy = append(preDeploy, np)
+	}
+	return preDeploy, deploy
+}
+
+// newControllerManagerAPIService builds the aggregated APIService routing
+// group/v1alpha1 to the controller-manager Service on :8443. The TLS
+// posture is shared by every group the cm serves: dev/insecure skips
+// verification; the cert-backed modes set caBundle (self-signed) or rely
+// on the cert-manager CA injector (the inject-ca-from annotation).
+func newControllerManagerAPIService(name, group string, p Profile) *apiregistrationv1.APIService {
 	apiSvc := &apiregistrationv1.APIService{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apiregistration.k8s.io/v1", Kind: "APIService"},
-		ObjectMeta: metav1.ObjectMeta{Name: APIServiceName},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: apiregistrationv1.APIServiceSpec{
-			Group:                "clrk.apoxy.dev",
+			Group:                group,
 			Version:              "v1alpha1",
 			GroupPriorityMinimum: 1000,
 			VersionPriority:      15,
@@ -300,9 +326,6 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 			},
 		},
 	}
-	// TLS posture: dev/insecure skips verification; the cert-backed modes set
-	// caBundle (self-signed) or rely on the cert-manager CA injector (M4
-	// populates CABundle / the inject-ca-from annotation on the cluster path).
 	switch p.TLS {
 	case TLSInsecureSkipVerify:
 		apiSvc.Spec.InsecureSkipTLSVerify = true
@@ -315,17 +338,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 			}
 		}
 	}
-
-	// Order: SA, then its (Cluster)Role(Binding), then the Services/APIService/
-	// PVCs, then the NetworkPolicy. A Dev profile yields the same set the dev
-	// bootstrap applied before this refactor (cluster-admin binding, no policy).
-	preDeploy = []client.Object{sa}
-	preDeploy = append(preDeploy, flattenRBAC(controllerManagerRBAC(p))...)
-	preDeploy = append(preDeploy, svc, egSvc, apiSvc, chPVC, natsPVC, kinePVC)
-	if np := controllerManagerNetworkPolicy(p); np != nil {
-		preDeploy = append(preDeploy, np)
-	}
-	return preDeploy, deploy
+	return apiSvc
 }
 
 // newPVC builds a single-replica RWO PVC. storageClass "" leaves the field

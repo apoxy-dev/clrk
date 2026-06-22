@@ -16,6 +16,7 @@ go run "k8s.io/code-generator/cmd/deepcopy-gen@${CODEGEN_VERSION}" \
   --output-file zz_generated.deepcopy.go \
   --go-header-file "${BOILERPLATE_FILE}" \
   ./api/clrk/v1alpha1 \
+  ./api/metrics/v1alpha1 \
   ./internal/extproc/llmcall
 
 echo "Generating register helpers..."
@@ -23,7 +24,8 @@ echo "Generating register helpers..."
 go run "k8s.io/code-generator/cmd/register-gen@${CODEGEN_VERSION}" \
   --output-file zz_generated.register.go \
   --go-header-file "${BOILERPLATE_FILE}" \
-  ./api/clrk/v1alpha1
+  ./api/clrk/v1alpha1 \
+  ./api/metrics/v1alpha1
 
 # Fix missing imports in generated register files (register-gen bug in v0.32.x).
 echo "Fixing register imports..."
@@ -88,4 +90,5 @@ go run k8s.io/kube-openapi/cmd/openapi-gen \
   k8s.io/apimachinery/pkg/version \
   sigs.k8s.io/gateway-api/apis/v1 \
   sigs.k8s.io/gateway-api/apis/v1alpha2 \
-  ./api/clrk/v1alpha1
+  ./api/clrk/v1alpha1 \
+  ./api/metrics/v1alpha1

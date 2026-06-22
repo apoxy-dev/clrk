@@ -46,14 +46,14 @@ import (
 	"k8s.io/utils/ptr"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/apiserver/chsql"
 )
 
-// Doer is the subset of *chpool.Pool that Storage needs. Pulled out as
-// an interface so unit tests can inject a fake (recording the issued
-// ch.Query and populating Result columns from a canned dataset).
-type Doer interface {
-	Do(ctx context.Context, q ch.Query) error
-}
+// Doer is the shared ClickHouse-pool seam (internal/apiserver/chsql),
+// aliased here so Storage's Deps/field references stay local. Unit tests
+// inject a fake recording the issued ch.Query and populating Result
+// columns from a canned dataset.
+type Doer = chsql.Doer
 
 // Deps are the process-wide dependencies shared by all three Invocation
 // GVRs — identical across the top-level resource and the two

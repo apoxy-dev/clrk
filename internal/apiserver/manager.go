@@ -40,6 +40,8 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
+	metricsv1alpha1 "github.com/apoxy-dev/clrk/api/metrics/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/apiserver/agentmetrics"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
 	"github.com/apoxy-dev/clrk/internal/apiserver/telemetry"
@@ -471,6 +473,37 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			telemetry.NewProvider(telemetryDeps, sub.signal, string(sub.signal), sub.agentKind),
 		)
 	}
+
+	// metrics.clrk.apoxy.dev/v1alpha1: the Tier-1 snapshot surface. Two
+	// listable kinds -- taskagentmetrics / daemonagentmetrics -- back the
+	// console agents page with a per-agent {timestamp, window, usage}
+	// rollup, computed at read time by aggregating the same otel_traces
+	// table the telemetry read API serves (no separate metrics store, no
+	// MeterProvider). Registered like Invocation: a custom rest.Storage
+	// over the shared LazyPool, not the kine-backed generic store. Its own
+	// aggregated group, so it needs its own scheme installer.
+	srvBuilder = srvBuilder.WithAdditionalSchemeInstallers(metricsv1alpha1.Install)
+	agentMetricsDeps := agentmetrics.Deps{
+		Pool: lazyPool,
+		// Resolved per request: the Storage is built before the ctrl.Manager
+		// client exists, but List/Get enumerate agent CRs only once the
+		// control plane is up (same lazy pattern as the invoke subresource).
+		Client: func() client.Client {
+			mgr := m.CtrlManager()
+			if mgr == nil {
+				return nil
+			}
+			return mgr.GetClient()
+		},
+	}
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("taskagentmetrics"),
+		agentmetrics.NewTaskAgentMetricsProvider(agentMetricsDeps),
+	)
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("daemonagentmetrics"),
+		agentmetrics.NewDaemonAgentMetricsProvider(agentMetricsDeps),
+	)
 
 	if o.disableAuth {
 		srvBuilder = srvBuilder.DisableAuthorization()

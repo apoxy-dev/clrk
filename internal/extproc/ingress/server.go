@@ -156,7 +156,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				tracer := s.emitter.Load().em.Tracer()
 				parent := resolveOrSynthesizeParent(hdrs)
 				parentCtx := trace.ContextWithSpanContext(ctx, parent)
-				_, span = tracer.Start(parentCtx, "ingress.dispatch",
+				_, span = tracer.Start(parentCtx, otelemit.SpanNameIngressDispatch,
 					trace.WithSpanKind(trace.SpanKindServer))
 			}
 			resp := s.handleRequestHeaders(ctx, hdrs, span)

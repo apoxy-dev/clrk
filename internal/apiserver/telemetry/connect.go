@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ClickHouse/ch-go"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +40,7 @@ import (
 	registryrest "k8s.io/apiserver/pkg/registry/rest"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/apiserver/chsql"
 )
 
 // Signal selects which telemetry table a Connecter reads.
@@ -63,13 +63,11 @@ const (
 	followChunkRows = maxListLimit
 )
 
-// Doer is the subset of *chpool.Pool the read model needs. Pulled out as
-// an interface so the manager can pass the shared LazyPool (which
-// satisfies it structurally) without this package importing the
-// invocation read-model, and so unit tests can inject a fake.
-type Doer interface {
-	Do(ctx context.Context, q ch.Query) error
-}
+// Doer is the shared ClickHouse-pool seam (internal/apiserver/chsql),
+// aliased here so the read model's Deps/field references stay local. The
+// manager passes the shared LazyPool (which satisfies it structurally);
+// unit tests inject a fake.
+type Doer = chsql.Doer
 
 // Deps are the process-wide dependencies shared by every telemetry
 // mount; only signal/singular/agentKind differ per GVR.

@@ -1,26 +1,9 @@
 package invocation
 
-import "strings"
+import "github.com/apoxy-dev/clrk/internal/apiserver/chsql"
 
-// sqlString returns s wrapped as a ClickHouse single-quoted string
-// literal. ch-go has no parameter binding for our access pattern
-// (chpool.Pool.Do takes a SQL body); we build the SQL by hand and
-// escape values here. CH literals escape with backslash for both
-// single-quote and backslash itself.
-func sqlString(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('\'')
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '\\', '\'':
-			b.WriteByte('\\')
-			b.WriteByte(c)
-		default:
-			b.WriteByte(c)
-		}
-	}
-	b.WriteByte('\'')
-	return b.String()
-}
+// sqlString aliases the shared ClickHouse literal escaper so the
+// invocation query builders read naturally while the escaping logic
+// stays single-sourced with the telemetry and agentmetrics read models
+// (see internal/apiserver/chsql).
+var sqlString = chsql.String

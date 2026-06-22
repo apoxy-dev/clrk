@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	apiregv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	apiregclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/typed/apiregistration/v1"
-	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 
 	"github.com/apoxy-dev/clrk/internal/drivers"
 )
@@ -30,6 +30,8 @@ import (
 // Signals (all required):
 //   - k3s apiserver answers discovery
 //   - clrk.apoxy.dev/v1alpha1 APIService is Available
+//   - metrics.clrk.apoxy.dev/v1alpha1 APIService is Available (the
+//     Tier-1 metrics group the cm serves alongside clrk.apoxy.dev)
 //   - the ClickHouse-backed Invocation store answers a List (the cm's
 //     async CH pool resolved and the invocation_events table exists),
 //     so a test that reads invocations immediately doesn't race the dial
@@ -119,19 +121,10 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 			return err
 		}},
 		{"clrk.apoxy.dev APIService Available", func(c context.Context) error {
-			as, err := apireg.APIServices().Get(c, "v1alpha1.clrk.apoxy.dev", metav1.GetOptions{})
-			if err != nil {
-				return err
-			}
-			for _, cond := range as.Status.Conditions {
-				if cond.Type == apiregv1.Available {
-					if cond.Status == apiregv1.ConditionTrue {
-						return nil
-					}
-					return fmt.Errorf("APIService not Available: %s", cond.Message)
-				}
-			}
-			return errors.New("APIService Available condition not yet set")
+			return devAPIServiceAvailable(c, apireg, "v1alpha1.clrk.apoxy.dev")
+		}},
+		{"metrics.clrk.apoxy.dev APIService Available", func(c context.Context) error {
+			return devAPIServiceAvailable(c, apireg, "v1alpha1.metrics.clrk.apoxy.dev")
 		}},
 		{"ClickHouse-backed Invocation store responsive", func(c context.Context) error {
 			// List the cluster-wide Invocation resource: a 200 means the
@@ -200,4 +193,22 @@ func waitDevReady(ctx context.Context, kubeconfigPath string, interval time.Dura
 		case <-time.After(interval):
 		}
 	}
+}
+
+// devAPIServiceAvailable reports nil once the named aggregated APIService
+// carries an Available=True condition.
+func devAPIServiceAvailable(ctx context.Context, apireg apiregclient.ApiregistrationV1Interface, name string) error {
+	as, err := apireg.APIServices().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	for _, cond := range as.Status.Conditions {
+		if cond.Type == apiregv1.Available {
+			if cond.Status == apiregv1.ConditionTrue {
+				return nil
+			}
+			return fmt.Errorf("APIService not Available: %s", cond.Message)
+		}
+	}
+	return errors.New("APIService Available condition not yet set")
 }

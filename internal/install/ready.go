@@ -66,19 +66,10 @@ func WaitReady(ctx context.Context, cfg *rest.Config, p Profile, interval time.D
 		fn   func(context.Context) error
 	}{
 		{"clrk.apoxy.dev APIService Available", func(c context.Context) error {
-			as, err := apireg.APIServices().Get(c, APIServiceName, metav1.GetOptions{})
-			if err != nil {
-				return err
-			}
-			for _, cond := range as.Status.Conditions {
-				if cond.Type == apiregv1.Available {
-					if cond.Status == apiregv1.ConditionTrue {
-						return nil
-					}
-					return fmt.Errorf("APIService not Available: %s", cond.Message)
-				}
-			}
-			return errors.New("APIService Available condition not yet set")
+			return apiServiceAvailable(c, apireg, APIServiceName)
+		}},
+		{"metrics.clrk.apoxy.dev APIService Available", func(c context.Context) error {
+			return apiServiceAvailable(c, apireg, MetricsAPIServiceName)
 		}},
 		{"ClickHouse-backed Invocation store responsive", func(c context.Context) error {
 			_, err := core.Discovery().RESTClient().Get().
@@ -141,6 +132,25 @@ func WaitReady(ctx context.Context, cfg *rest.Config, p Profile, interval time.D
 		case <-time.After(interval):
 		}
 	}
+}
+
+// apiServiceAvailable reports nil once the named aggregated APIService
+// carries an Available=True condition (kube-aggregator probed the cm
+// backend and accepted it).
+func apiServiceAvailable(ctx context.Context, apireg apiregclient.ApiregistrationV1Interface, name string) error {
+	as, err := apireg.APIServices().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	for _, cond := range as.Status.Conditions {
+		if cond.Type == apiregv1.Available {
+			if cond.Status == apiregv1.ConditionTrue {
+				return nil
+			}
+			return fmt.Errorf("APIService not Available: %s", cond.Message)
+		}
+	}
+	return errors.New("APIService Available condition not yet set")
 }
 
 func deploymentAvailable(ctx context.Context, core kubernetes.Interface, ns, name string) error {
