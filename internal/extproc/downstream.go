@@ -809,6 +809,18 @@ func (ds *downstreamStream) onResponseBody(m *extprocv3.HttpBody, now time.Time)
 // Called once per stream, just before sink.Emit, so partial-capture
 // records (truncated bodies) still attempt parsing.
 func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRule {
+	// Undo the captured bodies' content-encoding for parsing. Agents send
+	// `accept-encoding: gzip, ...` and clrk's MITM forwards it, so a
+	// provider gzips even SSE responses -- the raw capture is then opaque
+	// to the SSE/JSON parsers and every token count reads zero. Decode
+	// into locals only: rec.ResponseBody keeps the on-wire (compressed)
+	// bytes so clrk.resp.bytes and the body span event stay accurate, and
+	// the agent-facing data path is untouched. decodeForParse no-ops on a
+	// truncated body (a keep-last-N tail has no stream header to inflate
+	// from) and on identity/undecodable encodings.
+	reqBody := decodeForParse(rec.RequestBody, rec.RequestHeaders["content-encoding"], rec.RequestTruncated)
+	respBody := decodeForParse(rec.ResponseBody, rec.ResponseHeaders["content-encoding"], rec.ResponseTruncated)
+
 	// Augment the MCP record with response-envelope facts (the JSON-RPC
 	// error code) now that the response body is buffered. rec.MCP is set
 	// only when the request parsed as a single JSON-RPC call under an
@@ -816,7 +828,7 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 	// body, so ParseResponse returns nil and this is a no-op there.
 	if rec.MCP != nil {
 		if res := parsers.ParseResponse(parsers.Input{
-			RespBody:      rec.ResponseBody,
+			RespBody:      respBody,
 			RespTruncated: rec.ResponseTruncated,
 			RespHeaders:   rec.ResponseHeaders,
 		}); res != nil && res.IsError {
@@ -843,9 +855,9 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 			Path:          rec.RequestHeaders[":path"],
 			ReqHeaders:    rec.RequestHeaders,
 			RespHeaders:   rec.ResponseHeaders,
-			ReqBody:       rec.RequestBody,
+			ReqBody:       reqBody,
 			ReqTruncated:  rec.RequestTruncated,
-			RespBody:      rec.ResponseBody,
+			RespBody:      respBody,
 			RespTruncated: rec.ResponseTruncated,
 		})
 	}
@@ -864,6 +876,23 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 	rec.MatchedRouteNamespace = rr.routeNamespace
 	rec.MatchedRouteName = rr.routeName
 	return rr
+}
+
+// decodeForParse returns body with its content-encoding undone for
+// telemetry parsing, falling back to the raw bytes when that isn't
+// possible. A truncated body is skipped outright: streamed-response
+// capture is keep-last-N, so a truncated body is a header-less tail that
+// no codec can inflate. A decode failure (corrupt or partial stream)
+// likewise yields the raw bytes, which the parser then treats as
+// usage-absent -- the same outcome as before this decode step existed.
+func decodeForParse(body []byte, contentEncoding string, truncated bool) []byte {
+	if truncated {
+		return body
+	}
+	if dec, ok := llmcall.DecodeBody(body, contentEncoding); ok {
+		return dec
+	}
+	return body
 }
 
 // lookupCreds matches the request to an APR (if any) and returns the
