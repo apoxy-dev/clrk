@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -19,11 +20,6 @@ import (
 // must not expand into an outsized allocation inside the ext_proc. 16 MiB
 // is far above any real provider response we parse usage from.
 const maxDecodedBody = 16 << 20
-
-// errEncodingUnsupported marks a content-encoding token DecodeBody can't
-// inflate; the caller treats it like any other decode failure (usage
-// stays absent).
-var errEncodingUnsupported = errors.New("unsupported content-encoding")
 
 // DecodeBody returns body with its HTTP content-encoding undone, so a
 // telemetry parser sees plaintext. It is the seam that lets usage parsing
@@ -90,34 +86,42 @@ func inflate(body []byte, enc string) ([]byte, error) {
 	case "br":
 		return readCapped(brotli.NewReader(bytes.NewReader(body)))
 	case "zstd":
-		zr, err := zstd.NewReader(bytes.NewReader(body))
+		// Bound the decoder's memory to the same 16 MiB output ceiling.
+		// Without this, klauspost's defaults (64 GiB max decoded, ~512 MiB
+		// max window) let a tiny attacker-supplied frame whose header
+		// declares a huge window allocate hundreds of MiB BEFORE any output
+		// -- readCapped only bounds bytes read, not the decoder's internal
+		// window buffer, so it can't stop that. The upstream response is
+		// untrusted (a sandboxed agent can egress to any host), so this is
+		// a real memory-amplification vector. Concurrency 1 keeps the
+		// one-shot decode synchronous (no background goroutine to reap).
+		zr, err := zstd.NewReader(bytes.NewReader(body),
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(maxDecodedBody),
+			zstd.WithDecoderMaxWindow(maxDecodedBody))
 		if err != nil {
 			return nil, err
 		}
 		defer zr.Close()
 		return readCapped(zr)
 	case "deflate":
-		// content-encoding: deflate is zlib-wrapped per RFC 9110, but
-		// some servers emit a raw DEFLATE stream. Try zlib first, fall
-		// back to raw flate when the zlib header doesn't decode.
-		if out, err := inflateZlib(body); err == nil {
-			return out, nil
+		// content-encoding: deflate is zlib-wrapped per RFC 9110, but some
+		// servers emit a raw DEFLATE stream. Fall back to raw flate ONLY
+		// when the zlib header is absent (NewReader fails) -- a
+		// constructed-but-oversized/corrupt zlib stream must surface its
+		// own readCapped error, not be silently re-decoded as raw flate
+		// (which would mask the size cap or yield garbage the parser then
+		// misreads).
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			defer zr.Close()
+			return readCapped(zr)
 		}
 		fr := flate.NewReader(bytes.NewReader(body))
 		defer fr.Close()
 		return readCapped(fr)
 	default:
-		return nil, errEncodingUnsupported
+		return nil, fmt.Errorf("unsupported content-encoding %q", enc)
 	}
-}
-
-func inflateZlib(body []byte) ([]byte, error) {
-	zr, err := zlib.NewReader(bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer zr.Close()
-	return readCapped(zr)
 }
 
 // readCapped reads r fully but refuses to buffer more than maxDecodedBody
