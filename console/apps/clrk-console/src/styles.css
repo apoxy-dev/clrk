@@ -962,7 +962,8 @@
 .attrs-tray-close svg { width: 12px; height: 12px; display: block; }
 .attrs-tray-bd { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 20px; }
 .attrs-tray-bd .kvrow {
-  grid-template-columns: 150px 1fr;
+  /* Key column scales with the half-page tray so dotted keys don't wrap. */
+  grid-template-columns: 32% 1fr;
   gap: 12px;
 }
 
