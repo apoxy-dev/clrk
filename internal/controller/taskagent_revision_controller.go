@@ -44,46 +44,31 @@ type TaskAgentRevisionReconciler struct {
 	ActiveExec InvocationActiveCounter
 }
 
-// workerActiveSum is the legacy ActiveExecutions source: the per-worker
-// in-flight counts summed off the latest-ready revision's Status.Workers.
-// Only the latest-ready slice is summed because executions against older
-// revisions drain quickly (one-shot) and summing every revision would
-// double-count during a rollover. Used as the fallback when the invocation
-// read model is unavailable. (In-flight state now flows through the
-// WORKER_STATUS KV, not onto Status.Workers, so this sum is effectively a
-// zero floor until the fallback is removed.)
-func (r *TaskAgentRevisionReconciler) workerActiveSum(ctx context.Context, namespace, revName string) (int32, error) {
+// revisionWorkerSums fetches the named revision once and sums two per-worker
+// counters off its Status.Workers stream in a single pass: the in-flight
+// ActiveExecutions (the legacy fallback source for TaskAgent.ActiveExecutions
+// when the invocation read model is unavailable) and the WarmCount (the only
+// source for WarmSandboxes). Only the latest-ready revision is summed because
+// executions against older revisions drain quickly (one-shot) and summing
+// every revision would double-count during a rollover. A missing revision is
+// treated as zero (its status may not be published yet).
+//
+// (In-flight state now flows through the WORKER_STATUS KV, not onto
+// Status.Workers, so the active sum is effectively a zero floor until the
+// fallback is removed; the warm sum is live.)
+func (r *TaskAgentRevisionReconciler) revisionWorkerSums(ctx context.Context, namespace, revName string) (active, warm int32, err error) {
 	var rev clrkv1alpha1.AgentSandboxRevision
 	if err := r.Get(ctx, types.NamespacedName{Name: revName, Namespace: namespace}, &rev); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, err
+		return 0, 0, err
 	}
-	var sum int32
 	for _, ws := range rev.Status.Workers {
-		sum += ws.ActiveExecutions
+		active += ws.ActiveExecutions
+		warm += ws.WarmCount
 	}
-	return sum, nil
-}
-
-// workerWarmSum sums the per-worker WarmCount across the named revision's
-// WorkerStatus stream — the realized pre-warm pool size for the agent. A
-// missing revision is treated as zero (the revision may not have published
-// status yet), matching workerActiveSum.
-func (r *TaskAgentRevisionReconciler) workerWarmSum(ctx context.Context, namespace, revName string) (int32, error) {
-	var rev clrkv1alpha1.AgentSandboxRevision
-	if err := r.Get(ctx, types.NamespacedName{Name: revName, Namespace: namespace}, &rev); err != nil {
-		if apierrors.IsNotFound(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	var sum int32
-	for _, ws := range rev.Status.Workers {
-		sum += ws.WarmCount
-	}
-	return sum, nil
+	return active, warm, nil
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch;update;patch
@@ -205,47 +190,32 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	meta.SetStatusCondition(&ta.Status.Conditions, revisionReady)
 
-	// ActiveExecutions: count non-terminal invocations from the read
-	// model (APO-620). When the read model is unavailable (ClickHouse
-	// binary-layering rollout in progress, or no counter wired) fall back
-	// to the legacy per-worker sum off the latest-ready revision's
-	// WorkerStatus stream so the field stays live in the interim.
+	// ActiveExecutions + WarmSandboxes are both rolled up from the
+	// latest-ready revision's per-worker WorkerStatus stream, so fetch that
+	// revision once and sum both. WarmSandboxes (realized pre-warm capacity)
+	// has no read model — the worker statuses are its only source. For
+	// ActiveExecutions, the invocation read model (APO-620) is preferred and
+	// the worker sum is the fallback when it is unavailable (ClickHouse
+	// binary-layering rollout in progress, or no counter wired). Both are
+	// zero when no revision is ready yet.
 	if ta.Status.LatestReadyRevisionName != "" {
+		activeSum, warmSum, err := r.revisionWorkerSums(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("revision worker sums: %w", err)
+		}
+		ta.Status.WarmSandboxes = warmSum
 		if r.ActiveExec != nil {
-			if n, err := r.ActiveExec.CountActive(ctx, ta.Namespace, clrkv1alpha1.InvocationParentTaskAgent, ta.Name); err == nil {
+			if n, cerr := r.ActiveExec.CountActive(ctx, ta.Namespace, clrkv1alpha1.InvocationParentTaskAgent, ta.Name); cerr == nil {
 				ta.Status.ActiveExecutions = n
 			} else {
-				logger.V(1).Info("Invocation count unavailable, falling back to worker sum", "err", err)
-				sum, serr := r.workerActiveSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
-				if serr != nil {
-					return ctrl.Result{}, fmt.Errorf("active executions fallback: %w", serr)
-				}
-				ta.Status.ActiveExecutions = sum
+				logger.V(1).Info("Invocation count unavailable, falling back to worker sum", "err", cerr)
+				ta.Status.ActiveExecutions = activeSum
 			}
 		} else {
-			sum, err := r.workerActiveSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("active executions: %w", err)
-			}
-			ta.Status.ActiveExecutions = sum
+			ta.Status.ActiveExecutions = activeSum
 		}
 	} else {
 		ta.Status.ActiveExecutions = 0
-	}
-
-	// WarmSandboxes: the realized pre-warm count for the latest-ready
-	// revision, summed across its workers' WarmCount. Unlike
-	// ActiveExecutions there is no invocation read model for warm capacity
-	// (warmth is a worker-local sandbox-pool fact, not an invocation
-	// lifecycle event), so the per-worker WorkerStatus stream is the only
-	// source. Zero when no revision is ready yet.
-	if ta.Status.LatestReadyRevisionName != "" {
-		sum, err := r.workerWarmSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("warm sandboxes: %w", err)
-		}
-		ta.Status.WarmSandboxes = sum
-	} else {
 		ta.Status.WarmSandboxes = 0
 	}
 

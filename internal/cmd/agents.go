@@ -220,6 +220,7 @@ func printTaskAgentDetail(out io.Writer, ta *clrkv1alpha1.TaskAgent) error {
 	fmt.Fprintf(out, "Age:          %s\n", ageString(ta.CreationTimestamp))
 	fmt.Fprintln(out, "Status:")
 	fmt.Fprintf(out, "  ActiveExecutions:            %d\n", ta.Status.ActiveExecutions)
+	fmt.Fprintf(out, "  WarmSandboxes:               %d\n", ta.Status.WarmSandboxes)
 	fmt.Fprintf(out, "  LatestCreatedRevisionName:   %s\n", ta.Status.LatestCreatedRevisionName)
 	fmt.Fprintf(out, "  LatestReadyRevisionName:     %s\n", ta.Status.LatestReadyRevisionName)
 	printEgressRefs(out, ta.Spec.EgressRefs)

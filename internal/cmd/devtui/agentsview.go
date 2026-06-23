@@ -243,6 +243,9 @@ func agentStatusBadge(s devagents.Snapshot, now time.Time) string {
 		if s.ActiveExecutions > 0 {
 			return statusReadyStyle.Render("●") + fmt.Sprintf(" active ×%d", s.ActiveExecutions)
 		}
+		if s.WarmSandboxes > 0 {
+			return statusReadyStyle.Render("◍") + fmt.Sprintf(" warm ×%d", s.WarmSandboxes)
+		}
 		return statusPendingStyle.Render("◌") + " idle"
 	}
 	return "—"

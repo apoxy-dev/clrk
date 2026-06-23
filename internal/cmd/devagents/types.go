@@ -43,6 +43,7 @@ type Snapshot struct {
 	UpSince          time.Time
 	RestartCount     int32
 	ActiveExecutions int32
+	WarmSandboxes    int32
 	LastCondition    string
 
 	// Stats (rolling 60s window unless noted).

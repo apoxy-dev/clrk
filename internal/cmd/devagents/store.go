@@ -187,6 +187,7 @@ func buildSnapshot(id ID, obj *unstructured.Unstructured) Snapshot {
 	snap.Phase = nestedString(obj.Object, "status", "phase")
 	snap.RestartCount = nestedInt32(obj.Object, "status", "restartCount")
 	snap.ActiveExecutions = nestedInt32(obj.Object, "status", "activeExecutions")
+	snap.WarmSandboxes = nestedInt32(obj.Object, "status", "warmSandboxes")
 	if t, ok := nestedTime(obj.Object, "status", "upSince"); ok {
 		snap.UpSince = t
 	}
