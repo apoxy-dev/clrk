@@ -2,13 +2,9 @@ package extproc
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -19,6 +15,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/extproc/capture"
 	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
@@ -96,7 +93,11 @@ func newDerived(r Record) derived {
 		scheme = "https"
 	}
 	path := r.RequestHeaders[":path"]
-	host, port := splitAuthority(authority)
+	host, port := capture.SplitAuthority(authority)
+	// Split the query out of :path so url.full escapes the path and query
+	// independently; a query left inside url.URL.Path percent-escapes the
+	// '?' (e.g. /v1/messages%3Fbeta=true).
+	p, q := capture.SplitPathQuery(path)
 	return derived{
 		method:    method,
 		authority: authority,
@@ -104,7 +105,7 @@ func newDerived(r Record) derived {
 		path:      path,
 		host:      host,
 		port:      port,
-		urlFull:   buildURL(scheme, authority, path),
+		urlFull:   capture.BuildURL(scheme, authority, p, q),
 		status:    parseStatus(r.ResponseHeaders[":status"]),
 	}
 }
@@ -228,24 +229,24 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	// can't preserve them as a list because no log/trace backend agrees
 	// on a list-of-string attribute kind.
 	if !r.RequestHeadersAt.IsZero() {
-		span.AddEvent("http.request.headers",
+		span.AddEvent(otelemit.SpanEventHTTPRequestHeaders,
 			oteltrace.WithTimestamp(r.RequestHeadersAt),
 			oteltrace.WithAttributes(headerAttrs("http.request.header.", r.RequestHeaders)...))
 	}
 	if !r.RequestBodyAt.IsZero() && len(r.RequestBody) > 0 {
-		span.AddEvent("http.request.body",
+		span.AddEvent(otelemit.SpanEventHTTPRequestBody,
 			oteltrace.WithTimestamp(r.RequestBodyAt),
-			oteltrace.WithAttributes(bodyAttrs(r.RequestBodyForEvent(), r.RequestTruncated, r.RequestContentEncoding)...))
+			oteltrace.WithAttributes(otelemit.BodyEventAttrs(r.RequestBodyForEvent(), r.RequestTruncated, r.RequestContentEncoding)...))
 	}
 	if !r.ResponseHeadersAt.IsZero() {
-		span.AddEvent("http.response.headers",
+		span.AddEvent(otelemit.SpanEventHTTPResponseHeaders,
 			oteltrace.WithTimestamp(r.ResponseHeadersAt),
 			oteltrace.WithAttributes(headerAttrs("http.response.header.", r.ResponseHeaders)...))
 	}
 	if !r.ResponseBodyAt.IsZero() && len(r.ResponseBody) > 0 {
-		span.AddEvent("http.response.body",
+		span.AddEvent(otelemit.SpanEventHTTPResponseBody,
 			oteltrace.WithTimestamp(r.ResponseBodyAt),
-			oteltrace.WithAttributes(bodyAttrs(r.ResponseBodyForEvent(), r.ResponseTruncated, r.ResponseContentEncoding)...))
+			oteltrace.WithAttributes(otelemit.BodyEventAttrs(r.ResponseBodyForEvent(), r.ResponseTruncated, r.ResponseContentEncoding)...))
 	}
 
 	if d.status >= 400 {
@@ -549,24 +550,6 @@ func headerAttrs(prefix string, headers map[string]string) []attribute.KeyValue 
 	return out
 }
 
-// bodyAttrs builds the attributes for a body span event. body is the bytes
-// to ship (content-decoded when enrichRecord inflated it, else the raw
-// capture), so clrk.body.bytes is the decoded length and clrk.body.b64 the
-// readable payload. contentEncoding, when non-empty, records the wire
-// encoding the body arrived in -- a breadcrumb on a decoded body and the
-// signal that a truncated/undecodable body's b64 is still the raw bytes.
-func bodyAttrs(body []byte, truncated bool, contentEncoding string) []attribute.KeyValue {
-	out := []attribute.KeyValue{
-		attribute.Int(otelemit.AttrBodyBytes, len(body)),
-		attribute.Bool(otelemit.AttrBodyTruncated, truncated),
-		attribute.String(otelemit.AttrBodyB64, base64.StdEncoding.EncodeToString(body)),
-	}
-	if contentEncoding != "" {
-		out = append(out, attribute.String(otelemit.AttrBodyContentEncoding, contentEncoding))
-	}
-	return out
-}
-
 func severityFor(status int) otellog.Severity {
 	switch {
 	case status == 0:
@@ -656,32 +639,6 @@ func spanNameFor(r Record, d derived) string {
 		return method
 	}
 	return method + " " + host
-}
-
-func buildURL(scheme, authority, path string) string {
-	if authority == "" {
-		return ""
-	}
-	u := url.URL{Scheme: scheme, Host: authority, Path: path}
-	return u.String()
-}
-
-// splitAuthority returns the host and port portions of an HTTP/2
-// :authority. Port 0 indicates no port was set (or it was malformed).
-// Uses net.SplitHostPort so IPv6 literals like `[::1]:443` parse
-// correctly.
-func splitAuthority(authority string) (string, int) {
-	if authority == "" {
-		return "", 0
-	}
-	host, portStr, err := net.SplitHostPort(authority)
-	if err != nil {
-		// No port present — common for HTTP/2 :authority. Strip IPv6
-		// brackets if any and return port 0.
-		return strings.Trim(authority, "[]"), 0
-	}
-	port, _ := strconv.Atoi(portStr)
-	return host, port
 }
 
 func parseStatus(s string) int {

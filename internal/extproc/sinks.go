@@ -14,6 +14,7 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/egidentity"
+	"github.com/apoxy-dev/clrk/internal/extproc/capture"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 )
 
@@ -21,15 +22,6 @@ import (
 // background workers to flush during cache rebuild. OTLP exporters use
 // it as a hard deadline.
 const sinkShutdownTimeout = 5 * time.Second
-
-// defaultIncludedContentTypes is the body-capture content-type allow-list
-// applied when OTLP.CaptureBody.IncludeContentTypes is empty. Matched by
-// case-insensitive prefix on the request/response content-type header.
-var defaultIncludedContentTypes = []string{
-	"application/json",
-	"application/x-ndjson",
-	"text/event-stream",
-}
 
 // egSink is a per-EgressGateway capture configuration: the resolved Sink
 // (OTLP-to-cm or fallback slog), the body-capture cap, the content-
@@ -305,7 +297,7 @@ func (r *sinkRegistry) shutdownAll(ctx context.Context) {
 // is set. The EG identity is stamped as a resource attribute so cm's
 // receiver can pick the right per-EG forwarder.
 func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, error) {
-	maxBytes := captureMaxBytesDefault
+	maxBytes := capture.MaxBytesDefault
 	var included []string
 	var captureSpec *clrkv1alpha1.BodyCaptureSpec
 	if eg.Spec.OTLP != nil && eg.Spec.OTLP.CaptureBody != nil {
@@ -319,7 +311,7 @@ func buildEgSink(ctx context.Context, eg *clrkv1alpha1.EgressGateway) (*egSink, 
 		}
 	}
 	if len(included) == 0 {
-		included = defaultIncludedContentTypes
+		included = capture.DefaultIncludedContentTypes
 	}
 
 	out := &egSink{
@@ -349,21 +341,4 @@ func lowerAll(in []string) []string {
 		out[i] = strings.ToLower(strings.TrimSpace(s))
 	}
 	return out
-}
-
-// contentTypeIncluded reports whether the given Content-Type header
-// matches any prefix in includedTypes. An empty includedTypes slice
-// means "capture everything" — used when EG resolution fell back to
-// slogSink and we never derived a per-EG allow-list.
-func contentTypeIncluded(contentType string, includedTypes []string) bool {
-	if len(includedTypes) == 0 {
-		return true
-	}
-	ct := strings.ToLower(contentType)
-	for _, t := range includedTypes {
-		if strings.HasPrefix(ct, t) {
-			return true
-		}
-	}
-	return false
 }

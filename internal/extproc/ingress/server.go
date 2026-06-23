@@ -14,8 +14,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -31,7 +33,9 @@ import (
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/cloudevents"
+	"github.com/apoxy-dev/clrk/internal/extproc/capture"
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
+	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/tracectx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
 	"github.com/apoxy-dev/clrk/internal/invevent"
@@ -52,8 +56,10 @@ type emitterCell struct {
 }
 
 // Server implements envoy.service.ext_proc.v3.ExternalProcessor for
-// inbound TaskAgent traffic. One stream per HTTP transaction; we only
-// act on RequestHeaders and continue everything else untouched.
+// inbound TaskAgent traffic. One stream per HTTP transaction; we act on
+// RequestHeaders (worker pick + :authority rewrite) and observe
+// RequestBody (the trigger payload, captured onto the dispatch span),
+// continuing everything else untouched.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 
@@ -116,23 +122,56 @@ func (s *Server) SwapEmitter(em otelemit.Emitter) otelemit.Emitter {
 	return prev.em
 }
 
-// Process handles one ext_proc stream. The only message we act on is
-// RequestHeaders — we use it to pick a worker and rewrite :authority
-// for the dynamic_forward_proxy cluster downstream. Body/trailer
-// phases are continued unchanged.
+// Process handles one ext_proc stream. RequestHeaders drives the worker
+// pick and :authority rewrite for the dynamic_forward_proxy cluster
+// downstream. RequestBody is observed — not mutated — to capture the
+// trigger payload onto the dispatch span (see below). Trailer phases are
+// continued unchanged.
 //
 // The ingress.dispatch span is initialized lazily on the first
 // RequestHeaders message (we have no parent context to root it under
 // until then). It ends when the stream exits — EOF, error, or
 // ImmediateResponse-induced close — so the span's wall-clock duration
 // reflects the entire dispatch transaction.
+//
+// Request-body capture: the ingress EnvoyExtensionPolicy already runs
+// RequestBodyMode=STREAMED (taskagent_ingress_controller.go) so the
+// dispatcher can pump the sandbox's stdin without waiting on full-body
+// buffering. That mode means Envoy already streams every request-body
+// chunk to this server; they were previously dropped. We accumulate them
+// (keep-first-N, bounded by captureMaxBytesDefault, gated on the
+// content-type allow-list) and emit one http.request.body span event at
+// end-of-stream using the same clrk.body.* contract the egress sink emits
+// (otelemit.BodyEventAttrs), so the console renders the root span's
+// request body with no front-end change. Capture is observe-only: every
+// chunk is forwarded unchanged, preserving the no-buffering dispatch path.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	ctx := stream.Context()
 	var span trace.Span
+	// Per-stream request-body capture state, populated from RequestHeaders
+	// (which always precedes RequestBody) and accumulated across chunks.
+	var (
+		captureBody  bool
+		reqEncoding  string
+		reqBody      []byte
+		reqBytesLeft = capture.MaxBytesDefault
+		reqTruncated bool
+		reqBodyAt    time.Time
+		bodyEmitted  bool
+	)
 	defer func() {
-		if span != nil {
-			span.End()
+		if span == nil {
+			return
 		}
+		// Flush a partially-captured body if the stream ended without an
+		// end-of-stream chunk (e.g. the client aborted mid-upload), matching
+		// the egress sink which emits whatever it captured at stream end. A
+		// stream that reached EOS already emitted (bodyEmitted), so this
+		// never double-emits.
+		if captureBody && !bodyEmitted && len(reqBody) > 0 {
+			emitRequestBodyEvent(span, reqBody, reqTruncated, reqEncoding, reqBodyAt)
+		}
+		span.End()
 	}()
 
 	for {
@@ -159,13 +198,47 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				_, span = tracer.Start(parentCtx, otelemit.SpanNameIngressDispatch,
 					trace.WithSpanKind(trace.SpanKindServer))
 			}
+			// Gate request-body capture on the content-type allow-list
+			// (the same primitive the egress sink uses) and stash the
+			// content-encoding so the body event can undo/label it at
+			// end-of-stream.
+			captureBody = capture.ContentTypeIncluded(hdrs["content-type"], ingressIncludedContentTypes)
+			reqEncoding = hdrs["content-encoding"]
 			resp := s.handleRequestHeaders(ctx, hdrs, span)
 			if err := stream.Send(resp); err != nil {
 				return err
 			}
-		default:
-			if err := stream.Send(continueResponse()); err != nil {
+		case *extprocv3.ProcessingRequest_RequestBody:
+			// Observe-only: accumulate the trigger payload (bounded,
+			// keep-first-N) and emit the body span event once the stream
+			// ends, then always forward the chunk unchanged.
+			if captureBody && span != nil && !bodyEmitted {
+				chunk := m.RequestBody.GetBody()
+				if reqBodyAt.IsZero() && len(chunk) > 0 {
+					reqBodyAt = time.Now()
+				}
+				var trunc bool
+				reqBody, trunc = capture.AppendBounded(reqBody, chunk, &reqBytesLeft)
+				reqTruncated = reqTruncated || trunc
+				if m.RequestBody.GetEndOfStream() {
+					emitRequestBodyEvent(span, reqBody, reqTruncated, reqEncoding, reqBodyAt)
+					bodyEmitted = true
+				}
+			}
+			if err := stream.Send(bodyContinue()); err != nil {
 				return err
+			}
+		default:
+			// Phases the ingress filter doesn't act on. Reply with a
+			// CONTINUE of the MATCHING type -- a phase-mismatched response
+			// (e.g. a RequestHeaders-typed reply to a ResponseBody) would
+			// reset the stream. Under the ingress ProcessingMode (response +
+			// trailer modes SKIP'd) none of these arrive today; this keeps
+			// the filter correct if a future policy enables them.
+			if resp := continueUnchanged(req); resp != nil {
+				if err := stream.Send(resp); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -180,8 +253,65 @@ func stampOutcome(span trace.Span, outcome string, status int) {
 		semconv.HTTPResponseStatusCode(status),
 	)
 	if status >= 400 {
+		// error.type (OTel HTTP server span semconv) — the clrk outcome
+		// enum is low-cardinality and predictable, exactly what the attr
+		// wants. Pairs with the span status flip below.
+		span.SetAttributes(semconv.ErrorTypeKey.String(outcome))
 		span.SetStatus(codes.Error, outcome)
 	}
+}
+
+// stampHTTPServerAttrs records the OTel HTTP server span semconv
+// attributes derivable from the inbound request onto the dispatch span:
+// the request line (method/scheme/path/query/url), the server authority
+// the client addressed, the originating client address, the user agent,
+// and the declared request body size. Stamped for every outcome -- including
+// rejections -- so an operator sees what was requested even on a 400/404.
+// http.response.status_code / error.type are stamped per-outcome by
+// stampOutcome. The span keeps its wire-frozen ingress.dispatch name (the
+// read model identifies the root span by it) rather than the semconv
+// "{method} {route}" form.
+//
+// :authority is read here, before handleRequestHeaders rewrites it to the
+// picked worker, so server.address is the gateway host the client hit --
+// not the internal pod endpoint.
+func stampHTTPServerAttrs(span trace.Span, hdrs map[string]string) {
+	method := hdrs[":method"]
+	scheme := hdrs[":scheme"]
+	if scheme == "" {
+		scheme = "https"
+	}
+	path, query := capture.SplitPathQuery(hdrs[":path"])
+	authority := hdrs[":authority"]
+	host, port := capture.SplitAuthority(authority)
+
+	attrs := make([]attribute.KeyValue, 0, 10)
+	if method != "" {
+		attrs = append(attrs, semconv.HTTPRequestMethodKey.String(method))
+	}
+	attrs = append(attrs, semconv.URLScheme(scheme))
+	if path != "" {
+		attrs = append(attrs, semconv.URLPath(path))
+	}
+	if query != "" {
+		attrs = append(attrs, semconv.URLQuery(query))
+	}
+	if authority != "" {
+		attrs = append(attrs, semconv.ServerAddress(host), semconv.URLFull(capture.BuildURL(scheme, authority, path, query)))
+		if port > 0 {
+			attrs = append(attrs, semconv.ServerPort(port))
+		}
+	}
+	if ca := clientAddress(hdrs); ca != "" {
+		attrs = append(attrs, semconv.ClientAddress(ca))
+	}
+	if ua := hdrs["user-agent"]; ua != "" {
+		attrs = append(attrs, semconv.UserAgentOriginal(ua))
+	}
+	if n, ok := contentLength(hdrs["content-length"]); ok {
+		attrs = append(attrs, semconv.HTTPRequestBodySize(n))
+	}
+	span.SetAttributes(attrs...)
 }
 
 // handleRequestHeaders performs the worker pick and builds a
@@ -195,6 +325,12 @@ func stampOutcome(span trace.Span, outcome string, status int) {
 // outcome / status / agent-identity attributes on it before each
 // return.
 func (s *Server) handleRequestHeaders(ctx context.Context, hdrs map[string]string, span trace.Span) *extprocv3.ProcessingResponse {
+	// Stamp the standard HTTP server span attributes + the request-header
+	// event first, so they land on every outcome including the early
+	// rejections below.
+	stampHTTPServerAttrs(span, hdrs)
+	emitRequestHeadersEvent(span, hdrs)
+
 	taHdr := hdrs[strings.ToLower(ports.HeaderTaskAgent)]
 	if taHdr == "" {
 		stampOutcome(span, otelemit.IngressOutcomeBadRequest, 400)
@@ -447,13 +583,37 @@ func canonicalInvocationID(s string) string {
 	return s
 }
 
-func continueResponse() *extprocv3.ProcessingResponse {
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &extprocv3.HeadersResponse{
-				Response: &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE},
-			},
-		},
+// continueUnchanged returns a CONTINUE response whose type matches req's
+// processing phase, so a phase the ingress filter doesn't act on is always
+// answered with a correctly-typed reply -- a phase-mismatched response (e.g.
+// a RequestHeaders-typed reply to a ResponseBody) would reset the stream.
+// Returns nil for an unknown oneof (a future Envoy version), in which case
+// the caller sends nothing. Under the ingress ProcessingMode only
+// RequestHeaders/RequestBody are sent (both handled explicitly in Process);
+// this covers any phase a future policy change might enable.
+func continueUnchanged(req *extprocv3.ProcessingRequest) *extprocv3.ProcessingResponse {
+	cont := &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE}
+	switch req.Request.(type) {
+	case *extprocv3.ProcessingRequest_RequestHeaders:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{
+			RequestHeaders: &extprocv3.HeadersResponse{Response: cont}}}
+	case *extprocv3.ProcessingRequest_ResponseHeaders:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
+			ResponseHeaders: &extprocv3.HeadersResponse{Response: cont}}}
+	case *extprocv3.ProcessingRequest_RequestBody:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestBody{
+			RequestBody: &extprocv3.BodyResponse{Response: cont}}}
+	case *extprocv3.ProcessingRequest_ResponseBody:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{
+			ResponseBody: &extprocv3.BodyResponse{Response: cont}}}
+	case *extprocv3.ProcessingRequest_RequestTrailers:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestTrailers{
+			RequestTrailers: &extprocv3.TrailersResponse{}}}
+	case *extprocv3.ProcessingRequest_ResponseTrailers:
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseTrailers{
+			ResponseTrailers: &extprocv3.TrailersResponse{}}}
+	default:
+		return nil
 	}
 }
 
@@ -482,4 +642,102 @@ func headersToMap(h *corev3.HeaderMap) map[string]string {
 		}
 	}
 	return out
+}
+
+// clientAddress returns the originating client IP: the first hop of
+// X-Forwarded-For (Envoy appends the immediate peer to the right), else "".
+func clientAddress(hdrs map[string]string) string {
+	xff := hdrs["x-forwarded-for"]
+	if xff == "" {
+		return ""
+	}
+	if i := strings.IndexByte(xff, ','); i >= 0 {
+		return strings.TrimSpace(xff[:i])
+	}
+	return strings.TrimSpace(xff)
+}
+
+// contentLength parses a Content-Length header into a non-negative size;
+// ok is false when the header is absent or malformed.
+func contentLength(v string) (int, bool) {
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// ingressIncludedContentTypes is the content-type allow-list gating
+// request-body capture, matched case-insensitively by prefix. It is the
+// shared egress default set (capture.DefaultIncludedContentTypes) plus
+// application/cloudevents+json -- the structured-mode CloudEvents trigger
+// shape ingress accepts. Building it from the shared default keeps the base
+// set from drifting; a trigger whose content-type isn't listed (e.g. a
+// binary upload) is not captured, so the span never carries opaque bytes.
+// The byte cap is capture.MaxBytesDefault (no per-resource CaptureBody
+// override exists on the ingress path; adding one is a separate CRD change).
+var ingressIncludedContentTypes = append(
+	[]string{"application/cloudevents+json"}, capture.DefaultIncludedContentTypes...)
+
+// emitRequestHeadersEvent stamps the inbound request headers onto the
+// dispatch span as an http.request.headers event -- one
+// http.request.header.<name> attribute per header -- mirroring the egress
+// sink so the console renders the root span's request headers. Sensitive
+// headers (authorization, x-api-key, cookie, ...) are redacted via the same
+// tracectx.IsSensitiveHeader set the egress path uses, so an inbound
+// credential never reaches OTLP raw.
+func emitRequestHeadersEvent(span trace.Span, hdrs map[string]string) {
+	if len(hdrs) == 0 {
+		return
+	}
+	out := make([]attribute.KeyValue, 0, len(hdrs))
+	for k, v := range hdrs {
+		if tracectx.IsSensitiveHeader(k) {
+			v = "[redacted]"
+		}
+		out = append(out, attribute.String("http.request.header."+k, v))
+	}
+	span.AddEvent(otelemit.SpanEventHTTPRequestHeaders, trace.WithAttributes(out...))
+}
+
+// emitRequestBodyEvent stamps the captured request body onto the dispatch
+// span as an http.request.body event, using the same clrk.body.* contract
+// the egress sink emits (otelemit.BodyEventAttrs) so the console renders it
+// with no front-end change. The body is content-decoded for the event when
+// it carried a non-identity, inflatable encoding -- so clrk.body.b64 is the
+// readable payload. Decode is skipped on a truncated capture: a body cut off
+// at the byte cap is an incomplete compressed stream that can't be reliably
+// inflated, so it ships raw, flagged by clrk.body.truncated and the
+// content_encoding breadcrumb (the egress contract). The caller stamps `at`
+// at first-chunk arrival and only calls this with a non-empty body, so the
+// timestamp is always set.
+func emitRequestBodyEvent(span trace.Span, body []byte, truncated bool, contentEncoding string, at time.Time) {
+	if len(body) == 0 {
+		return
+	}
+	enc := llmcall.NormalizeContentEncoding(contentEncoding)
+	out := body
+	if !truncated && enc != "" {
+		if dec, ok := llmcall.DecodeBody(body, contentEncoding); ok {
+			out = dec
+		}
+	}
+	span.AddEvent(otelemit.SpanEventHTTPRequestBody,
+		trace.WithTimestamp(at),
+		trace.WithAttributes(otelemit.BodyEventAttrs(out, truncated, enc)...))
+}
+
+// bodyContinue is the RequestBody-phase CONTINUE reply: forward the chunk
+// unchanged. The ingress filter only observes the body; it never mutates it.
+func bodyContinue() *extprocv3.ProcessingResponse {
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_RequestBody{
+			RequestBody: &extprocv3.BodyResponse{
+				Response: &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE},
+			},
+		},
+	}
 }

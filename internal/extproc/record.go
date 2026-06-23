@@ -277,21 +277,6 @@ func headersToMap(h *extprocv3.HttpHeaders) map[string]string {
 	return m
 }
 
-// appendBounded appends src to dst up to *left bytes, truncating the
-// remainder. Returns whether truncation occurred.
-func appendBounded(dst, src []byte, left *int) ([]byte, bool) {
-	if *left <= 0 {
-		return dst, len(src) > 0
-	}
-	if len(src) <= *left {
-		*left -= len(src)
-		return append(dst, src...), false
-	}
-	dst = append(dst, src[:*left]...)
-	*left = 0
-	return dst, true
-}
-
 // appendRing appends src to dst and trims from the head when the
 // total exceeds capBytes, keeping the last capBytes bytes. trunc is
 // true when bytes were dropped (either from this call or any prior

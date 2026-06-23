@@ -31,12 +31,9 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/apoxy-dev/clrk/internal/egidentity"
+	"github.com/apoxy-dev/clrk/internal/extproc/capture"
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 )
-
-// captureMaxBytesDefault bounds buffered request+response body bytes per
-// stream when the resolved EgressGateway didn't pin a specific cap.
-const captureMaxBytesDefault = 64 * 1024
 
 // extprocRoleKey is the gRPC initial-metadata key the egextension
 // stamps onto the upstream (cluster-level) ext_proc filter's
@@ -216,7 +213,7 @@ func (s *Server) newDownstreamStream(ctx context.Context, logger logr.Logger) *d
 		logger:          logger,
 		rec:             Record{Timestamp: time.Now()},
 		sink:            s.sinkOverride,
-		maxCaptureBytes: captureMaxBytesDefault,
+		maxCaptureBytes: capture.MaxBytesDefault,
 	}
 	if s.client != nil {
 		es, err := s.registry.get(ctx)

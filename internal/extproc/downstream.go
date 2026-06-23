@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/apoxy-dev/clrk/internal/extproc/capture"
 	"github.com/apoxy-dev/clrk/internal/extproc/llmcall"
 	"github.com/apoxy-dev/clrk/internal/extproc/parsers"
 	"github.com/apoxy-dev/clrk/internal/llmroute"
@@ -195,7 +196,7 @@ func (ds *downstreamStream) foldAttemptFacts() {
 	if a.bodyRewritten {
 		ds.rec.RequestHeaders[":path"] = a.sentPath
 		left := ds.maxCaptureBytes
-		ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, a.sentBody, &left)
+		ds.rec.RequestBody, ds.rec.RequestTruncated = capture.AppendBounded(nil, a.sentBody, &left)
 		ds.rec.RequestBodyRewritten = true
 	}
 }
@@ -280,7 +281,7 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 	// Apply content-type body gate per-direction. If the request
 	// content-type isn't in the included set, drop request body
 	// capture (set bytesLeft to 0). Headers stay either way.
-	if !contentTypeIncluded(ds.rec.RequestHeaders["content-type"], ds.includedTypes) {
+	if !capture.ContentTypeIncluded(ds.rec.RequestHeaders["content-type"], ds.includedTypes) {
 		ds.reqBytesLeft = 0
 	}
 	return resp
@@ -381,7 +382,7 @@ func (ds *downstreamStream) onResponseHeaders(m *extprocv3.HttpHeaders, now time
 			return translation502(ds.xlate.src.Name, "clrk: cross-schema translation does not support streaming responses")
 		}
 	}
-	if !contentTypeIncluded(ds.rec.ResponseHeaders["content-type"], ds.includedTypes) {
+	if !capture.ContentTypeIncluded(ds.rec.ResponseHeaders["content-type"], ds.includedTypes) {
 		ds.respBytesLeft = 0
 	}
 	ds.respKeepLast = respIsStreaming
@@ -390,7 +391,7 @@ func (ds *downstreamStream) onResponseHeaders(m *extprocv3.HttpHeaders, now time
 
 func (ds *downstreamStream) onRequestBody(m *extprocv3.HttpBody, now time.Time) *extprocv3.ProcessingResponse {
 	chunk := m.GetBody()
-	body, trunc := appendBounded(ds.rec.RequestBody, chunk, &ds.reqBytesLeft)
+	body, trunc := capture.AppendBounded(ds.rec.RequestBody, chunk, &ds.reqBytesLeft)
 	if ds.rec.RequestBodyAt.IsZero() {
 		ds.rec.RequestBodyAt = now
 	}
@@ -447,7 +448,7 @@ func (ds *downstreamStream) plainBodyEOS(host, reqPath string) *extprocv3.Proces
 			// upstream actually received, not what the agent
 			// originally sent.
 			left := ds.maxCaptureBytes
-			ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, newBody, &left)
+			ds.rec.RequestBody, ds.rec.RequestTruncated = capture.AppendBounded(nil, newBody, &left)
 			ds.rec.RequestBodyRewritten = true
 		} else if mcpCandidate(ds.mcpRoutes, host, ds.rec.RequestHeaders["content-type"]) {
 			// MCP enforcement. Cheap host + content-type gate so
@@ -607,7 +608,7 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 		if newBody, changed := parsers.EnsureIncludeUsage(host, reqPath, ds.fullReqBody); changed {
 			finalBody, bodyChanged = newBody, true
 			left := ds.maxCaptureBytes
-			ds.rec.RequestBody, ds.rec.RequestTruncated = appendBounded(nil, newBody, &left)
+			ds.rec.RequestBody, ds.rec.RequestTruncated = capture.AppendBounded(nil, newBody, &left)
 			ds.rec.RequestBodyRewritten = true
 		}
 		mut := injectFallbackCreds(ds.creds, final, ds.rec.RequestHeaders, finalBody, reqPath, ds.logger)
@@ -725,7 +726,7 @@ func (ds *downstreamStream) onResponseBody(m *extprocv3.HttpBody, now time.Time)
 	if ds.respKeepLast {
 		body, trunc = appendRing(ds.rec.ResponseBody, m.GetBody(), ds.maxCaptureBytes)
 	} else {
-		body, trunc = appendBounded(ds.rec.ResponseBody, m.GetBody(), &ds.respBytesLeft)
+		body, trunc = capture.AppendBounded(ds.rec.ResponseBody, m.GetBody(), &ds.respBytesLeft)
 	}
 	if ds.rec.ResponseBodyAt.IsZero() {
 		ds.rec.ResponseBodyAt = now
