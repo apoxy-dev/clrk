@@ -284,10 +284,22 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 			Namespace: eg.Namespace,
 		},
 	}
+	// Pin the data-plane Service to ClusterIP. The egress proxy is only ever
+	// reached cluster-internally (agent traffic is redirected to its ClusterIP
+	// DNS name), so it needs no external address. Without this override Envoy
+	// Gateway defaults the Service to LoadBalancer, which on a cloud cluster
+	// provisions a public load balancer in front of the egress MITM, and on a
+	// dev cluster with no LB controller leaves the Gateway perpetually
+	// un-Programmed (AddressNotAssigned). The ingress controller pins ClusterIP
+	// the same way (see desiredEnvoyProxy).
+	svcType := egv1alpha1.ServiceTypeClusterIP
 	if err := createOrUpdateWithRetry(ctx, r.Client, ep, func() error {
 		ep.Spec.Provider = &egv1alpha1.EnvoyProxyProvider{
 			Type: egv1alpha1.ProviderTypeKubernetes,
 			Kubernetes: &egv1alpha1.EnvoyProxyKubernetesProvider{
+				EnvoyService: &egv1alpha1.KubernetesServiceSpec{
+					Type: &svcType,
+				},
 				EnvoyDeployment: buildEnvoyDeploymentSpec(eg, img),
 			},
 		}
