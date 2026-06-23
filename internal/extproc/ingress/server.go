@@ -161,7 +161,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	)
 	// Per-stream response-body capture state, populated from ResponseHeaders
 	// (which always precedes ResponseBody) and accumulated across chunks. The
-	// response leg is symmetric with the request leg above; Envoy delivers it
+	// response leg mirrors the request leg above, except capture is
+	// unconditional (the worker labels every agent reply
+	// application/octet-stream, so a content-type allow-list would never match
+	// -- see the ResponseHeaders case). Envoy delivers the response body
 	// because the EnvoyExtensionPolicy enables Response.Body = STREAMED.
 	var (
 		captureRespBody bool
@@ -245,8 +248,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				return err
 			}
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
-			// Observe-only: emit the response headers event (redacted) and
-			// gate response-body capture on the content-type allow-list, then
+			// Observe-only: emit the response headers event (redacted), then
 			// forward unchanged. The dispatch outcome already stamped
 			// http.response.status_code; the real upstream :status rides along
 			// in the headers event.
@@ -254,7 +256,14 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if span != nil {
 				emitResponseHeadersEvent(span, hdrs)
 			}
-			captureRespBody = capture.ContentTypeIncluded(hdrs["content-type"], ingressIncludedContentTypes)
+			// Capture the response body unconditionally. Unlike the request leg
+			// -- where the client sets a meaningful Content-Type we can gate on
+			// -- the worker streams the agent's stdout back labelled
+			// application/octet-stream regardless of the actual payload, so a
+			// content-type allow-list would never match and the agent's reply
+			// would never reach the dispatch span. Capture is still bounded by
+			// capture.MaxBytesDefault (keep-first-N) and flagged on truncation.
+			captureRespBody = true
 			respEncoding = hdrs["content-encoding"]
 			if err := stream.Send(continueUnchanged(req)); err != nil {
 				return err
