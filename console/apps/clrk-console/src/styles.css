@@ -923,7 +923,8 @@
 
 .attrs-tray {
   position: fixed; top: 0; right: 0; bottom: 0;
-  width: min(420px, 92vw);
+  /* Half the page — fixed-positioned, so this is 50% of the viewport. */
+  width: 50%;
   background: var(--apx-white);
   border-left: 1px solid var(--border-default);
   box-shadow: var(--sh-3);
