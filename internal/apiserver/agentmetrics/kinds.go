@@ -13,22 +13,24 @@ import (
 )
 
 // agentRef is the per-agent identity + status the snapshot needs from the
-// agent CR: name/namespace/labels are stamped onto the metrics object
-// (so label selectors and display work), and active is the point-in-time
-// in-flight count read from the CR status (TaskAgent only).
+// agent CR: name/namespace/labels are stamped onto the metrics object (so
+// label selectors and display work), and gauge carries the kind's
+// point-in-time status gauge read from the CR — warm sandbox count for a
+// TaskAgent, running-liveness (0/1) for a DaemonAgent. Its usage-key name
+// comes from the kindAdapter's gaugeKey.
 type agentRef struct {
 	name      string
 	namespace string
 	labels    map[string]string
-	active    int32
+	gauge     int32
 }
 
 // kindAdapter bridges the two near-identical snapshot kinds. They differ
 // only in Go type, the agent kind they scope to, the resource/discovery
 // name, the parent CR they enumerate, and which usage keys they carry
 // (a long-lived DaemonAgent has no request boundary, so no latency
-// percentiles, and is not "invoked", so no active gauge). One Storage
-// serves both behind this adapter.
+// percentiles; and its status gauge is `running`, not the TaskAgent's
+// `warm`). One Storage serves both behind this adapter.
 type kindAdapter interface {
 	// agentKind is the SpanAttributes['agent.kind'] value this kind scopes
 	// to ("TaskAgent" / "DaemonAgent").
@@ -36,10 +38,13 @@ type kindAdapter interface {
 	// resource is the GVR resource / discovery name
 	// ("taskagentmetrics" / "daemonagentmetrics").
 	resource() string
-	// includeLatency / includeActive report whether those usage keys are
-	// part of this kind's snapshot.
+	// includeLatency reports whether the latency percentile keys are part
+	// of this kind's snapshot.
 	includeLatency() bool
-	includeActive() bool
+	// gaugeKey is the usage-key name for this kind's point-in-time status
+	// gauge (agentRef.gauge): "warm" for TaskAgent, "running" for
+	// DaemonAgent.
+	gaugeKey() string
 	newObject() runtime.Object
 	newList() runtime.Object
 	// listAgents enumerates the parent agent CRs in scope (the namespace,
@@ -60,7 +65,7 @@ type taskKind struct{}
 func (taskKind) agentKind() string         { return clrkv1alpha1.AgentKindTask }
 func (taskKind) resource() string          { return "taskagentmetrics" }
 func (taskKind) includeLatency() bool      { return true }
-func (taskKind) includeActive() bool       { return true }
+func (taskKind) gaugeKey() string          { return metricsv1.UsageWarm }
 func (taskKind) newObject() runtime.Object { return &metricsv1.TaskAgentMetrics{} }
 func (taskKind) newList() runtime.Object   { return &metricsv1.TaskAgentMetricsList{} }
 
@@ -74,7 +79,7 @@ func (taskKind) listAgents(ctx context.Context, c client.Client, namespace strin
 			name:      ta.Name,
 			namespace: ta.Namespace,
 			labels:    ta.Labels,
-			active:    ta.Status.ActiveExecutions,
+			gauge:     ta.Status.WarmSandboxes,
 		}
 	}), nil
 }
@@ -84,7 +89,7 @@ func (taskKind) getAgent(ctx context.Context, c client.Client, namespace, name s
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &ta); err != nil {
 		return agentRef{}, err
 	}
-	return agentRef{name: ta.Name, namespace: ta.Namespace, labels: ta.Labels, active: ta.Status.ActiveExecutions}, nil
+	return agentRef{name: ta.Name, namespace: ta.Namespace, labels: ta.Labels, gauge: ta.Status.WarmSandboxes}, nil
 }
 
 func (taskKind) object(ref agentRef, ts metav1.Time, window metav1.Duration, usage metricsv1.UsageList) runtime.Object {
@@ -102,14 +107,15 @@ func (taskKind) appendTo(list, obj runtime.Object) {
 }
 
 // daemonKind serves DaemonAgentMetrics. DaemonAgents are long-lived and
-// not invoked, so a snapshot omits both the latency percentiles and the
-// active gauge.
+// not request-invoked, so a snapshot omits the latency percentiles; its
+// status gauge is `running` (process liveness, 0/1), not the TaskAgent's
+// `warm`.
 type daemonKind struct{}
 
 func (daemonKind) agentKind() string         { return clrkv1alpha1.AgentKindDaemon }
 func (daemonKind) resource() string          { return "daemonagentmetrics" }
 func (daemonKind) includeLatency() bool      { return false }
-func (daemonKind) includeActive() bool       { return false }
+func (daemonKind) gaugeKey() string          { return metricsv1.UsageRunning }
 func (daemonKind) newObject() runtime.Object { return &metricsv1.DaemonAgentMetrics{} }
 func (daemonKind) newList() runtime.Object   { return &metricsv1.DaemonAgentMetricsList{} }
 
@@ -118,9 +124,8 @@ func (daemonKind) listAgents(ctx context.Context, c client.Client, namespace str
 	if err := c.List(ctx, &list, listOptions(namespace, sel)...); err != nil {
 		return nil, err
 	}
-	// DaemonAgents are not invoked, so no active gauge is projected.
 	return collectRefs(list.Items, func(da *clrkv1alpha1.DaemonAgent) agentRef {
-		return agentRef{name: da.Name, namespace: da.Namespace, labels: da.Labels}
+		return agentRef{name: da.Name, namespace: da.Namespace, labels: da.Labels, gauge: daemonRunning(da.Status.Phase)}
 	}), nil
 }
 
@@ -129,7 +134,18 @@ func (daemonKind) getAgent(ctx context.Context, c client.Client, namespace, name
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &da); err != nil {
 		return agentRef{}, err
 	}
-	return agentRef{name: da.Name, namespace: da.Namespace, labels: da.Labels}, nil
+	return agentRef{name: da.Name, namespace: da.Namespace, labels: da.Labels, gauge: daemonRunning(da.Status.Phase)}, nil
+}
+
+// daemonRunning projects a DaemonAgent's lifecycle phase onto the 0/1
+// `running` liveness gauge: 1 only while the single daemon process is
+// Running, 0 for Stopped / CrashLoopBackOff / unset. DaemonAgents are
+// single-instance by definition, so this never exceeds 1.
+func daemonRunning(phase clrkv1alpha1.DaemonPhase) int32 {
+	if phase == clrkv1alpha1.DaemonPhaseRunning {
+		return 1
+	}
+	return 0
 }
 
 func (daemonKind) object(ref agentRef, ts metav1.Time, window metav1.Duration, usage metricsv1.UsageList) runtime.Object {

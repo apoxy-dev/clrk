@@ -34,6 +34,7 @@ import (
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.workerPoolRef`
 // +kubebuilder:printcolumn:name="Latest Ready",type=string,JSONPath=`.status.latestReadyRevisionName`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeExecutions`
+// +kubebuilder:printcolumn:name="Warm",type=integer,JSONPath=`.status.warmSandboxes`
 // +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`
 // +kubebuilder:printcolumn:name="Last Run",type=date,JSONPath=`.status.lastScheduleTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -157,6 +158,15 @@ type TaskAgentStatus struct {
 	// resource; see Invocation.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions,omitempty"`
+	// WarmSandboxes is the current count of pre-warmed sandboxes held Ready
+	// for this agent across its workers — Created sandboxes (rootfs mounted,
+	// TAP+netns provisioned, libcontainer container created) whose agent
+	// process has not started, ready to absorb a request without cold-start.
+	// It is the per-worker WarmCount summed over the latest-ready revision's
+	// WorkerStatus stream, the actual realization of spec.warmPoolSize. The
+	// metrics snapshot's `warm` gauge reads this verbatim.
+	// +optional
+	WarmSandboxes int32 `json:"warmSandboxes,omitempty"`
 	// LatestCreatedRevisionName is the name of the last created AgentSandboxRevision.
 	// +optional
 	LatestCreatedRevisionName string `json:"latestCreatedRevisionName,omitempty"`

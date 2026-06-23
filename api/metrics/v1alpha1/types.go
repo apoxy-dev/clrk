@@ -42,10 +42,19 @@ const (
 	// UsageErrors is the count of spans whose status is Error in the
 	// window.
 	UsageErrors = "errors"
-	// UsageActive is the agent's current in-flight execution count. Unlike
-	// the other keys it is a point-in-time gauge read from the agent's CR
-	// status (ActiveExecutions), not a window aggregate over ClickHouse.
-	UsageActive = "active"
+	// UsageWarm is a TaskAgent's current pre-warmed sandbox count: sandboxes
+	// Created and held Ready (rootfs mounted, TAP+netns provisioned, process
+	// not yet started) across its workers, ready to absorb a request without
+	// cold-start. Unlike the other keys it is a point-in-time gauge read from
+	// the agent's CR status (TaskAgent.Status.WarmSandboxes), not a window
+	// aggregate over ClickHouse. TaskAgent only.
+	UsageWarm = "warm"
+	// UsageRunning is a DaemonAgent's current liveness gauge: 1 when its
+	// single long-lived process is Running, 0 otherwise (Stopped /
+	// CrashLoopBackOff). Like UsageWarm it is a point-in-time read from the
+	// agent's CR status (DaemonAgent.Status.Phase), not a window aggregate.
+	// DaemonAgent only.
+	UsageRunning = "running"
 	// UsageInputTokens / UsageOutputTokens are the summed GenAI token
 	// counts (gen_ai.usage.input_tokens / output_tokens) over the window.
 	UsageInputTokens  = "input_tokens"

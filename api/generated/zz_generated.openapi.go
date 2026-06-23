@@ -4603,6 +4603,13 @@ func schema_clrk_api_clrk_v1alpha1_TaskAgentStatus(ref common.ReferenceCallback)
 							Format:      "int32",
 						},
 					},
+					"warmSandboxes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "WarmSandboxes is the current count of pre-warmed sandboxes held Ready for this agent across its workers — Created sandboxes (rootfs mounted, TAP+netns provisioned, libcontainer container created) whose agent process has not started, ready to absorb a request without cold-start. It is the per-worker WarmCount summed over the latest-ready revision's WorkerStatus stream, the actual realization of spec.warmPoolSize. The metrics snapshot's `warm` gauge reads this verbatim.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"latestCreatedRevisionName": {
 						SchemaProps: spec.SchemaProps{
 							Description: "LatestCreatedRevisionName is the name of the last created AgentSandboxRevision.",

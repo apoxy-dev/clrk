@@ -67,6 +67,25 @@ func (r *TaskAgentRevisionReconciler) workerActiveSum(ctx context.Context, names
 	return sum, nil
 }
 
+// workerWarmSum sums the per-worker WarmCount across the named revision's
+// WorkerStatus stream — the realized pre-warm pool size for the agent. A
+// missing revision is treated as zero (the revision may not have published
+// status yet), matching workerActiveSum.
+func (r *TaskAgentRevisionReconciler) workerWarmSum(ctx context.Context, namespace, revName string) (int32, error) {
+	var rev clrkv1alpha1.AgentSandboxRevision
+	if err := r.Get(ctx, types.NamespacedName{Name: revName, Namespace: namespace}, &rev); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var sum int32
+	for _, ws := range rev.Status.Workers {
+		sum += ws.WarmCount
+	}
+	return sum, nil
+}
+
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=taskagents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=workerpools,verbs=get;list;watch
@@ -212,6 +231,22 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	} else {
 		ta.Status.ActiveExecutions = 0
+	}
+
+	// WarmSandboxes: the realized pre-warm count for the latest-ready
+	// revision, summed across its workers' WarmCount. Unlike
+	// ActiveExecutions there is no invocation read model for warm capacity
+	// (warmth is a worker-local sandbox-pool fact, not an invocation
+	// lifecycle event), so the per-worker WorkerStatus stream is the only
+	// source. Zero when no revision is ready yet.
+	if ta.Status.LatestReadyRevisionName != "" {
+		sum, err := r.workerWarmSum(ctx, ta.Namespace, ta.Status.LatestReadyRevisionName)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("warm sandboxes: %w", err)
+		}
+		ta.Status.WarmSandboxes = sum
+	} else {
+		ta.Status.WarmSandboxes = 0
 	}
 
 	accepted := metav1.Condition{

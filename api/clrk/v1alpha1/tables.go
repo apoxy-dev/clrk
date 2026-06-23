@@ -67,6 +67,7 @@ var taskAgentColumns = []metav1.TableColumnDefinition{
 	{Name: "Pool", Type: "string", Description: "WorkerPool that runs this agent's executions"},
 	{Name: "Latest Ready", Type: "string", Description: "Most recent AgentSandboxRevision that became ready"},
 	{Name: "Active", Type: "integer", Description: "In-flight (non-terminal) invocations"},
+	{Name: "Warm", Type: "integer", Description: "Pre-warmed sandboxes held Ready across workers"},
 	{Name: "Age", Type: "string", Description: "Time since creation"},
 }
 
@@ -77,6 +78,7 @@ func taskAgentRow(ta *TaskAgent) metav1.TableRow {
 			ta.Spec.WorkerPoolRef,
 			ta.Status.LatestReadyRevisionName,
 			int64(ta.Status.ActiveExecutions),
+			int64(ta.Status.WarmSandboxes),
 			tableAge(ta.CreationTimestamp),
 		},
 		Object: runtime.RawExtension{Object: ta},

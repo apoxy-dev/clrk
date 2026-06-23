@@ -260,25 +260,27 @@ func (s *Storage) Get(ctx context.Context, name string, _ *metav1.GetOptions) (r
 	return s.buildObject(ref, u, metav1.NewTime(now), metav1.Duration{Duration: window}), nil
 }
 
-// buildObject assembles one snapshot: the CH-derived usage list plus, for
-// kinds that carry it, the `active` gauge.
+// buildObject assembles one snapshot: the CH-derived usage list plus the
+// kind's point-in-time status gauge under its gaugeKey -- `warm` (pre-warmed
+// sandbox count) for a TaskAgent, `running` (0/1 process liveness) for a
+// DaemonAgent.
 //
-// active is read from the agent CR status (TaskAgent.Status.ActiveExecutions),
-// NOT recomputed here, by deliberate choice. That field is itself a
-// ClickHouse count (invocation.ActiveCounter over invocation_events, with
-// argMax phase reconstruction + a recency window) materialized by the
-// revision controller. Re-deriving it in the storage would either fan out
-// one CountActive query per agent in a List (vs the single GROUP BY scan)
-// or fork that recency/argMax logic into a GROUP BY variant maintained in
-// parallel. More importantly the CR status is the single source of truth:
-// the metrics `active` agreeing with `kubectl get taskagent` is the
-// least-surprising behavior, where an independently-recomputed value could
-// silently disagree. The trade-off is a bounded reconcile-cadence
-// staleness on active (every other usage key is a fresh window aggregate).
+// The gauge is read from the agent CR status, NOT recomputed here, by
+// deliberate choice. Warm capacity (TaskAgent.Status.WarmSandboxes) is the
+// per-worker WarmCount summed by the revision controller off the
+// WorkerStatus stream; running is projected from DaemonAgent.Status.Phase.
+// Re-deriving either in the storage would fan out a per-agent read in a List
+// (vs the single GROUP BY scan) or fork the controller's rollup logic into a
+// parallel copy. More importantly the CR status is the single source of
+// truth: the metrics gauge agreeing with `kubectl get taskagent` / `kubectl
+// get daemonagent` is the least-surprising behavior, where an
+// independently-recomputed value could silently disagree. The trade-off is a
+// bounded reconcile-cadence staleness on the gauge (every other usage key is
+// a fresh window aggregate).
 func (s *Storage) buildObject(ref agentRef, u agentUsage, ts metav1.Time, window metav1.Duration) runtime.Object {
 	usage := u.usageList(s.adapter.includeLatency())
-	if s.adapter.includeActive() {
-		usage[metricsv1.UsageActive] = *resource.NewQuantity(int64(ref.active), resource.DecimalSI)
+	if key := s.adapter.gaugeKey(); key != "" {
+		usage[key] = *resource.NewQuantity(int64(ref.gauge), resource.DecimalSI)
 	}
 	return s.adapter.object(ref, ts, window, usage)
 }
