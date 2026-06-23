@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { registry, phaseVariant } from './registry'
+import {
+  registry,
+  phaseVariant,
+  taskAgentEntry,
+  daemonAgentEntry,
+} from './registry'
 
 describe('clrk registry', () => {
   it('registers the core clrk kinds under clrk.apoxy.dev/v1alpha1', () => {
     for (const [path, kind] of [
-      ['taskagents', 'TaskAgent'],
-      ['daemonagents', 'DaemonAgent'],
+      ['agents', 'Agent'],
+      ['worker-pools', 'WorkerPool'],
       ['egress', 'EgressGateway'],
       ['invocations', 'Invocation'],
     ] as const) {
@@ -14,6 +19,21 @@ describe('clrk registry', () => {
       expect(entry?.gvr.group).toBe('clrk.apoxy.dev')
       expect(entry?.gvr.version).toBe('v1alpha1')
     }
+  })
+
+  it('collapses both agent kinds into one combined Agents rail item', () => {
+    expect(registry.byPath('agents')?.kind).toBe('Agent')
+    // The individual kinds are not registered as their own rail items.
+    expect(registry.byPath('taskagents')).toBeUndefined()
+    expect(registry.byPath('daemonagents')).toBeUndefined()
+  })
+
+  it('maps Worker Pools to the /worker-pools slug with status columns', () => {
+    const wp = registry.byPath('worker-pools')
+    expect(wp?.gvr.resource).toBe('workerpools')
+    expect(wp?.yamlEditable).toBe(true)
+    expect(wp?.schema).toBeDefined()
+    expect(wp?.columns.map((c) => c.id)).toContain('replicas')
   })
 
   it('maps the EgressGateway kind to the /egress slug (bespoke list shadows the splat)', () => {
@@ -33,9 +53,11 @@ describe('clrk registry', () => {
     expect(inv?.createWizard).toBeUndefined()
   })
 
-  it('attaches generated tray schemas to the editable agent kinds', () => {
-    expect(registry.byPath('taskagents')?.schema).toBeDefined()
-    expect(registry.byPath('daemonagents')?.schema).toBeDefined()
+  it('exposes per-kind agent entries with tray schemas for the bespoke detail YAML', () => {
+    expect(taskAgentEntry.gvr.resource).toBe('taskagents')
+    expect(daemonAgentEntry.gvr.resource).toBe('daemonagents')
+    expect(taskAgentEntry.schema).toBeDefined()
+    expect(daemonAgentEntry.schema).toBeDefined()
   })
 
   it('gives EgressGateway a create/edit wizard and its tray schema', () => {

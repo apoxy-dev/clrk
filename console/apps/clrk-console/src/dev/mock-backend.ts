@@ -42,6 +42,7 @@ type Controller = ReadableStreamDefaultController<Uint8Array>
 const GROUP = 'clrk.apoxy.dev'
 const VERSION = 'v1alpha1'
 const GWAPI = 'gateway.networking.k8s.io'
+const METRICS_GROUP = 'metrics.clrk.apoxy.dev'
 const enc = new TextEncoder()
 
 function colKey(group: string, version: string, resource: string): string {
@@ -90,9 +91,14 @@ export class MockBackend {
       const [, group, version] = segs
       let rest = segs.slice(3)
       if (rest[0] === 'namespaces') rest = rest.slice(2) // collapse the namespace scope
-      const [resource, name] = rest
+      const [resource, name, sub] = rest
       if (!resource) return notFound(method, url.pathname)
       const key = colKey(group!, version!, resource)
+      // Telemetry subresource: <taskagents|daemonagents>/<name>/traces → seeded
+      // OTLP TracesData, the read path behind the swimlane / daemon activity.
+      if (method === 'GET' && name && sub === 'traces') {
+        return json(this.tracesFor(resource!, name))
+      }
       if (!name) {
         if (method === 'GET' && url.searchParams.get('watch') === '1')
           return this.openWatch(key, init?.signal)
@@ -379,7 +385,17 @@ export class MockBackend {
   // --- Agents + Invocations (so the Run / Observe lists populate too) ---------
 
   private seedAgents(): void {
-    const ta = (name: string, ns: string, active: number, revision: string) =>
+    const annotations = (description: string) => ({
+      'clrk.apoxy.dev/description': description,
+    })
+    const ta = (
+      name: string,
+      ns: string,
+      active: number,
+      revision: string,
+      image: string,
+      opts: { schedule?: string; egress?: string[]; description: string },
+    ) =>
       this.putGVR(GROUP, VERSION, 'taskagents', {
         apiVersion: `${GROUP}/${VERSION}`,
         kind: 'TaskAgent',
@@ -388,18 +404,40 @@ export class MockBackend {
           uid: `uid-${name}`,
           namespace: ns,
           creationTimestamp: daysAgo(20),
+          annotations: annotations(opts.description),
         },
-        spec: { workerPoolRef: 'default' },
+        spec: {
+          workerPoolRef: 'default',
+          template: { spec: { image } },
+          egressRefs: (opts.egress ?? []).map((g) => ({ gatewayRef: g })),
+          ...(opts.schedule ? { schedule: opts.schedule } : {}),
+        },
         status: {
           activeExecutions: active,
           latestReadyRevisionName: revision,
           conditions: [{ type: 'Ready', status: 'True' }],
         },
       })
-    ta('code-reviewer', 'agents', 2, 'code-reviewer-00007')
-    ta('nightly-summarizer', 'agents', 0, 'nightly-summarizer-00003')
+    ta('code-reviewer', 'platform', 3, 'code-reviewer-00007', 'ghcr.io/acme/review-bot:c41a7e', {
+      egress: ['llm-egress'],
+      description: 'GitHub PR review · Claude + repo tools',
+    })
+    ta('nightly-summarizer', 'platform', 0, 'nightly-summarizer-00003', 'ghcr.io/acme/summarizer:2e7b0c', {
+      schedule: '0 2 * * *',
+      egress: ['llm-egress'],
+      description: 'Cron — nightly digest to Slack',
+    })
 
-    const da = (name: string, ns: string, phase: string, restarts: number) =>
+    const da = (
+      name: string,
+      ns: string,
+      phase: string,
+      restarts: number,
+      image: string,
+      upDays: number,
+      revision: string,
+      opts: { egress?: string[]; description: string },
+    ) =>
       this.putGVR(GROUP, VERSION, 'daemonagents', {
         apiVersion: `${GROUP}/${VERSION}`,
         kind: 'DaemonAgent',
@@ -407,13 +445,32 @@ export class MockBackend {
           name,
           uid: `uid-${name}`,
           namespace: ns,
-          creationTimestamp: daysAgo(12),
+          creationTimestamp: daysAgo(upDays),
+          annotations: annotations(opts.description),
         },
-        spec: { workerPoolRef: 'default' },
-        status: { phase, restartCount: restarts },
+        spec: {
+          workerPoolRef: 'default',
+          template: { spec: { image } },
+          egressRefs: (opts.egress ?? []).map((g) => ({ gatewayRef: g })),
+        },
+        status: {
+          phase,
+          restartCount: restarts,
+          upSince: daysAgo(upDays),
+          latestReadyRevisionName: revision,
+        },
       })
-    da('slack-bot', 'agents', 'Running', 0)
-    da('log-watcher', 'agents', 'CrashLoopBackOff', 7)
+    da('slack-bot', 'platform', 'Running', 0, 'ghcr.io/acme/slack-bot:b88a2d', 14, 'slack-bot-00008', {
+      egress: ['llm-egress'],
+      description: 'Long-lived Slack listener · outbound only',
+    })
+    da('log-watcher', 'research', 'CrashLoopBackOff', 7, 'ghcr.io/acme/watcher:0aac11', 3, 'log-watcher-00021', {
+      description: 'Tails app logs · stuck on a bad image tag',
+    })
+
+    this.seedWorkerPools()
+    this.seedAgentMetrics()
+    this.seedAgentRevisions()
 
     const inv = (
       name: string,
@@ -458,6 +515,173 @@ export class MockBackend {
       'Schedule',
       'nightly-summarizer',
     )
+  }
+
+  private seedWorkerPools(): void {
+    const wp = (
+      name: string,
+      ns: string,
+      replicas: number,
+      ready: number,
+      active: number,
+      maxPer: number,
+      warm: number,
+    ) =>
+      this.putGVR(GROUP, VERSION, 'workerpools', {
+        apiVersion: `${GROUP}/${VERSION}`,
+        kind: 'WorkerPool',
+        metadata: { name, uid: `uid-${name}`, namespace: ns, creationTimestamp: daysAgo(30) },
+        spec: {
+          replicas,
+          maxExecutionsPerWorker: maxPer,
+          warmPool: warm,
+          template: { image: 'ghcr.io/apoxy/clrk-worker:v0.3' },
+        },
+        status: {
+          readyReplicas: ready,
+          activeExecutions: active,
+          capacity: {
+            maxExecutions: replicas * maxPer,
+            availableExecutions: Math.max(0, replicas * maxPer - active),
+          },
+        },
+      })
+    wp('default', 'platform', 4, 4, 4, 32, 6)
+    wp('data-heavy', 'research', 2, 2, 1, 8, 2)
+  }
+
+  private seedAgentMetrics(): void {
+    const ts = daysAgo(0)
+    const put = (
+      resource: string,
+      kind: string,
+      name: string,
+      ns: string,
+      usage: Record<string, string>,
+    ) =>
+      this.putGVR(METRICS_GROUP, VERSION, resource, {
+        apiVersion: `${METRICS_GROUP}/${VERSION}`,
+        kind,
+        metadata: { name, uid: `m-${name}`, namespace: ns },
+        timestamp: ts,
+        window: '24h0m0s',
+        usage,
+      } as unknown as StoredObject)
+    put('taskagentmetrics', 'TaskAgentMetrics', 'code-reviewer', 'platform', {
+      invocations: '4124', errors: '4', active: '3', input_tokens: '2840000',
+      output_tokens: '612000', tool_calls: '18204', latency_p50_ms: '1840', latency_p99_ms: '9220',
+    })
+    put('taskagentmetrics', 'TaskAgentMetrics', 'nightly-summarizer', 'platform', {
+      invocations: '96', errors: '2', active: '0', input_tokens: '9812000',
+      output_tokens: '184000', tool_calls: '5240', latency_p50_ms: '38400', latency_p99_ms: '91200',
+    })
+    put('daemonagentmetrics', 'DaemonAgentMetrics', 'slack-bot', 'platform', {
+      invocations: '1', errors: '0', input_tokens: '240000', output_tokens: '92000', tool_calls: '84',
+    })
+    put('daemonagentmetrics', 'DaemonAgentMetrics', 'log-watcher', 'research', {
+      invocations: '0', errors: '421', input_tokens: '0', output_tokens: '0', tool_calls: '0',
+    })
+  }
+
+  private seedAgentRevisions(): void {
+    const rev = (
+      name: string,
+      ns: string,
+      owner: string,
+      image: string,
+      ready: boolean,
+      active: boolean,
+      workers: number,
+      ageDays: number,
+    ) =>
+      this.putGVR(GROUP, VERSION, 'agentsandboxrevisions', {
+        apiVersion: `${GROUP}/${VERSION}`,
+        kind: 'AgentSandboxRevision',
+        metadata: {
+          name,
+          uid: `uid-${name}`,
+          namespace: ns,
+          creationTimestamp: daysAgo(ageDays),
+          ownerReferences: [
+            { apiVersion: `${GROUP}/${VERSION}`, kind: 'TaskAgent', name: owner, uid: `uid-${owner}`, controller: true },
+          ],
+        },
+        spec: { image },
+        status: {
+          readyWorkers: workers,
+          conditions: [
+            { type: 'Ready', status: ready ? 'True' : 'False' },
+            { type: 'Active', status: active ? 'True' : 'False' },
+          ],
+        },
+      } as unknown as StoredObject)
+    rev('code-reviewer-00007', 'platform', 'code-reviewer', 'ghcr.io/acme/review-bot:c41a7e', true, true, 4, 1)
+    rev('code-reviewer-00006', 'platform', 'code-reviewer', 'ghcr.io/acme/review-bot:b8c124', true, false, 0, 8)
+    rev('slack-bot-00008', 'platform', 'slack-bot', 'ghcr.io/acme/slack-bot:b88a2d', true, true, 1, 14)
+  }
+
+  /**
+   * Synthesize OTLP TracesData for an agent so the swimlane / daemon activity
+   * render against the real read path. TaskAgents get invocation-grouped traces
+   * (an `ingress.dispatch` root + LLM/MCP/Network children sharing an
+   * `invocation.id`); DaemonAgents get ungrouped wall-clock calls. Times are
+   * relative to the live clock so the daemon look-back windows include them.
+   */
+  private tracesFor(resource: string, name: string): Json {
+    const now = Date.now()
+    const NS = 1_000_000
+    const spans: Json[] = []
+    const kv = (rec: Record<string, string>) =>
+      Object.entries(rec).map(([key, v]) => ({ key, value: { stringValue: v } }))
+    const span = (
+      startMs: number,
+      durMs: number,
+      spanName: string,
+      attrs: Record<string, string>,
+      ok: boolean,
+      ids: { trace: string; span: string; parent?: string },
+    ) =>
+      spans.push({
+        traceId: ids.trace,
+        spanId: ids.span,
+        parentSpanId: ids.parent ?? '',
+        name: spanName,
+        startTimeUnixNano: String(Math.round(startMs) * NS),
+        endTimeUnixNano: String(Math.round(startMs + durMs) * NS),
+        attributes: kv(attrs),
+        status: { code: ok ? 'STATUS_CODE_OK' : 'STATUS_CODE_ERROR' },
+      })
+
+    if (resource === 'daemonagents') {
+      const calls: Array<{ ago: number; lane: 'llm' | 'mcp' | 'net'; dur: number; ok?: boolean }> = [
+        { ago: 8, lane: 'llm', dur: 600 }, { ago: 41, lane: 'mcp', dur: 120 },
+        { ago: 96, lane: 'net', dur: 80 }, { ago: 150, lane: 'llm', dur: 540 },
+        { ago: 220, lane: 'mcp', dur: 90 }, { ago: 360, lane: 'net', dur: 70, ok: false },
+        { ago: 540, lane: 'llm', dur: 720 }, { ago: 900, lane: 'mcp', dur: 110 },
+        { ago: 1500, lane: 'net', dur: 65 }, { ago: 2400, lane: 'llm', dur: 480 },
+      ]
+      calls.forEach((c, i) => {
+        const t = `tr-${name}-d${i}`
+        span(now - c.ago * 1000, c.dur, c.lane, laneAttrs(c.lane, c.ok !== false), c.ok !== false, { trace: t, span: `${t}-s` })
+      })
+    } else {
+      for (let i = 0; i < 3; i++) {
+        const invStart = now - (i * 90 + 12) * 1000
+        const invId = `inv-${name}-${4821 - i}`
+        const t = `tr-${invId}`
+        const ok = i !== 2
+        const base = { 'invocation.id': invId, 'agent.name': name, 'agent.kind': 'TaskAgent' }
+        span(invStart, ok ? 1840 : 320, 'ingress.dispatch', { ...base, 'http.request.method': 'POST', 'url.path': '/run' }, ok, { trace: t, span: `${t}-root` })
+        span(invStart + 50, 420, 'chat', { ...base, ...laneAttrs('llm') }, true, { trace: t, span: `${t}-llm`, parent: `${t}-root` })
+        span(invStart + 520, 120, 'tools/call', { ...base, ...laneAttrs('mcp') }, true, { trace: t, span: `${t}-mcp`, parent: `${t}-root` })
+        span(invStart + 680, 90, 'GET github', { ...base, ...laneAttrs('net', ok) }, ok, { trace: t, span: `${t}-net`, parent: `${t}-root` })
+      }
+    }
+    return {
+      resourceSpans: [
+        { resource: { attributes: kv({ 'service.name': name }) }, scopeSpans: [{ scope: { name: 'clrk' }, spans }] },
+      ],
+    }
   }
 
   // --- internals -------------------------------------------------------------
@@ -648,6 +872,26 @@ function notFound(method: string, path: string): Response {
     },
     404,
   )
+}
+
+/** Attribute sets that classify a synthetic span into the LLM / MCP / network lane. */
+function laneAttrs(lane: 'llm' | 'mcp' | 'net', ok = true): Record<string, string> {
+  if (lane === 'llm')
+    return {
+      'gen_ai.system': 'anthropic',
+      'gen_ai.request.model': 'claude-sonnet-4',
+      'gen_ai.usage.input_tokens': '1200',
+      'gen_ai.usage.output_tokens': '300',
+      'gen_ai.response.stream': 'true',
+    }
+  if (lane === 'mcp')
+    return {
+      'mcp.method': 'tools/call',
+      'mcp.tool.name': 'read_file',
+      'mcp.server': 'github-mcp',
+      'server.address': 'github-mcp.internal',
+    }
+  return { 'server.address': 'api.github.com', 'http.response.status_code': ok ? '200' : '503' }
 }
 
 /** A standard `Programmed` condition for an EgressGateway / listener. */

@@ -5,3 +5,4 @@ coverage/
 *.tsbuildinfo
 # TanStack Router generates this; do not commit
 **/routeTree.gen.ts
+.tanstack/

@@ -47,7 +47,7 @@ import {
   SidePanelClose,
   SidePanelOpen,
 } from '@carbon/icons-react'
-import { registry } from '../registry'
+import { registry, daemonAgentEntry } from '../registry'
 import wordmark from '../assets/apoxy-wordmark.svg'
 import { RouterLink } from '../router-link'
 import { rootCrumbLabel } from '../project-context'
@@ -134,11 +134,24 @@ function ShellBody() {
   const siblings = useK8sList(entry?.gvr ?? EMPTY_GVR, {
     enabled: Boolean(entry && name),
   })
+  // The combined `Agent` entry (path `agents`) aggregates two kinds under one
+  // route, so its sibling switcher must offer BOTH TaskAgents and DaemonAgents —
+  // fetch the daemon list alongside the entry's own (task) list. Disabled
+  // elsewhere, and graceful (empty) when daemonagents isn't a served GVR.
+  const isAgentLeaf = entry?.path === 'agents'
+  const daemonSiblings = useK8sList(daemonAgentEntry.gvr, {
+    enabled: Boolean(isAgentLeaf && name),
+  })
   const leafSwitch = useMemo(() => {
     if (!entry || !name) return undefined
-    const options = (siblings.data?.items ?? [])
+    const items = isAgentLeaf
+      ? [...(siblings.data?.items ?? []), ...(daemonSiblings.data?.items ?? [])]
+      : siblings.data?.items ?? []
+    const names = items
       .map((o) => o.metadata?.name)
       .filter((n): n is string => Boolean(n))
+    const options = [...new Set(names)]
+      .sort((a, b) => a.localeCompare(b))
       .map((n) => ({ id: n, label: n }))
     if (options.length < 2) return undefined
     return {
@@ -149,7 +162,7 @@ function ShellBody() {
         if (id !== name) navigate(`/${entry.path}/${id}`)
       },
     }
-  }, [entry, name, siblings.data, navigate])
+  }, [entry, name, isAgentLeaf, siblings.data, daemonSiblings.data, navigate])
 
   // The root crumb names the deployment: the project slug, or `localhost` when
   // self-hosted — not a fixed brand label.
