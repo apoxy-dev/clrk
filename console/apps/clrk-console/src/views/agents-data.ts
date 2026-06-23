@@ -44,6 +44,8 @@ export interface AgentRow {
   description?: string
   /** In-flight executions (TaskAgent); null for DaemonAgents (single-instance). */
   active: number | null
+  /** Pre-warmed sandboxes held Ready (TaskAgent metrics `warm` gauge); null for DaemonAgents. */
+  warm: number | null
   invocations24h: number | null
   p50ms: number | null
   p99ms: number | null
@@ -140,7 +142,11 @@ function mapKind(
       ready,
       readyReason,
       description: a.metadata.annotations?.[DESC_ANNOTATION],
-      active: isTask ? (m ? usage(m, 'active') : activeFromCr) : null,
+      // In-flight count is the CR's activeExecutions (the metrics snapshot no
+      // longer carries an in-flight gauge: its TaskAgent gauge is now `warm`,
+      // pre-warmed capacity). Daemons are single-instance, so active is null.
+      active: isTask ? activeFromCr : null,
+      warm: isTask ? num(m, 'warm') : null,
       invocations24h: num(m, 'invocations'),
       p50ms: isTask ? num(m, 'latency_p50_ms') : null,
       p99ms: isTask ? num(m, 'latency_p99_ms') : null,

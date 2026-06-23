@@ -19,8 +19,9 @@ const METRICS_GROUP = 'metrics.clrk.apoxy.dev'
 
 /** A per-agent metrics snapshot: name/namespace match the agent it summarizes,
  *  `usage` is a flat map of resource.Quantity strings (see api/metrics/v1alpha1
- *  UsageList — invocations, errors, active, input_tokens, output_tokens,
- *  tool_calls, latency_p50_ms, latency_p99_ms). */
+ *  UsageList — invocations, errors, input_tokens, output_tokens, tool_calls,
+ *  plus the point-in-time status gauge: `warm` (TaskAgent) / `running`
+ *  (DaemonAgent), and latency_p50_ms / latency_p99_ms for TaskAgents). */
 export interface AgentMetrics extends K8sObject {
   timestamp?: string
   window?: string

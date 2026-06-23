@@ -164,6 +164,7 @@ export function AgentsListView({
               <th>Image · Revision</th>
               <th>Pool</th>
               <th>Active</th>
+              <th>Warm</th>
               <th>24h calls</th>
               <th>p50 / p99</th>
               <th>Tokens in / out</th>
@@ -232,6 +233,13 @@ export function AgentsListView({
                   )}
                 </td>
                 <td style={{ fontFamily: 'var(--font-mono)' }}>
+                  {r.warm == null ? (
+                    <span style={{ color: 'var(--text-disabled)' }}>—</span>
+                  ) : (
+                    r.warm
+                  )}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)' }}>
                   {metric(r.invocations24h)}
                 </td>
                 <td style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
@@ -258,7 +266,7 @@ export function AgentsListView({
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={10} className="viz-empty-state">
+                <td colSpan={11} className="viz-empty-state">
                   {isLoading
                     ? 'Loading agents…'
                     : rows.length === 0

@@ -568,18 +568,18 @@ export class MockBackend {
         usage,
       } as unknown as StoredObject)
     put('taskagentmetrics', 'TaskAgentMetrics', 'code-reviewer', 'platform', {
-      invocations: '4124', errors: '4', active: '3', input_tokens: '2840000',
+      invocations: '4124', errors: '4', warm: '3', input_tokens: '2840000',
       output_tokens: '612000', tool_calls: '18204', latency_p50_ms: '1840', latency_p99_ms: '9220',
     })
     put('taskagentmetrics', 'TaskAgentMetrics', 'nightly-summarizer', 'platform', {
-      invocations: '96', errors: '2', active: '0', input_tokens: '9812000',
+      invocations: '96', errors: '2', warm: '0', input_tokens: '9812000',
       output_tokens: '184000', tool_calls: '5240', latency_p50_ms: '38400', latency_p99_ms: '91200',
     })
     put('daemonagentmetrics', 'DaemonAgentMetrics', 'slack-bot', 'platform', {
-      invocations: '1', errors: '0', input_tokens: '240000', output_tokens: '92000', tool_calls: '84',
+      invocations: '1', errors: '0', running: '1', input_tokens: '240000', output_tokens: '92000', tool_calls: '84',
     })
     put('daemonagentmetrics', 'DaemonAgentMetrics', 'log-watcher', 'research', {
-      invocations: '0', errors: '421', input_tokens: '0', output_tokens: '0', tool_calls: '0',
+      invocations: '0', errors: '421', running: '0', input_tokens: '0', output_tokens: '0', tool_calls: '0',
     })
   }
 
