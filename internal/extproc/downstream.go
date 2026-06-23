@@ -809,17 +809,28 @@ func (ds *downstreamStream) onResponseBody(m *extprocv3.HttpBody, now time.Time)
 // Called once per stream, just before sink.Emit, so partial-capture
 // records (truncated bodies) still attempt parsing.
 func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRule {
-	// Undo the captured bodies' content-encoding for parsing. Agents send
-	// `accept-encoding: gzip, ...` and clrk's MITM forwards it, so a
-	// provider gzips even SSE responses -- the raw capture is then opaque
-	// to the SSE/JSON parsers and every token count reads zero. Decode
-	// into locals only: rec.ResponseBody keeps the on-wire (compressed)
-	// bytes so clrk.resp.bytes and the body span event stay accurate, and
-	// the agent-facing data path is untouched. decodeForParse no-ops on a
-	// truncated body (a keep-last-N tail has no stream header to inflate
-	// from) and on identity/undecodable encodings.
-	reqBody := decodeForParse(rec.RequestBody, rec.RequestHeaders["content-encoding"], rec.RequestTruncated)
-	respBody := decodeForParse(rec.ResponseBody, rec.ResponseHeaders["content-encoding"], rec.ResponseTruncated)
+	// Undo the captured bodies' content-encoding for parsing AND for the
+	// OTLP body span event. Agents send `accept-encoding: gzip, ...` and
+	// clrk's MITM forwards it, so a provider gzips even SSE responses --
+	// the raw capture is then opaque to the SSE/JSON parsers (every token
+	// count reads zero) and the span inspector renders compressed garbage.
+	// decodeForParse no-ops on a truncated body (a keep-last-N tail has no
+	// stream header to inflate from) and on identity/undecodable encodings.
+	//
+	// The raw rec.RequestBody / rec.ResponseBody are left untouched so
+	// clrk.req.bytes / clrk.resp.bytes stay true on-wire counts; the decoded
+	// copy and the undone encoding are stashed for the sink to ship in the
+	// body event.
+	reqBody, reqEnc, reqDecoded := decodeForParse(rec.RequestBody, rec.RequestHeaders["content-encoding"], rec.RequestTruncated)
+	respBody, respEnc, respDecoded := decodeForParse(rec.ResponseBody, rec.ResponseHeaders["content-encoding"], rec.ResponseTruncated)
+	rec.RequestContentEncoding = reqEnc
+	rec.ResponseContentEncoding = respEnc
+	if reqDecoded {
+		rec.RequestBodyDecoded = reqBody
+	}
+	if respDecoded {
+		rec.ResponseBodyDecoded = respBody
+	}
 
 	// Augment the MCP record with response-envelope facts (the JSON-RPC
 	// error code) now that the response body is buffered. rec.MCP is set
@@ -879,20 +890,29 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 }
 
 // decodeForParse returns body with its content-encoding undone for
-// telemetry parsing, falling back to the raw bytes when that isn't
-// possible. A truncated body is skipped outright: streamed-response
-// capture is keep-last-N, so a truncated body is a header-less tail that
-// no codec can inflate. A decode failure (corrupt or partial stream)
-// likewise yields the raw bytes, which the parser then treats as
-// usage-absent -- the same outcome as before this decode step existed.
-func decodeForParse(body []byte, contentEncoding string, truncated bool) []byte {
-	if truncated {
-		return body
+// telemetry parsing and the OTLP body span event, the non-identity wire
+// encoding that was present, and whether inflation actually happened.
+//
+// encoding is the content-encoding the body carried (e.g. "gzip"), or ""
+// for an identity/absent encoding. It is reported even when inflation is
+// skipped or fails, so the sink can label a body as "was gzipped" and flag
+// a truncated-compressed body as not decodable.
+//
+// decoded is true only when there was a real encoding AND it inflated; the
+// returned bytes are then the plaintext. Otherwise decoded is false and the
+// returned bytes are body unchanged: a truncated keep-last-N tail (no
+// stream header to inflate from), an identity body, or a corrupt/partial
+// stream -- all of which the parser treats as usage-absent, the same
+// outcome as before this decode step existed.
+func decodeForParse(body []byte, contentEncoding string, truncated bool) (out []byte, encoding string, decoded bool) {
+	encoding = llmcall.NormalizeContentEncoding(contentEncoding)
+	if truncated || encoding == "" {
+		return body, encoding, false
 	}
 	if dec, ok := llmcall.DecodeBody(body, contentEncoding); ok {
-		return dec
+		return dec, encoding, true
 	}
-	return body
+	return body, encoding, false
 }
 
 // lookupCreds matches the request to an APR (if any) and returns the

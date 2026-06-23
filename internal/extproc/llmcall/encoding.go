@@ -57,6 +57,16 @@ func DecodeBody(body []byte, contentEncoding string) ([]byte, bool) {
 	return cur, true
 }
 
+// NormalizeContentEncoding returns the non-identity content-encoding layers
+// of a Content-Encoding header value, joined comma-separated in wire order
+// (outermost last), or "" when the header is empty or names only identity.
+// It is the label form of exactly the layers DecodeBody undoes, so a
+// telemetry consumer can record which encoding a body arrived in without
+// re-implementing the parse.
+func NormalizeContentEncoding(contentEncoding string) string {
+	return strings.Join(parseEncodings(contentEncoding), ", ")
+}
+
 // parseEncodings splits a content-encoding header into lowercased tokens,
 // dropping identity (a no-op layer the spec permits anywhere in the list).
 func parseEncodings(h string) []string {

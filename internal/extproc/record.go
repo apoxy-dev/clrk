@@ -65,6 +65,27 @@ type Record struct {
 	ResponseBodyAt    time.Time
 	ResponseBody      []byte
 	ResponseTruncated bool
+
+	// RequestBodyDecoded / ResponseBodyDecoded carry the content-encoding-
+	// decoded copy of the body when enrichRecord inflated it (agents send
+	// `accept-encoding: gzip, ...` and the MITM forwards it, so providers
+	// gzip/br/zstd even SSE bodies). The OTLP body span event ships these
+	// so the inspector renders readable JSON instead of a compressed blob.
+	// Nil when the body was identity-encoded, truncated (a header-less
+	// keep-last-N tail no codec can inflate), or failed to inflate -- the
+	// sink then falls back to the raw RequestBody/ResponseBody. The raw
+	// bytes are never overwritten, so clrk.req.bytes / clrk.resp.bytes stay
+	// true on-wire counts.
+	//
+	// RequestContentEncoding / ResponseContentEncoding name the non-identity
+	// wire encoding that was present (e.g. "gzip"), set whenever the body
+	// carried one regardless of whether it inflated, so the sink can label a
+	// decoded body as "was gzipped" and a truncated/undecodable compressed
+	// body as not decodable.
+	RequestBodyDecoded      []byte
+	RequestContentEncoding  string
+	ResponseBodyDecoded     []byte
+	ResponseContentEncoding string
 	// ResponseBodyChunks counts ResponseBody ProcessingRequest messages
 	// received from Envoy. Under ResponseBodyMode=BUFFERED this is 1
 	// (or 0 if the upstream produced no body); under STREAMED it
@@ -161,6 +182,24 @@ type Record struct {
 	// the synthesized route's retry buffer, so Envoy silently disables
 	// retries and an attached FallbackRoutingPolicy cannot fire.
 	RetryIneligibleReason string
+}
+
+// RequestBodyForEvent returns the bytes to ship in the OTLP request body
+// span event: the content-decoded copy when enrichRecord inflated it, else
+// the raw captured bytes.
+func (r Record) RequestBodyForEvent() []byte {
+	if r.RequestBodyDecoded != nil {
+		return r.RequestBodyDecoded
+	}
+	return r.RequestBody
+}
+
+// ResponseBodyForEvent is RequestBodyForEvent for the response direction.
+func (r Record) ResponseBodyForEvent() []byte {
+	if r.ResponseBodyDecoded != nil {
+		return r.ResponseBodyDecoded
+	}
+	return r.ResponseBody
 }
 
 func applyClrkMetadata(rec *Record, filterMeta map[string]*structpb.Struct) {

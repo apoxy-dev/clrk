@@ -25,6 +25,17 @@ const (
 	AttrBodyB64       = "clrk.body.b64"
 	AttrRespChunks    = "clrk.resp.chunks"
 
+	// AttrBodyContentEncoding names the wire content-encoding the captured
+	// body arrived in (e.g. "gzip", "br", "zstd"), emitted on a body span
+	// event only when that encoding was non-identity. clrk.body.b64 then
+	// carries the DECODED bytes whenever the body was inflatable -- the
+	// usual case -- so the attribute is the breadcrumb that the body was
+	// "gzipped on the wire" even though the inspector renders plaintext. It
+	// is the raw on-wire bytes only when the body was truncated (a
+	// header-less keep-last-N tail) or failed to inflate; consumers detect
+	// that via clrk.body.truncated and UTF-8/JSON validity.
+	AttrBodyContentEncoding = "clrk.body.content_encoding"
+
 	AttrGenAISystem        = "gen_ai.system"
 	AttrGenAIOperationName = "gen_ai.operation.name"
 	AttrGenAIRequestModel  = "gen_ai.request.model"

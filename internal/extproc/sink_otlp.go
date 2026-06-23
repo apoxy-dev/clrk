@@ -235,7 +235,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	if !r.RequestBodyAt.IsZero() && len(r.RequestBody) > 0 {
 		span.AddEvent("http.request.body",
 			oteltrace.WithTimestamp(r.RequestBodyAt),
-			oteltrace.WithAttributes(bodyAttrs(r.RequestBody, r.RequestTruncated)...))
+			oteltrace.WithAttributes(bodyAttrs(r.RequestBodyForEvent(), r.RequestTruncated, r.RequestContentEncoding)...))
 	}
 	if !r.ResponseHeadersAt.IsZero() {
 		span.AddEvent("http.response.headers",
@@ -245,7 +245,7 @@ func (s *otlpSink) emitSpan(r Record, d derived) oteltrace.Span {
 	if !r.ResponseBodyAt.IsZero() && len(r.ResponseBody) > 0 {
 		span.AddEvent("http.response.body",
 			oteltrace.WithTimestamp(r.ResponseBodyAt),
-			oteltrace.WithAttributes(bodyAttrs(r.ResponseBody, r.ResponseTruncated)...))
+			oteltrace.WithAttributes(bodyAttrs(r.ResponseBodyForEvent(), r.ResponseTruncated, r.ResponseContentEncoding)...))
 	}
 
 	if d.status >= 400 {
@@ -549,12 +549,22 @@ func headerAttrs(prefix string, headers map[string]string) []attribute.KeyValue 
 	return out
 }
 
-func bodyAttrs(body []byte, truncated bool) []attribute.KeyValue {
-	return []attribute.KeyValue{
+// bodyAttrs builds the attributes for a body span event. body is the bytes
+// to ship (content-decoded when enrichRecord inflated it, else the raw
+// capture), so clrk.body.bytes is the decoded length and clrk.body.b64 the
+// readable payload. contentEncoding, when non-empty, records the wire
+// encoding the body arrived in -- a breadcrumb on a decoded body and the
+// signal that a truncated/undecodable body's b64 is still the raw bytes.
+func bodyAttrs(body []byte, truncated bool, contentEncoding string) []attribute.KeyValue {
+	out := []attribute.KeyValue{
 		attribute.Int(otelemit.AttrBodyBytes, len(body)),
 		attribute.Bool(otelemit.AttrBodyTruncated, truncated),
 		attribute.String(otelemit.AttrBodyB64, base64.StdEncoding.EncodeToString(body)),
 	}
+	if contentEncoding != "" {
+		out = append(out, attribute.String(otelemit.AttrBodyContentEncoding, contentEncoding))
+	}
+	return out
 }
 
 func severityFor(status int) otellog.Severity {
