@@ -13,6 +13,10 @@ import {
   Activity,
   Archive,
   ChartLine,
+  ChevronDown,
+  ChevronUp,
+  Close,
+  ListBulleted,
   Network_3 as NetworkIcon,
   Version,
   type CarbonIconType,
@@ -33,6 +37,7 @@ import {
   type Lane,
   type RelSpan,
   type Span,
+  type SpanBody,
 } from '../telemetry/spans'
 import type { OtlpTracesData } from '../telemetry/otlp'
 import { shortImage, type AgentRow } from './agents-data'
@@ -220,6 +225,7 @@ function InteractionTab({ spans, loading }: { spans: Span[]; loading?: boolean }
           onSelect={setSpanId}
           onSelectRoot={inv.inbound ? () => setSpanId(inv.inbound!.id) : undefined}
           fmtTick={fmtTickMs}
+          resetKey={inv.id}
         />
         <Legend kind="task" />
       </div>
@@ -359,6 +365,7 @@ function ActivityTab({ row, spans, loading }: { row: AgentRow; spans: Span[]; lo
             onSelect={setSelId}
             fmtTick={(ms) => `${Math.round((windowMs - ms) / 1000)}s`}
             onSelectRoot={() => setSelId('session')}
+            resetKey={mode}
           />
         )}
         <Legend kind="daemon" />
@@ -455,6 +462,7 @@ function LaneChart({
   onSelect,
   onSelectRoot,
   fmtTick,
+  resetKey,
 }: {
   lanes: LaneDef[]
   totalMs: number
@@ -464,7 +472,18 @@ function LaneChart({
   onSelect: (id: string) => void
   onSelectRoot?: () => void
   fmtTick: (ms: number) => string
+  /** Changes when the inspected invocation / time window changes, so per-lane
+   *  expand state doesn't leak across runs. */
+  resetKey: string
 }) {
+  // Lanes the user has opened past the concurrency fold. Reset on run change so
+  // a deep fan-out in one invocation doesn't start the next one pre-expanded.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    setExpanded({})
+  }, [resetKey])
+  const toggleLane = (id: string) => setExpanded((e) => ({ ...e, [id]: !e[id] }))
+
   const ticks = niceTicks(0, totalMs, 8)
   const pct = (ms: number) => (clamp(ms, 0, totalMs) / totalMs) * 100
   // Anchor the first/last labels by position, not list index: with no forced
@@ -491,12 +510,41 @@ function LaneChart({
         {lanes.map((lane) => {
           const root = rootBar?.laneId === lane.id ? rootBar : undefined
           const laneItems = items.filter((it) => it.laneId === lane.id)
-          const { rowOf, rows } = packLanes(laneItems)
+          const isExpanded = !!expanded[lane.id]
+          const pack = packLanes(laneItems, isExpanded)
+          // The selected span is pinned visible (rendered as a full bar, never a
+          // dim tick) so collapsing a lane can't strand the selection behind the
+          // fold — and it's excluded from the hidden tally the pill advertises.
+          const selItem = selectedId != null ? laneItems.find((it) => it.id === selectedId) : undefined
+          const selHidden = selItem != null && pack.overflow.has(selItem.id)
+          const hiddenCount = pack.overflowCount - (selHidden ? 1 : 0)
+          const hiddenErr = pack.overflowErr - (selHidden && !selItem.ok ? 1 : 0)
           return (
-            <div key={lane.id} className="swim-lane" style={{ height: laneHeight(rows) }}>
+            <div key={lane.id} className="swim-lane" style={{ height: laneHeight(pack.rows) }}>
               <div className="swim-lane-label">
                 <div className="swim-lane-name">{lane.label}</div>
                 <div className="swim-lane-sub">{lane.sub}</div>
+                {pack.trueRows > 1 && (
+                  <div className="swim-lane-conc">{pack.trueRows}× concurrent</div>
+                )}
+                {pack.expandable && (isExpanded || hiddenCount > 0) && (
+                  <button
+                    type="button"
+                    className={'swim-expand' + (!isExpanded && hiddenErr ? ' has-err' : '')}
+                    aria-expanded={isExpanded}
+                    aria-label={
+                      isExpanded
+                        ? `Collapse ${lane.label} lane`
+                        : `Show ${hiddenCount} more ${lane.label} spans${hiddenErr ? `, ${hiddenErr} errored` : ''}`
+                    }
+                    onClick={() => toggleLane(lane.id)}
+                  >
+                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {isExpanded
+                      ? 'Collapse'
+                      : `+${hiddenCount} more${hiddenErr ? ` · ${hiddenErr} err` : ''}`}
+                  </button>
+                )}
               </div>
               <div className="swim-lane-track">
                 {ticks.map((t) => (
@@ -510,16 +558,21 @@ function LaneChart({
                     onSelect={onSelectRoot}
                   />
                 )}
-                {laneItems.map((it) => (
-                  <SwimSpanBar
-                    key={it.id}
-                    item={it}
-                    pct={pct}
-                    top={barTop(rowOf.get(it.id) ?? 0)}
-                    selected={it.id === selectedId}
-                    onSelect={onSelect}
-                  />
-                ))}
+                {laneItems.map((it) => {
+                  const top = barTop(pack.rowOf.get(it.id) ?? 0)
+                  return pack.overflow.has(it.id) && it.id !== selectedId ? (
+                    <SwimOverflowTick key={it.id} item={it} pct={pct} top={top} />
+                  ) : (
+                    <SwimSpanBar
+                      key={it.id}
+                      item={it}
+                      pct={pct}
+                      top={top}
+                      selected={it.id === selectedId}
+                      onSelect={onSelect}
+                    />
+                  )
+                })}
               </div>
             </div>
           )
@@ -536,16 +589,42 @@ function LaneChart({
 const BAR_H = 32
 const ROW_GAP = 6
 const LANE_PAD = 12
+const OVERFLOW_H = 8
+// Centers the 8px density tick inside its 32px row slot.
+const OVERFLOW_INSET = (BAR_H - OVERFLOW_H) / 2
+// How many sub-rows a lane stacks before it folds. The last visible row becomes
+// a density strip; deeper concurrency collapses into it (so 2 bar rows stay
+// readable and a pathological fan-out can't blow the lane's height up). Past 3
+// parallel calls a lane folds — the review-bot invocation (six MCP calls fired
+// in parallel) lands here.
+const SWIM_MAX_ROWS = 3
+
 function laneHeight(rows: number): number {
   return LANE_PAD * 2 + rows * BAR_H + Math.max(0, rows - 1) * ROW_GAP
 }
 function barTop(row: number): number {
   return LANE_PAD + row * (BAR_H + ROW_GAP)
 }
-function packLanes(items: ChartItem[]): { rowOf: Map<string, number>; rows: number } {
+
+interface LanePack {
+  /** Visible row index per item (folded items resolve to the overflow row). */
+  rowOf: Map<string, number>
+  /** Items rendered as a density tick in the overflow strip, not a full bar. */
+  overflow: Set<string>
+  /** Rows the lane actually draws (folded → capped at SWIM_MAX_ROWS). */
+  rows: number
+  /** Rows the lane would need with nothing folded. */
+  trueRows: number
+  /** True once the lane stacks past the fold and offers an expand toggle. */
+  expandable: boolean
+  overflowCount: number
+  overflowErr: number
+}
+
+function packLanes(items: ChartItem[], expanded: boolean): LanePack {
   const sorted = [...items].sort((a, b) => a.t0Ms - b.t0Ms || a.id.localeCompare(b.id))
   const rowEnd: number[] = [] // running end-ms of each open row
-  const rowOf = new Map<string, number>()
+  const trueRowOf = new Map<string, number>()
   for (const it of sorted) {
     const end = it.t0Ms + Math.max(0, it.durMs)
     let row = rowEnd.findIndex((e) => it.t0Ms >= e)
@@ -555,9 +634,35 @@ function packLanes(items: ChartItem[]): { rowOf: Map<string, number>; rows: numb
     } else {
       rowEnd[row] = end
     }
+    trueRowOf.set(it.id, row)
+  }
+  const trueRows = Math.max(1, rowEnd.length)
+  const expandable = trueRows > SWIM_MAX_ROWS
+  const capped = expandable && !expanded
+  const overflowRow = SWIM_MAX_ROWS - 1 // last visible row holds the folded spans
+  const rowOf = new Map<string, number>()
+  const overflow = new Set<string>()
+  let overflowCount = 0
+  let overflowErr = 0
+  for (const it of sorted) {
+    let row = trueRowOf.get(it.id) ?? 0
+    if (capped && row >= overflowRow) {
+      overflow.add(it.id)
+      overflowCount++
+      if (!it.ok) overflowErr++
+      row = overflowRow
+    }
     rowOf.set(it.id, row)
   }
-  return { rowOf, rows: Math.max(1, rowEnd.length) }
+  return {
+    rowOf,
+    overflow,
+    rows: capped ? SWIM_MAX_ROWS : trueRows,
+    trueRows,
+    expandable,
+    overflowCount,
+    overflowErr,
+  }
 }
 
 function SwimRootBar({
@@ -626,6 +731,35 @@ function SwimSpanBar({
   )
 }
 
+// A folded span. Past the lane's concurrency cap there's no room to draw every
+// parallel call as its own bar, so the deepest ones collapse into this dim
+// density tick (coral and more opaque when errored, so a hidden failure still
+// reads). Expanding the lane promotes them back to full, selectable bars.
+function SwimOverflowTick({
+  item,
+  pct,
+  top,
+}: {
+  item: ChartItem
+  pct: (ms: number) => number
+  top: number
+}) {
+  const left = pct(item.t0Ms)
+  const width = Math.max(0, pct(item.t0Ms + item.durMs) - left)
+  return (
+    <div
+      className={'swim-overflow' + (item.ok ? '' : ' is-err')}
+      style={{
+        left: `${left}%`,
+        top: `${top + OVERFLOW_INSET}px`,
+        width: `${width}%`,
+        background: laneFill(item.lane, item.ok),
+      }}
+      title={`${item.label} · ${item.host} · ${fmtMs(item.durMs)} · ${item.statusCode}`}
+    />
+  )
+}
+
 function Legend({ kind }: { kind: 'task' | 'daemon' }) {
   return (
     <div className="swim-legend">
@@ -647,6 +781,22 @@ function Legend({ kind }: { kind: 'task' | 'daemon' }) {
 // ── Span inspector ───────────────────────────────────────────────────────────
 
 function SpanInspector({ span, traceId, invocationId }: { span: Span; traceId: string; invocationId?: string }) {
+  // The full raw attribute list lives in a slide-out tray rather than inline, so
+  // the main panel stays a short curated read and the dense dotted-key dump is
+  // on demand. Close it when the inspected span changes, or on Esc.
+  const [attrsOpen, setAttrsOpen] = useState(false)
+  useEffect(() => {
+    setAttrsOpen(false)
+  }, [span.id])
+  useEffect(() => {
+    if (!attrsOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAttrsOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [attrsOpen])
+
   return (
     <div className="span-inspector">
       <div className="span-inspector-hd">
@@ -659,6 +809,16 @@ function SpanInspector({ span, traceId, invocationId }: { span: Span; traceId: s
           <span className={span.ok ? 'chip chip--leaf' : 'chip chip--coral'}>{span.statusCode || '—'}</span>
           <span className="chip">{fmtMs(span.durMs)}</span>
           {span.route && <span className="chip">via {span.route}</span>}
+          <button
+            type="button"
+            className="span-attrs-btn"
+            onClick={() => setAttrsOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={attrsOpen}
+          >
+            <ListBulleted size={16} />
+            Attributes
+          </button>
         </div>
       </div>
       <div className="span-inspector-bd">
@@ -671,10 +831,45 @@ function SpanInspector({ span, traceId, invocationId }: { span: Span; traceId: s
               <TokenBar tokIn={span.tokIn ?? 0} tokOut={span.tokOut ?? 0} />
             </>
           )}
-          <div className="span-section-lab">Span attributes</div>
-          <KvBlock rows={attrRows(span, traceId, invocationId)} />
+          {span.reqBody && (
+            <>
+              <div className="span-section-lab">{bodyLabel('Request body', span.reqBody)}</div>
+              <CodeBlock>{prettyBody(span.reqBody.text)}</CodeBlock>
+            </>
+          )}
+          {span.respBody && (
+            <>
+              <div className="span-section-lab">{bodyLabel('Response body', span.respBody)}</div>
+              <CodeBlock>{prettyBody(span.respBody.text)}</CodeBlock>
+            </>
+          )}
         </div>
       </div>
+      {attrsOpen && (
+        <>
+          <div className="attrs-tray-scrim" onClick={() => setAttrsOpen(false)} />
+          <aside className="attrs-tray" role="dialog" aria-label="Span attributes">
+            <div className="attrs-tray-hd">
+              <span className="lab">Span attributes</span>
+              <span className="name" title={span.label}>
+                {span.label}
+              </span>
+              <button
+                type="button"
+                className="attrs-tray-close"
+                onClick={() => setAttrsOpen(false)}
+                aria-label="Close"
+                title="Close (Esc)"
+              >
+                <Close size={16} />
+              </button>
+            </div>
+            <div className="attrs-tray-bd">
+              <KvBlock rows={attrRows(span, traceId, invocationId)} />
+            </div>
+          </aside>
+        </>
+      )}
     </div>
   )
 }
@@ -890,6 +1085,40 @@ function KvBlock({ rows }: { rows: Array<[string, ReactNode]> }) {
       ))}
     </div>
   )
+}
+
+// A captured request/response payload. The body rides on the span as a base64
+// OTLP event (telemetry/spans.ts decodes it); here it's just monospace text.
+function CodeBlock({ children }: { children: ReactNode }) {
+  return <pre className="codeblock">{children}</pre>
+}
+
+// Pretty-print a single JSON document so a captured body is readable. NDJSON,
+// SSE, and non-JSON payloads aren't one parseable value — pass them through
+// verbatim rather than corrupting them.
+function prettyBody(text: string): string {
+  const t = text.trim()
+  if (t.startsWith('{') || t.startsWith('[')) {
+    try {
+      return JSON.stringify(JSON.parse(t), null, 2)
+    } catch {
+      /* not a single JSON doc — show as captured */
+    }
+  }
+  return text
+}
+
+function bodyLabel(kind: string, b: SpanBody): string {
+  const parts = [kind]
+  if (b.bytes) parts.push(fmtBytes(b.bytes))
+  if (b.truncated) parts.push('truncated')
+  return parts.join(' · ')
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function strip(cols: number): CSSProperties {

@@ -69,3 +69,20 @@ export function attrMap(attrs?: OtlpKeyValue[]): Record<string, string> {
   }
   return out
 }
+
+/**
+ * Decode a base64 payload (the captured-body `clrk.body.b64` attribute) to a
+ * UTF-8 string. Bodies arrive as raw bytes base64'd by the ext_proc OTLP sink,
+ * so a naive `atob` would mangle any multibyte character — round-trip through
+ * the byte array. Returns '' on malformed input rather than throwing.
+ */
+export function decodeB64Utf8(b64: string): string {
+  try {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return new TextDecoder().decode(bytes)
+  } catch {
+    return ''
+  }
+}

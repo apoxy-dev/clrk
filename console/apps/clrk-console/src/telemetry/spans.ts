@@ -13,12 +13,27 @@
 //     tool-call rollup counts);
 //   - everything else outbound is a plain network call.
 
-import { attrMap, type OtlpTracesData } from './otlp'
+import { attrMap, decodeB64Utf8, type OtlpSpan, type OtlpTracesData } from './otlp'
 
 /** The dispatch span that bounds one invocation (otelemit.SpanNameIngressDispatch). */
 export const SPAN_INGRESS_DISPATCH = 'ingress.dispatch'
 
 export type Lane = 'inbound' | 'llm' | 'mcp' | 'net'
+
+/**
+ * A captured request or response body, carried on the span as an OTLP event
+ * (`http.request.body` / `http.response.body`) by the ext_proc OTLP sink. The
+ * payload rides base64'd in `clrk.body.b64`, bounded by the gateway's
+ * CaptureBody.MaxBytes — `truncated` flags when it hit that cap.
+ */
+export interface SpanBody {
+  /** Decoded UTF-8 text of the captured body. */
+  text: string
+  /** True when capture hit CaptureBody.MaxBytes and was cut short. */
+  truncated: boolean
+  /** Captured byte length (clrk.body.bytes). */
+  bytes: number
+}
 
 /** One flattened span with its lane and the dimensions the inspector shows. */
 export interface Span {
@@ -49,6 +64,9 @@ export interface Span {
   method?: string
   // routing
   route?: string
+  // captured payloads (http.request.body / http.response.body events)
+  reqBody?: SpanBody
+  respBody?: SpanBody
 }
 
 /** An invocation span carries its start offset from the invocation root. */
@@ -122,6 +140,30 @@ function labelOf(lane: Lane, name: string, a: Record<string, string>, host: stri
   }
 }
 
+/**
+ * Pull the captured request/response bodies off a span's OTLP events. The
+ * ext_proc sink emits them as `http.request.body` / `http.response.body` events
+ * with the payload base64'd in `clrk.body.b64` — the span's plain attribute map
+ * never carries them, so the swimlane has to read the events directly.
+ */
+function bodyEvents(events?: OtlpSpan['events']): { req?: SpanBody; resp?: SpanBody } {
+  const out: { req?: SpanBody; resp?: SpanBody } = {}
+  for (const ev of events ?? []) {
+    if (ev.name !== 'http.request.body' && ev.name !== 'http.response.body') continue
+    const ea = attrMap(ev.attributes)
+    const b64 = ea['clrk.body.b64']
+    if (b64 == null) continue
+    const body: SpanBody = {
+      text: decodeB64Utf8(b64),
+      truncated: ea['clrk.body.truncated'] === 'true',
+      bytes: num(ea['clrk.body.bytes']) ?? 0,
+    }
+    if (ev.name === 'http.request.body') out.req = body
+    else out.resp = body
+  }
+  return out
+}
+
 /** Flatten an OTLP TracesData into classified spans (newest-first not guaranteed). */
 export function flattenSpans(data?: OtlpTracesData): Span[] {
   const out: Span[] = []
@@ -142,6 +184,7 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
         const statusCode = httpStatus ?? (errored ? 500 : 200)
         const ok = !errored && statusCode < 400
         const host = hostOf(a)
+        const bodies = bodyEvents(sp.events)
         out.push({
           // A missing spanId would collide with every other id-less span,
           // producing duplicate React keys and cross-selecting them in the
@@ -169,6 +212,8 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
           tool: a['mcp.tool.name'],
           method: a['mcp.method'],
           route: a['clrk.aiproviderroute.name'] ?? a['clrk.mcproute.name'] ?? a['clrk.egress_gateway'],
+          reqBody: bodies.req,
+          respBody: bodies.resp,
         })
       }
     }

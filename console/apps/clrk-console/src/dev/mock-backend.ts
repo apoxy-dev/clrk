@@ -633,6 +633,24 @@ export class MockBackend {
     const spans: Json[] = []
     const kv = (rec: Record<string, string>) =>
       Object.entries(rec).map(([key, v]) => ({ key, value: { stringValue: v } }))
+    const toB64 = (s: string) => {
+      const bytes = enc.encode(s)
+      let bin = ''
+      for (const b of bytes) bin += String.fromCharCode(b)
+      return btoa(bin)
+    }
+    // A captured-body span event (http.request.body / http.response.body),
+    // carrying the payload base64'd in clrk.body.b64 exactly as the ext_proc
+    // OTLP sink emits it (internal/extproc/sink_otlp.go).
+    const bodyEvent = (evName: string, text: string, atMs: number) => ({
+      timeUnixNano: String(Math.round(atMs) * NS),
+      name: evName,
+      attributes: kv({
+        'clrk.body.bytes': String(enc.encode(text).length),
+        'clrk.body.truncated': 'false',
+        'clrk.body.b64': toB64(text),
+      }),
+    })
     const span = (
       startMs: number,
       durMs: number,
@@ -640,8 +658,13 @@ export class MockBackend {
       attrs: Record<string, string>,
       ok: boolean,
       ids: { trace: string; span: string; parent?: string },
-    ) =>
-      spans.push({
+      bodies?: { req?: string; resp?: string },
+    ) => {
+      const events = [
+        ...(bodies?.req != null ? [bodyEvent('http.request.body', bodies.req, startMs)] : []),
+        ...(bodies?.resp != null ? [bodyEvent('http.response.body', bodies.resp, startMs + durMs)] : []),
+      ]
+      return spans.push({
         traceId: ids.trace,
         spanId: ids.span,
         parentSpanId: ids.parent ?? '',
@@ -650,7 +673,9 @@ export class MockBackend {
         endTimeUnixNano: String(Math.round(startMs + durMs) * NS),
         attributes: kv(attrs),
         status: { code: ok ? 'STATUS_CODE_OK' : 'STATUS_CODE_ERROR' },
+        ...(events.length ? { events } : {}),
       })
+    }
 
     if (resource === 'daemonagents') {
       const calls: Array<{ ago: number; lane: 'llm' | 'mcp' | 'net'; dur: number; ok?: boolean }> = [
@@ -662,7 +687,7 @@ export class MockBackend {
       ]
       calls.forEach((c, i) => {
         const t = `tr-${name}-d${i}`
-        span(now - c.ago * 1000, c.dur, c.lane, laneAttrs(c.lane, c.ok !== false), c.ok !== false, { trace: t, span: `${t}-s` })
+        span(now - c.ago * 1000, c.dur, c.lane, laneAttrs(c.lane, c.ok !== false), c.ok !== false, { trace: t, span: `${t}-s` }, laneBodies(c.lane))
       })
     } else {
       for (let i = 0; i < 3; i++) {
@@ -671,10 +696,34 @@ export class MockBackend {
         const t = `tr-${invId}`
         const ok = i !== 2
         const base = { 'invocation.id': invId, 'agent.name': name, 'agent.kind': 'TaskAgent' }
-        span(invStart, ok ? 1840 : 320, 'ingress.dispatch', { ...base, 'http.request.method': 'POST', 'url.path': '/run' }, ok, { trace: t, span: `${t}-root` })
-        span(invStart + 50, 420, 'chat', { ...base, ...laneAttrs('llm') }, true, { trace: t, span: `${t}-llm`, parent: `${t}-root` })
-        span(invStart + 520, 120, 'tools/call', { ...base, ...laneAttrs('mcp') }, true, { trace: t, span: `${t}-mcp`, parent: `${t}-root` })
-        span(invStart + 680, 90, 'GET github', { ...base, ...laneAttrs('net', ok) }, ok, { trace: t, span: `${t}-net`, parent: `${t}-root` })
+        span(invStart, ok ? 1840 : 320, 'ingress.dispatch', { ...base, 'http.request.method': 'POST', 'url.path': '/run' }, ok, { trace: t, span: `${t}-root` }, laneBodies('inbound', { invId, ok }))
+        span(invStart + 50, 420, 'chat', { ...base, ...laneAttrs('llm') }, true, { trace: t, span: `${t}-llm`, parent: `${t}-root` }, laneBodies('llm'))
+        span(invStart + 520, 120, 'tools/call', { ...base, ...laneAttrs('mcp') }, true, { trace: t, span: `${t}-mcp`, parent: `${t}-root` }, laneBodies('mcp', { tool: 'read_file' }))
+        span(invStart + 680, 90, 'GET github', { ...base, ...laneAttrs('net', ok) }, ok, { trace: t, span: `${t}-net`, parent: `${t}-root` }, laneBodies('net'))
+        // The most recent run fires a parallel tool fan-out — six MCP calls at
+        // once — so the MCP lane stacks past the fold and renders the "+N more"
+        // overflow strip the user can expand (mirrors the review-bot example).
+        if (i === 0 && ok) {
+          const fan = [
+            { tool: 'get_pull_request', off: 0, dur: 340 },
+            { tool: 'list_files', off: 0, dur: 280 },
+            { tool: 'get_diff', off: 10, dur: 700 },
+            { tool: 'read_file', off: 20, dur: 520 },
+            { tool: 'search_code', off: 30, dur: 480 },
+            { tool: 'list_commits', off: 40, dur: 610 },
+          ]
+          fan.forEach((f, j) =>
+            span(
+              invStart + 900 + f.off,
+              f.dur,
+              'tools/call',
+              { ...base, ...laneAttrs('mcp'), 'mcp.tool.name': f.tool },
+              true,
+              { trace: t, span: `${t}-mcp-fan${j}`, parent: `${t}-root` },
+              laneBodies('mcp', { tool: f.tool }),
+            ),
+          )
+        }
       }
     }
     return {
@@ -892,6 +941,80 @@ function laneAttrs(lane: 'llm' | 'mcp' | 'net', ok = true): Record<string, strin
       'server.address': 'github-mcp.internal',
     }
   return { 'server.address': 'api.github.com', 'http.response.status_code': ok ? '200' : '503' }
+}
+
+/**
+ * Sample captured request/response bodies per lane. tracesFor base64's these
+ * into `http.request.body` / `http.response.body` span events so the inspector's
+ * body panels render in the mock exactly as they will against a real ext_proc
+ * capture — JSON the UI then pretty-prints.
+ */
+function laneBodies(
+  lane: 'inbound' | 'llm' | 'mcp' | 'net',
+  opts: { tool?: string; invId?: string; ok?: boolean } = {},
+): { req?: string; resp?: string } {
+  const j = (o: unknown) => JSON.stringify(o)
+  if (lane === 'inbound') {
+    return {
+      req: j({
+        action: 'opened',
+        number: 4821,
+        pull_request: {
+          title: 'feat: refresh OAuth token flow',
+          head: { ref: 'oauth-refresh' },
+          base: { ref: 'main' },
+        },
+      }),
+      resp: j({ status: opts.ok === false ? 'error' : 'accepted', invocation: opts.invId ?? '' }),
+    }
+  }
+  if (lane === 'llm') {
+    return {
+      req: j({
+        model: 'claude-sonnet-4',
+        system: 'You are a senior code reviewer. Be concise.',
+        messages: [{ role: 'user', content: 'Review PR #4821 — focus on auth/oauth.go.' }],
+        tools: [{ name: 'get_pull_request' }, { name: 'list_files' }, { name: 'read_file' }],
+        stream: true,
+      }),
+      resp: j({
+        id: 'msg_01XCanva7',
+        model: 'claude-sonnet-4',
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', name: 'list_files', input: { path: 'auth/' } }],
+        usage: { input_tokens: 1200, output_tokens: 300 },
+      }),
+    }
+  }
+  if (lane === 'mcp') {
+    const tool = opts.tool ?? 'read_file'
+    const args: Record<string, unknown> =
+      tool === 'read_file'
+        ? { path: 'auth/oauth.go' }
+        : tool === 'get_pull_request'
+          ? { owner: 'acme', repo: 'svc', number: 4821 }
+          : tool === 'get_diff'
+            ? { number: 4821 }
+            : tool === 'list_files'
+              ? { path: 'auth/' }
+              : tool === 'list_commits'
+                ? { sha: 'oauth-refresh' }
+                : { query: 'OAuth2 refresh' }
+    const text =
+      tool === 'read_file'
+        ? 'package auth\n\nfunc Refresh(ctx context.Context) error { … }'
+        : tool === 'get_pull_request'
+          ? '{"title":"feat: refresh OAuth","state":"open"}'
+          : '[{"name":"oauth.go","sha":"3a9f…"}]'
+    return {
+      req: j({ jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: tool, arguments: args } }),
+      resp: j({ jsonrpc: '2.0', id: 14, result: { content: [{ type: 'text', text }], isError: false } }),
+    }
+  }
+  return {
+    req: j({ method: 'GET', url: 'https://api.github.com/repos/acme/svc/pulls/4821' }),
+    resp: j({ number: 4821, state: 'open', mergeable: true }),
+  }
 }
 
 /** A standard `Programmed` condition for an EgressGateway / listener. */

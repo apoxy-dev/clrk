@@ -124,6 +124,41 @@ describe('toInvocations', () => {
   })
 })
 
+describe('flattenSpans / captured bodies', () => {
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64')
+  // A multibyte char proves the decode round-trips UTF-8, not just ASCII.
+  const reqText = '{"model":"claude-sonnet-4","note":"✓ ok"}'
+  const respText = '{"usage":{"output_tokens":300}}'
+  const withBodies: OtlpSpan = {
+    ...span({ name: 'chat', spanId: 'b', start: 50, dur: 400, attrs: { 'invocation.id': INV, 'gen_ai.system': 'anthropic' } }),
+    events: [
+      { name: 'http.request.headers', attributes: kv({ 'content-type': 'application/json' }) },
+      { name: 'http.request.body', attributes: kv({ 'clrk.body.bytes': new TextEncoder().encode(reqText).length, 'clrk.body.truncated': false, 'clrk.body.b64': b64(reqText) }) },
+      { name: 'http.response.body', attributes: kv({ 'clrk.body.bytes': 999999, 'clrk.body.truncated': true, 'clrk.body.b64': b64(respText) }) },
+    ],
+  }
+  const s = flattenSpans(traces([withBodies]))[0]!
+
+  it('decodes UTF-8 request/response bodies off the span events', () => {
+    expect(s.reqBody?.text).toBe(reqText)
+    expect(s.reqBody?.truncated).toBe(false)
+    expect(s.respBody?.text).toBe(respText)
+    expect(s.respBody?.truncated).toBe(true)
+    expect(s.respBody?.bytes).toBe(999999)
+  })
+
+  it('keeps the base64 body payload out of the span attribute map (so the tray never dumps it)', () => {
+    expect(s.attrs['clrk.body.b64']).toBeUndefined()
+    expect(s.attrs['clrk.body.bytes']).toBeUndefined()
+  })
+
+  it('leaves bodies undefined when a span carries no body events', () => {
+    const plain = flattenSpans(traces([span({ name: 'chat', spanId: 'z', start: 0, dur: 1, attrs: { 'invocation.id': INV } })]))[0]!
+    expect(plain.reqBody).toBeUndefined()
+    expect(plain.respBody).toBeUndefined()
+  })
+})
+
 describe('toDaemonCalls', () => {
   it('drops the inbound lane and ages each call from now, newest first', () => {
     const nowMs = BASE + 10_000
