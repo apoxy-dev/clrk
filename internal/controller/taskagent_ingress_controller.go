@@ -396,6 +396,13 @@ func desiredExtProcPolicy(ta *clrkv1alpha1.TaskAgent, extProcPort int32) *egv1al
 							// full-body buffering for endpoint selection.
 							Body: &streamed,
 						},
+						Response: &egv1alpha1.ProcessingModeOptions{
+							// Streamed response body so the agent's reply is
+							// observed (and emitted on the dispatch span) without
+							// buffering — buffering would defeat streaming/SSE
+							// agents by withholding the response until EOS.
+							Body: &streamed,
+						},
 					},
 				},
 			},

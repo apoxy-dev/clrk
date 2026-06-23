@@ -159,6 +159,19 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		reqBodyAt    time.Time
 		bodyEmitted  bool
 	)
+	// Per-stream response-body capture state, populated from ResponseHeaders
+	// (which always precedes ResponseBody) and accumulated across chunks. The
+	// response leg is symmetric with the request leg above; Envoy delivers it
+	// because the EnvoyExtensionPolicy enables Response.Body = STREAMED.
+	var (
+		captureRespBody bool
+		respEncoding    string
+		respBody        []byte
+		respBytesLeft   = capture.MaxBytesDefault
+		respTruncated   bool
+		respBodyAt      time.Time
+		respBodyEmitted bool
+	)
 	defer func() {
 		if span == nil {
 			return
@@ -167,9 +180,12 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		// end-of-stream chunk (e.g. the client aborted mid-upload), matching
 		// the egress sink which emits whatever it captured at stream end. A
 		// stream that reached EOS already emitted (bodyEmitted), so this
-		// never double-emits.
+		// never double-emits. Same for the response leg.
 		if captureBody && !bodyEmitted && len(reqBody) > 0 {
 			emitRequestBodyEvent(span, reqBody, reqTruncated, reqEncoding, reqBodyAt)
+		}
+		if captureRespBody && !respBodyEmitted && len(respBody) > 0 {
+			emitResponseBodyEvent(span, respBody, respTruncated, respEncoding, respBodyAt)
 		}
 		span.End()
 	}()
@@ -226,6 +242,41 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				}
 			}
 			if err := stream.Send(bodyContinue()); err != nil {
+				return err
+			}
+		case *extprocv3.ProcessingRequest_ResponseHeaders:
+			// Observe-only: emit the response headers event (redacted) and
+			// gate response-body capture on the content-type allow-list, then
+			// forward unchanged. The dispatch outcome already stamped
+			// http.response.status_code; the real upstream :status rides along
+			// in the headers event.
+			hdrs := headersToMap(m.ResponseHeaders.Headers)
+			if span != nil {
+				emitResponseHeadersEvent(span, hdrs)
+			}
+			captureRespBody = capture.ContentTypeIncluded(hdrs["content-type"], ingressIncludedContentTypes)
+			respEncoding = hdrs["content-encoding"]
+			if err := stream.Send(continueUnchanged(req)); err != nil {
+				return err
+			}
+		case *extprocv3.ProcessingRequest_ResponseBody:
+			// Observe-only: accumulate the agent reply (bounded, keep-first-N)
+			// and emit the body span event once the stream ends, then always
+			// forward the chunk unchanged.
+			if captureRespBody && span != nil && !respBodyEmitted {
+				chunk := m.ResponseBody.GetBody()
+				if respBodyAt.IsZero() && len(chunk) > 0 {
+					respBodyAt = time.Now()
+				}
+				var trunc bool
+				respBody, trunc = capture.AppendBounded(respBody, chunk, &respBytesLeft)
+				respTruncated = respTruncated || trunc
+				if m.ResponseBody.GetEndOfStream() {
+					emitResponseBodyEvent(span, respBody, respTruncated, respEncoding, respBodyAt)
+					respBodyEmitted = true
+				}
+			}
+			if err := stream.Send(continueUnchanged(req)); err != nil {
 				return err
 			}
 		default:
@@ -726,6 +777,45 @@ func emitRequestBodyEvent(span trace.Span, body []byte, truncated bool, contentE
 		}
 	}
 	span.AddEvent(otelemit.SpanEventHTTPRequestBody,
+		trace.WithTimestamp(at),
+		trace.WithAttributes(otelemit.BodyEventAttrs(out, truncated, enc)...))
+}
+
+// emitResponseHeadersEvent mirrors emitRequestHeadersEvent for the response
+// leg: http.response.header.<name> attributes, sensitive headers (set-cookie,
+// ...) redacted via the same tracectx.IsSensitiveHeader set, emitted as an
+// http.response.headers event so the console renders the root span's response
+// headers exactly as it does for egress child spans.
+func emitResponseHeadersEvent(span trace.Span, hdrs map[string]string) {
+	if len(hdrs) == 0 {
+		return
+	}
+	out := make([]attribute.KeyValue, 0, len(hdrs))
+	for k, v := range hdrs {
+		if tracectx.IsSensitiveHeader(k) {
+			v = "[redacted]"
+		}
+		out = append(out, attribute.String("http.response.header."+k, v))
+	}
+	span.AddEvent(otelemit.SpanEventHTTPResponseHeaders, trace.WithAttributes(out...))
+}
+
+// emitResponseBodyEvent mirrors emitRequestBodyEvent for the response leg,
+// emitting the captured agent reply as an http.response.body event under the
+// same clrk.body.* contract (otelemit.BodyEventAttrs). Content-decode and the
+// truncation rule are identical to the request path.
+func emitResponseBodyEvent(span trace.Span, body []byte, truncated bool, contentEncoding string, at time.Time) {
+	if len(body) == 0 {
+		return
+	}
+	enc := llmcall.NormalizeContentEncoding(contentEncoding)
+	out := body
+	if !truncated && enc != "" {
+		if dec, ok := llmcall.DecodeBody(body, contentEncoding); ok {
+			out = dec
+		}
+	}
+	span.AddEvent(otelemit.SpanEventHTTPResponseBody,
 		trace.WithTimestamp(at),
 		trace.WithAttributes(otelemit.BodyEventAttrs(out, truncated, enc)...))
 }
