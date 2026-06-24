@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 // distFS holds the built console bundle. all: includes dotfiles (e.g.
@@ -77,13 +78,17 @@ func NewHandler(apiUpstream *url.URL) http.Handler {
 	spa := spaHandler(distRoot())
 
 	mux := http.NewServeMux()
-	// The aggregated API + discovery all live under these two prefixes.
-	// Exact ("/api") and subtree ("/api/") patterns both route to the
-	// proxy; everything else is served from the embedded bundle.
+	// The aggregated API + discovery all live under these prefixes. Exact
+	// ("/api") and subtree ("/api/") patterns both route to the proxy;
+	// everything else is served from the embedded bundle. /openapi and
+	// /version are apiserver paths a k8s client may probe for schema/version
+	// discovery, so proxy them too rather than answering with the SPA shell.
 	mux.Handle("/api", proxy)
 	mux.Handle("/api/", proxy)
 	mux.Handle("/apis", proxy)
 	mux.Handle("/apis/", proxy)
+	mux.Handle("/openapi/", proxy)
+	mux.Handle("/version", proxy)
 	mux.Handle("/", spa)
 	return mux
 }
@@ -100,14 +105,32 @@ func newAPIProxy(upstream *url.URL) *httputil.ReverseProxy {
 			// self-signed in-memory cert; the cm's own loopback client dials
 			// it with Insecure:true for the same reason.
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			// Bound time-to-first-response-header so a stalled apiserver
+			// surfaces as a 502 instead of a forever-spinning request. Watches
+			// send their 200 promptly and then stream, so this doesn't cut
+			// long-lived watch bodies (that would need WriteTimeout, which we
+			// deliberately leave unset).
+			ResponseHeaderTimeout: 30 * time.Second,
 		},
 		Director: func(r *http.Request) {
 			r.URL.Scheme = upstream.Scheme
 			r.URL.Host = upstream.Host
 			r.Host = upstream.Host
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			// Rewrite an absolute self-redirect (Location pointing at the
+			// loopback apiserver) to same-origin so the browser stays on the
+			// console rather than trying to reach 127.0.0.1:<port> directly.
+			if loc := resp.Header.Get("Location"); loc != "" {
+				if u, err := url.Parse(loc); err == nil && u.Host == upstream.Host {
+					u.Scheme, u.Host = "", ""
+					resp.Header.Set("Location", u.String())
+				}
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			slog.Warn("console: apiserver proxy failed", "upstream", upstream.String(), "err", err)
+			slog.Warn("Console apiserver proxy failed", "upstream", upstream.String(), "err", err)
 			http.Error(w, "apiserver unavailable: "+err.Error(), http.StatusBadGateway)
 		},
 	}
@@ -116,11 +139,12 @@ func newAPIProxy(upstream *url.URL) *httputil.ReverseProxy {
 // spaHandler serves the embedded bundle with client-side-routing fallback:
 //   - an existing file is served with its content-type; hashed assets get a
 //     long immutable Cache-Control, index.html is always revalidated.
-//   - a path that doesn't exist and looks like a client route (no file
-//     extension) returns index.html so the SPA router can handle it.
-//   - a path that doesn't exist but looks like an asset (has an extension)
-//     returns 404 — never an HTML body — so a stale-deploy bug surfaces
-//     instead of being masked.
+//   - a missing path under the hashed-asset dir (assets/) returns 404 — never
+//     an HTML body — so a stale-deploy bug surfaces instead of being masked.
+//   - any other missing path is treated as a client-side route and returns
+//     index.html. Keying the 404 on the assets/ prefix (not "the path has a
+//     dot") means client routes that contain dots — e.g. a resource named
+//     with a dot — still resolve to the SPA shell instead of 404ing.
 func spaHandler(root fs.FS) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -139,8 +163,8 @@ func spaHandler(root fs.FS) http.HandlerFunc {
 				return
 			}
 		}
-		if path.Ext(name) != "" {
-			// Looks like a static asset but isn't in the bundle.
+		if strings.HasPrefix(name, "assets/") {
+			// A hashed asset that isn't in the bundle: a real 404, not the SPA.
 			http.NotFound(w, r)
 			return
 		}
@@ -157,22 +181,49 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string, f fs.File) 
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
-	if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
+	if ct := contentType(name); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
-	// embed.FS files implement io.ReadSeeker, so ServeContent handles
-	// range requests and conditional GETs. The embed FS has no real
-	// modtimes (zero time), which ServeContent treats as "no Last-Modified".
-	if rs, ok := f.(io.ReadSeeker); ok {
-		if st, serr := f.Stat(); serr == nil {
-			http.ServeContent(w, r, name, st.ModTime(), rs)
-			return
-		}
-	}
-	if r.Method == http.MethodHead {
+	// embed.FS files always implement io.ReadSeeker and Stat never errors, so
+	// ServeContent (range requests + conditional GETs) is the only path. The
+	// embed FS has no real modtimes (zero time), which ServeContent treats as
+	// "no Last-Modified".
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		http.Error(w, "console asset not seekable", http.StatusInternalServerError)
 		return
 	}
-	_, _ = io.Copy(w, f)
+	st, err := f.Stat()
+	if err != nil {
+		http.Error(w, "console asset stat failed", http.StatusInternalServerError)
+		return
+	}
+	http.ServeContent(w, r, name, st.ModTime(), rs)
+}
+
+// contentType resolves a response Content-Type for the bundle's file types.
+// It pins the web-critical types explicitly so a base image that ships an
+// /etc/mime.types mapping (e.g. .js -> text/plain) can't make the browser
+// reject the console's ES modules; it falls back to mime.TypeByExtension for
+// anything else.
+func contentType(name string) string {
+	switch path.Ext(name) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json", ".map":
+		return "application/json"
+	case ".svg":
+		return "image/svg+xml"
+	case ".woff2":
+		return "font/woff2"
+	case ".woff":
+		return "font/woff"
+	}
+	return mime.TypeByExtension(path.Ext(name))
 }
 
 // serveIndex writes index.html as the SPA entrypoint / client-route

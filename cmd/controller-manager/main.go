@@ -395,7 +395,7 @@ func main() {
 		go func() {
 			slog.Info("Serving console", "addr", consoleLis.Addr().String(), "apiserver", upstream.String())
 			if err := consoleSrv.Serve(consoleLis); err != nil && err != http.ErrServerClosed {
-				log.Error(err, "console HTTP server exited")
+				log.Error(err, "Console HTTP server exited")
 			}
 		}()
 		defer func() {

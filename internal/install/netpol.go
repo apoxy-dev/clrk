@@ -62,7 +62,13 @@ func controllerManagerNetworkPolicy(p Profile) *networkingv1.NetworkPolicy {
 				{
 					// In-cluster data plane + node-originated probes (empty From
 					// = any source). The aggregated-API port (8443) is
-					// deliberately absent here.
+					// deliberately absent here -- and so is the console port
+					// (8086): the console proxies the same unauthenticated API,
+					// so opening it to the pod network would undo 8443's
+					// CIDR-gate. The console is reached via `kubectl
+					// port-forward` (which bypasses NetworkPolicy); an operator
+					// who fronts it with an in-cluster ingress opens 8086 in
+					// their own policy.
 					Ports: []networkingv1.NetworkPolicyPort{
 						port(9443),  // grpc (worker Invocation lifecycle)
 						port(9444),  // ext_proc (Envoy)

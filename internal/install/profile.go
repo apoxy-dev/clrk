@@ -46,6 +46,11 @@ const (
 	// DefaultNamespace is the control-plane namespace used by both `clrk dev`
 	// and `clrk install` when none is specified. Same name in dev + prod.
 	DefaultNamespace = "clrk"
+
+	// consolePort is the cm's embedded-console plain-HTTP port. Single source
+	// of truth for the --console-addr arg, the cm containerPort, and the
+	// clrk-console Service so they can't drift; matches the binary default.
+	consolePort = 8086
 )
 
 // cmLabels are the selector labels stamped on the cm Deployment's pod template
@@ -127,6 +132,15 @@ type Profile struct {
 	// gating (M5). Empty in dev.
 	Version string
 
+	// Console gates the embedded web console: its clrk-console Service, the
+	// cm containerPort, and the --console-addr arg. nil/true installs it
+	// (the default); false disables it entirely (--console-addr= empty, no
+	// Service/port). The console proxies the unauthenticated apiserver, so an
+	// operator who doesn't want that surface sets --console=false. Reached in
+	// prod via `kubectl port-forward` -- the NetworkPolicy deliberately does
+	// not open 8086 (see controllerManagerNetworkPolicy).
+	Console *bool
+
 	// Dev marks the local k3d profile and gates the dev-only knobs below.
 	Dev bool
 	// HostAliasIP, when set, plants a host.docker.internal HostAlias on the cm
@@ -141,6 +155,12 @@ type Profile struct {
 	// EgressBackendHost, when set, becomes --dev-egress-backend-host (k3d
 	// NodePort routing). Empty on a cluster (in-cluster Service DNS).
 	EgressBackendHost string
+}
+
+// consoleEnabled reports whether the embedded web console is installed. It
+// defaults on (nil), so an explicit --console=false is the only way off.
+func (p Profile) consoleEnabled() bool {
+	return p.Console == nil || *p.Console
 }
 
 // pullPolicy maps the docker --pull value to the matching corev1.PullPolicy,

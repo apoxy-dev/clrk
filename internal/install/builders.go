@@ -71,10 +71,16 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		// Service DNS, not the default in-cluster controller-manager name.
 		fmt.Sprintf("--nats-advertise-addr=%s:%d", p.svcDNS(), ports.NATSClientPort),
 		"--otlp-advertise-uri=http://" + p.svcDNS() + ":4318",
-		// Embedded web console on a plain-HTTP port; fronted by the dedicated
-		// clrk-console Service. Pinned (matches the binary default) so the
-		// Service/containerPort can't silently drift from the served port.
-		"--console-addr=:8086",
+	}
+	// Embedded web console on a plain-HTTP port; fronted by the dedicated
+	// clrk-console Service. Pinned (matches the binary default) so the
+	// Service/containerPort can't silently drift from the served port. When
+	// disabled, an explicit empty --console-addr overrides the binary default
+	// so no listener comes up.
+	if p.consoleEnabled() {
+		args = append(args, fmt.Sprintf("--console-addr=:%d", consolePort))
+	} else {
+		args = append(args, "--console-addr=")
 	}
 	if p.OTLPFallbackEndpoint != "" {
 		args = append(args, "--dev-otlp-fallback-endpoint="+p.OTLPFallbackEndpoint)
@@ -166,6 +172,19 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		deployLabels[clrkv1alpha1.LabelVersion] = p.Version
 	}
 
+	cmContainerPorts := []corev1.ContainerPort{
+		{Name: "apiserver", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
+		{Name: "grpc", ContainerPort: 9443, Protocol: corev1.ProtocolTCP},
+		{Name: "extproc", ContainerPort: 9444, Protocol: corev1.ProtocolTCP},
+		{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
+		{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
+		{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
+		{Name: "nats", ContainerPort: ports.NATSClientPort, Protocol: corev1.ProtocolTCP},
+	}
+	if p.consoleEnabled() {
+		cmContainerPorts = append(cmContainerPorts, corev1.ContainerPort{Name: "console", ContainerPort: consolePort, Protocol: corev1.ProtocolTCP})
+	}
+
 	deploy = &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -203,16 +222,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 							}},
 							{Name: otelemit.CMOTLPEndpointEnv, Value: "http://127.0.0.1:4318"},
 						},
-						Ports: []corev1.ContainerPort{
-							{Name: "apiserver", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
-							{Name: "grpc", ContainerPort: 9443, Protocol: corev1.ProtocolTCP},
-							{Name: "extproc", ContainerPort: 9444, Protocol: corev1.ProtocolTCP},
-							{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
-							{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
-							{Name: "console", ContainerPort: 8086, Protocol: corev1.ProtocolTCP},
-							{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
-							{Name: "nats", ContainerPort: ports.NATSClientPort, Protocol: corev1.ProtocolTCP},
-						},
+						Ports:        cmContainerPorts,
 						VolumeMounts: volumeMounts,
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
@@ -315,7 +325,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 			Type:     corev1.ServiceTypeClusterIP,
 			Selector: cmLabels,
 			Ports: []corev1.ServicePort{
-				{Name: "console", Port: 8086, TargetPort: intstr.FromInt(8086), Protocol: corev1.ProtocolTCP},
+				{Name: "console", Port: consolePort, TargetPort: intstr.FromInt(consolePort), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}
@@ -333,7 +343,10 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 	// bootstrap applied before this refactor (cluster-admin binding, no policy).
 	preDeploy = []client.Object{sa}
 	preDeploy = append(preDeploy, flattenRBAC(controllerManagerRBAC(p))...)
-	preDeploy = append(preDeploy, svc, egSvc, consoleSvc, apiSvc, metricsAPISvc, chPVC, natsPVC, kinePVC)
+	preDeploy = append(preDeploy, svc, egSvc, apiSvc, metricsAPISvc, chPVC, natsPVC, kinePVC)
+	if p.consoleEnabled() {
+		preDeploy = append(preDeploy, consoleSvc)
+	}
 	if np := controllerManagerNetworkPolicy(p); np != nil {
 		preDeploy = append(preDeploy, np)
 	}

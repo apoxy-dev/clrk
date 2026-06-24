@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"k8s.io/client-go/discovery"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/apoxy-dev/clrk/internal/cmd/devtui"
@@ -40,6 +41,7 @@ type installOpts struct {
 	tlsMode         string
 	apiserverCIDR   string
 	networkPolicy   bool
+	console         bool
 	yes             bool
 	skipPreflight   bool
 	dryRun          bool
@@ -86,6 +88,7 @@ func registerInstallFlags(cmd *cobra.Command, o *installOpts) {
 	f.StringVar(&o.tlsMode, "tls", "auto", "APIService serving TLS: auto (cert-manager if present, else self-signed) | cert-manager | self-signed | insecure.")
 	f.StringVar(&o.apiserverCIDR, "apiserver-cidr", "", "CIDR(s) allowed to reach the unauthenticated aggregated API, comma-separated (auto-derived from apiserver Endpoints + node IPs).")
 	f.BoolVar(&o.networkPolicy, "network-policy", true, "Emit a NetworkPolicy restricting the aggregated API (cm:8443) to the apiserver/node CIDRs.")
+	f.BoolVar(&o.console, "console", true, "Install the embedded web console (clrk-console Service + cm console port). The console proxies the unauthenticated apiserver; pass --console=false to omit it.")
 	f.BoolVar(&o.yes, "yes", false, "Skip interactive confirmation (required for non-interactive use).")
 	f.BoolVar(&o.skipPreflight, "skip-preflight", false, "Skip the cluster readiness checks.")
 	f.BoolVar(&o.dryRun, "dry-run", false, "Print the plan (objects + diffs) without changing the cluster.")
@@ -200,6 +203,7 @@ func (o *installOpts) buildProfile(tlsMode install.TLSMode, rbacScoped bool, ver
 		RBACScoped:      rbacScoped,
 		TLS:             tlsMode,
 		Version:         version,
+		Console:         ptr.To(o.console),
 	}
 }
 
