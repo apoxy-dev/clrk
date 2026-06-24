@@ -32,6 +32,17 @@
   zoom: 0.9;
 }
 
+/* Body-text scale. The view primitives below reference `--fs-body` /
+   `--fs-meta`, but core's tokens.css names them on the `--t-*` scale, so
+   without this mapping every `var(--fs-body)` consumer (dropdowns, the
+   segmented control, kv blocks, …) is undefined and silently inherits the
+   16px body size — rendering oversized next to the hardcoded-14px search
+   bar and table cells. Map them onto core's scale so they match. */
+:root {
+  --fs-body: var(--t-body-sm); /* 14px — matches the search bar / table cells. */
+  --fs-meta: var(--t-caption); /* 13px */
+}
+
 /* ============================================================
    CLRK design view primitives
    ------------------------------------------------------------
@@ -692,7 +703,7 @@
 .seg { display: inline-flex; border: 1px solid var(--border-default); padding: 2px; background: var(--apx-mist); }
 .seg button {
   font-family: var(--font-body); background: transparent; border: 0; font-size: var(--fs-body);
-  padding: 5px 10px; cursor: pointer; color: var(--text-secondary);
+  padding: 6px 10px; line-height: 1.2; cursor: pointer; color: var(--text-secondary);
   display: inline-flex; align-items: center; gap: 6px;
 }
 .seg button { transition: color 0.12s ease, background 0.12s ease; }
@@ -721,7 +732,7 @@
   border: 0; outline: 0; background: transparent;
   font-family: var(--font-body); font-size: var(--fs-body); font-weight: 500;
   color: var(--text-primary);
-  padding: 7px 26px 7px 10px; cursor: pointer; appearance: none;
+  padding: 8px 26px 8px 10px; line-height: 1.2; cursor: pointer; appearance: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'><path fill='%231E1D1C' d='M0 0h8L4 6z'/></svg>");
   background-repeat: no-repeat; background-position: right 9px center;
 }
