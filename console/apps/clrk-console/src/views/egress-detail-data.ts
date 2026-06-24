@@ -125,7 +125,13 @@ interface GatewayObj extends K8sObject {
       port?: number
       backendAddress?: string
       attachedRoutes?: number
-      conditions?: Array<{ type?: string; status?: string }>
+      conditions?: Array<{
+        type?: string
+        status?: string
+        reason?: string
+        message?: string
+        lastTransitionTime?: string
+      }>
     }>
   }
 }
@@ -137,6 +143,12 @@ interface PolicyObj extends K8sObject {
   kind: string
   spec?: Record<string, unknown>
 }
+
+// clrk's egress route CRDs reference their EgressGateway by this group/kind. A
+// route's parentRef must match both — not just the name — so an inbound HTTPRoute
+// bound to an ingress Gateway of the same name doesn't surface here.
+const EGRESS_GATEWAY_GROUP = 'clrk.apoxy.dev'
+const EGRESS_GATEWAY_KIND = 'EgressGateway'
 
 // The canonical host an AIProviderRoute's provider dials — AIProviderRoute has no
 // hostnames field (it matches by provider), so the host shown is display-derived
@@ -387,13 +399,28 @@ function listenerFor(
 }
 
 function events(gw: GatewayObj): EgEvent[] {
-  const conds = gw.status?.conditions ?? []
-  return conds.map((c) => ({
+  const top: EgEvent[] = (gw.status?.conditions ?? []).map((c) => ({
     time: c.lastTransitionTime ?? '',
     type: c.reason || c.type || 'Event',
     message: c.message ?? '',
     tone: c.status === 'True' ? 'ok' : 'error',
   }))
+  // The EgressGateway mirrors its data plane's per-listener lifecycle
+  // (Programmed/Accepted/ResolvedRefs) onto its own status.listeners[].conditions,
+  // so the full lifecycle is available without ever reading the backing Gateway.
+  const perListener: EgEvent[] = (gw.status?.listeners ?? []).flatMap((l) =>
+    (l.conditions ?? []).map((c) => ({
+      time: c.lastTransitionTime ?? '',
+      type: `${l.name ?? 'listener'}: ${c.reason || c.type || 'Event'}`,
+      message: c.message ?? '',
+      tone: c.status === 'True' ? 'ok' : 'error',
+    })),
+  )
+  // Newest first; conditions without a timestamp sort last (stable among
+  // themselves), so a fully-populated lifecycle reads top-to-bottom by recency.
+  return [...top, ...perListener].sort((a, b) =>
+    (b.time ?? '').localeCompare(a.time ?? ''),
+  )
 }
 
 /**
@@ -431,8 +458,19 @@ export function mapEgressDetail(
   const listenerNames = new Set(listeners.map((l) => l.name))
 
   const policyObjs = policies as PolicyObj[]
+  // A route is attached only when a parentRef both names this gateway AND points
+  // at an EgressGateway — not merely shares its name. An ingress Gateway
+  // (gateway.networking.k8s.io) and this EgressGateway (clrk.apoxy.dev) can both
+  // be named e.g. `jq-bot`, so the agent's inbound HTTPRoute (parentRef →
+  // Gateway/jq-bot) must not leak into the egress routing view. Tolerate an
+  // omitted group/kind so the bare-name parentRefs the mock and older objects use
+  // still attach.
+  const attachesToGateway = (p: ParentRef): boolean =>
+    p.name === name &&
+    (p.group === undefined || p.group === EGRESS_GATEWAY_GROUP) &&
+    (p.kind === undefined || p.kind === EGRESS_GATEWAY_KIND)
   const mine = (routes as RouteObj[]).filter((r) =>
-    (r.spec?.parentRefs ?? []).some((p) => p.name === name),
+    (r.spec?.parentRefs ?? []).some(attachesToGateway),
   )
 
   const egRoutes: EgRoute[] = mine.map((route): EgRoute => {

@@ -88,17 +88,18 @@ export function readiness(gw: {
   reason?: string
 } {
   const conds = gw.status?.conditions ?? []
-  const programmed = conds.find((c) => c.type === 'Programmed')
-  if (programmed)
-    return {
-      ready: programmed.status === 'True',
-      reason: programmed.status === 'True' ? undefined : programmed.message,
-    }
-  const accepted = conds.find((c) => c.type === 'Accepted')
-  return {
-    ready: accepted?.status === 'True',
-    reason: accepted?.status === 'True' ? undefined : accepted?.message,
-  }
+  // A clrk EgressGateway (clrk.apoxy.dev) summarizes its health in a single
+  // `Ready` condition; a raw Gateway API Gateway uses `Programmed` then
+  // `Accepted`. Prefer `Ready` so EgressGateways aren't read through the
+  // Gateway-API vocabulary they don't publish -- otherwise neither Programmed
+  // nor Accepted is found and every EgressGateway reads as Degraded.
+  const cond =
+    conds.find((c) => c.type === 'Ready') ??
+    conds.find((c) => c.type === 'Programmed') ??
+    conds.find((c) => c.type === 'Accepted')
+  if (!cond) return { ready: false }
+  const ready = cond.status === 'True'
+  return { ready, reason: ready ? undefined : cond.message }
 }
 
 export function fmtAge(creationTimestamp?: string): string {

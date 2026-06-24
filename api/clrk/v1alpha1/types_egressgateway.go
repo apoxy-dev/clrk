@@ -289,6 +289,16 @@ type OTLPLogsSinkSpec struct {
 // only dial Status.Listeners[*].BackendAddress once Ready=True.
 const EgressGatewayConditionReady = "Ready"
 
+// EgressGatewayConditionAccepted and EgressGatewayConditionProgrammed mirror
+// the EG-managed Gateway's top-level lifecycle conditions onto the
+// EgressGateway's own status, so consumers see the full lifecycle without
+// reading the implementation-detail Gateway. EgressGatewayConditionReady
+// stays the single readiness summary workers gate on.
+const (
+	EgressGatewayConditionAccepted   = "Accepted"
+	EgressGatewayConditionProgrammed = "Programmed"
+)
+
 // EgressListenerStatus describes the status of a single listener.
 type EgressListenerStatus struct {
 	Name string `json:"name"`

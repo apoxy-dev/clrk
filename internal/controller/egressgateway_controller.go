@@ -899,7 +899,7 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 		return false, fmt.Errorf("getting Gateway: %w", gwErr)
 	}
 
-	listenerStatuses, anyPending, err := r.resolveListenerStatuses(ctx, eg, gwName)
+	listenerStatuses, anyPending, err := r.resolveListenerStatuses(ctx, eg, gwName, &gw)
 	if err != nil {
 		return false, err
 	}
@@ -916,6 +916,16 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 	if meta.SetStatusCondition(&eg.Status.Conditions, ready) {
 		dirty = true
 	}
+	// Mirror the EG-managed Gateway's top-level Accepted/Programmed lifecycle
+	// onto our own status so consumers see the full picture without reading the
+	// implementation-detail Gateway. Only when we actually observed the Gateway.
+	if gwErr == nil {
+		for _, c := range egressTopLevelConditions(&gw, eg.Generation) {
+			if meta.SetStatusCondition(&eg.Status.Conditions, c) {
+				dirty = true
+			}
+		}
+	}
 	if dirty {
 		// MergeFrom (no optimistic lock) so concurrent envoy-gateway
 		// status patches don't 409 us. See APO-567.
@@ -930,7 +940,7 @@ func (r *EgressGatewayReconciler) updateStatus(ctx context.Context, eg *clrkv1al
 // listener, populating BackendAddress from the EG-managed Service's
 // matching ServicePort. anyPending=true while any listener's port is
 // still missing.
-func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string) ([]clrkv1alpha1.EgressListenerStatus, bool, error) {
+func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, eg *clrkv1alpha1.EgressGateway, gwName string, gw *gwapiv1.Gateway) ([]clrkv1alpha1.EgressListenerStatus, bool, error) {
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs,
 		client.InNamespace(r.EnvoyGatewayNamespace),
@@ -947,6 +957,15 @@ func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, e
 		prevByName[ls.Name] = ls
 	}
 
+	// The EG-managed Gateway names each listener by its encoded section name
+	// (EncodeListenerSectionName); index its per-listener conditions by that
+	// name so we can map them back onto our spec-named listener status. This is
+	// the only place that reads the implementation-detail Gateway's listeners.
+	backingConds := make(map[string][]metav1.Condition, len(gw.Status.Listeners))
+	for _, ls := range gw.Status.Listeners {
+		backingConds[string(ls.Name)] = ls.Conditions
+	}
+
 	out := make([]clrkv1alpha1.EgressListenerStatus, 0, len(eg.Spec.Listeners))
 	anyPending := false
 	for i, el := range eg.Spec.Listeners {
@@ -955,11 +974,17 @@ func (r *EgressGatewayReconciler) resolveListenerStatuses(ctx context.Context, e
 			Name: el.Name,
 			Port: port,
 		}
-		// Preserve any existing per-listener Conditions /
-		// AttachedRoutes set by other reconcile passes.
+		// Preserve any existing per-listener Conditions / AttachedRoutes set by
+		// other reconcile passes, then override Conditions with the EG-managed
+		// Gateway's translated listener lifecycle when we can match it.
 		if prev, ok := prevByName[el.Name]; ok {
 			ls.Conditions = prev.Conditions
 			ls.AttachedRoutes = prev.AttachedRoutes
+		}
+		if shape, shapeErr := clrkv1alpha1.ShapeForListener(el); shapeErr == nil {
+			if conds, ok := backingConds[clrkv1alpha1.EncodeListenerSectionName(el.Name, shape)]; ok {
+				ls.Conditions = translateConditions(conds, eg.Generation)
+			}
 		}
 		var addr string
 		if len(svcs.Items) > 0 {
@@ -1015,9 +1040,75 @@ func equalListenerStatuses(a, b []clrkv1alpha1.EgressListenerStatus) bool {
 		if a[i].Name != b[i].Name ||
 			a[i].Port != b[i].Port ||
 			a[i].BackendAddress != b[i].BackendAddress ||
-			a[i].AttachedRoutes != b[i].AttachedRoutes {
+			a[i].AttachedRoutes != b[i].AttachedRoutes ||
+			!equalConditions(a[i].Conditions, b[i].Conditions) {
 			return false
 		}
 	}
 	return true
+}
+
+// equalConditions compares two condition slices by the fields the
+// EgressGateway surfaces (LastTransitionTime/ObservedGeneration are ignored so
+// a passthrough of the backing Gateway's unchanged conditions doesn't churn).
+func equalConditions(a, b []metav1.Condition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type ||
+			a[i].Status != b[i].Status ||
+			a[i].Reason != b[i].Reason ||
+			a[i].Message != b[i].Message {
+			return false
+		}
+	}
+	return true
+}
+
+// egressTopLevelConditions translates the EG-managed Gateway's top-level
+// Accepted/Programmed lifecycle conditions into EgressGateway conditions, so
+// the EgressGateway's own status carries the lifecycle. Conditions without a
+// reason are skipped (a reason is required for a valid condition).
+func egressTopLevelConditions(gw *gwapiv1.Gateway, observedGen int64) []metav1.Condition {
+	want := map[string]string{
+		string(gwapiv1.GatewayConditionAccepted):   clrkv1alpha1.EgressGatewayConditionAccepted,
+		string(gwapiv1.GatewayConditionProgrammed): clrkv1alpha1.EgressGatewayConditionProgrammed,
+	}
+	out := make([]metav1.Condition, 0, len(want))
+	for _, c := range gw.Status.Conditions {
+		egType, ok := want[c.Type]
+		if !ok || c.Reason == "" {
+			continue
+		}
+		out = append(out, metav1.Condition{
+			Type:               egType,
+			Status:             c.Status,
+			Reason:             c.Reason,
+			Message:            c.Message,
+			ObservedGeneration: observedGen,
+		})
+	}
+	return out
+}
+
+// translateConditions copies the EG-managed Gateway's per-listener conditions
+// (Programmed/Accepted/ResolvedRefs) onto our own listener status, stamping our
+// observedGeneration. Conditions without a reason are skipped.
+func translateConditions(conds []metav1.Condition, observedGen int64) []metav1.Condition {
+	out := make([]metav1.Condition, 0, len(conds))
+	for _, c := range conds {
+		if c.Reason == "" {
+			continue
+		}
+		out = append(out, metav1.Condition{
+			Type:               c.Type,
+			Status:             c.Status,
+			Reason:             c.Reason,
+			Message:            c.Message,
+			LastTransitionTime: c.LastTransitionTime,
+			ObservedGeneration: observedGen,
+		})
+	}
+	return out
 }
