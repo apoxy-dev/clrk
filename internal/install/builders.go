@@ -71,6 +71,10 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		// Service DNS, not the default in-cluster controller-manager name.
 		fmt.Sprintf("--nats-advertise-addr=%s:%d", p.svcDNS(), ports.NATSClientPort),
 		"--otlp-advertise-uri=http://" + p.svcDNS() + ":4318",
+		// Embedded web console on a plain-HTTP port; fronted by the dedicated
+		// clrk-console Service. Pinned (matches the binary default) so the
+		// Service/containerPort can't silently drift from the served port.
+		"--console-addr=:8086",
 	}
 	if p.OTLPFallbackEndpoint != "" {
 		args = append(args, "--dev-otlp-fallback-endpoint="+p.OTLPFallbackEndpoint)
@@ -205,6 +209,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 							{Name: "extproc", ContainerPort: 9444, Protocol: corev1.ProtocolTCP},
 							{Name: "health", ContainerPort: 8082, Protocol: corev1.ProtocolTCP},
 							{Name: "admin", ContainerPort: 8085, Protocol: corev1.ProtocolTCP},
+							{Name: "console", ContainerPort: 8086, Protocol: corev1.ProtocolTCP},
 							{Name: "otlp", ContainerPort: 4318, Protocol: corev1.ProtocolTCP},
 							{Name: "nats", ContainerPort: ports.NATSClientPort, Protocol: corev1.ProtocolTCP},
 						},
@@ -285,6 +290,36 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 		},
 	}
 
+	// clrk-console fronts the cm's embedded web console port. A dedicated
+	// single-port Service (rather than a port on the multi-port cm Service)
+	// so the `clrk dev` auto-forwarder targets the console: it forwards a
+	// Service's first TCP port, which on the cm Service is the apiserver. The
+	// LabelExpose stamp opts it into that forwarder in dev (LabelExposePort
+	// hints a stable host port); both labels are inert in a real cluster
+	// (only the host-side `clrk dev` reconciler reads them), where the
+	// ClusterIP Service is fronted by the operator's own ingress/auth.
+	consoleSvcLabels := make(map[string]string, len(cmLabels)+2)
+	for k, v := range cmLabels {
+		consoleSvcLabels[k] = v
+	}
+	consoleSvcLabels[clrkv1alpha1.LabelExpose] = "true"
+	consoleSvcLabels[clrkv1alpha1.LabelExposePort] = "18086"
+	consoleSvc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConsoleServiceName,
+			Namespace: p.Namespace,
+			Labels:    consoleSvcLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: cmLabels,
+			Ports: []corev1.ServicePort{
+				{Name: "console", Port: 8086, TargetPort: intstr.FromInt(8086), Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+
 	// Both aggregated groups the cm serves route to the same Service/port;
 	// kube-aggregator keys an APIService per group, so each needs its own
 	// registration. The metrics group is the Tier-1 snapshot surface
@@ -298,7 +333,7 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 	// bootstrap applied before this refactor (cluster-admin binding, no policy).
 	preDeploy = []client.Object{sa}
 	preDeploy = append(preDeploy, flattenRBAC(controllerManagerRBAC(p))...)
-	preDeploy = append(preDeploy, svc, egSvc, apiSvc, metricsAPISvc, chPVC, natsPVC, kinePVC)
+	preDeploy = append(preDeploy, svc, egSvc, consoleSvc, apiSvc, metricsAPISvc, chPVC, natsPVC, kinePVC)
 	if np := controllerManagerNetworkPolicy(p); np != nil {
 		preDeploy = append(preDeploy, np)
 	}

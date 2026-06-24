@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/certprovider"
 	"github.com/apoxy-dev/clrk/internal/chwriter"
 	"github.com/apoxy-dev/clrk/internal/clickhouse"
+	"github.com/apoxy-dev/clrk/internal/console"
 	"github.com/apoxy-dev/clrk/internal/controller"
 	"github.com/apoxy-dev/clrk/internal/crds"
 	"github.com/apoxy-dev/clrk/internal/egcontrolplane"
@@ -95,6 +97,7 @@ func main() {
 		ingressExtProcHost   = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
 		ingressExtProcPort   = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
 		adminAddr            = flag.String("admin-addr", ":8085", "Bind address for the /admin/* system-state HTTP endpoint. Read-only, unauthenticated; gate via network reachability (bind to loopback or to the in-cluster Service only).")
+		consoleAddr          = flag.String("console-addr", ":8086", "Bind address for the embedded web console. Plain HTTP: serves the SPA bundle and reverse-proxies /api,/apis to the loopback apiserver so the browser sees one same-origin, plain-HTTP endpoint. Unauthenticated like /admin; gate via network reachability. Empty disables.")
 		// Embedded clickhouse: the cm process supervises a
 		// clickhouse-server child if the binary is layered into the
 		// image. Listener is 127.0.0.1-only — the engine is private
@@ -363,6 +366,44 @@ func main() {
 		defer cancel()
 		_ = adminSrv.Shutdown(shutCtx)
 	}()
+
+	// Embedded web console. A dedicated plain-HTTP listener serves the SPA
+	// bundle and reverse-proxies the Kubernetes API to the loopback
+	// apiserver, so the browser sees one same-origin, plain-HTTP endpoint
+	// (the apiserver's own serving cert is self-signed and would otherwise
+	// trip a browser cert wall). The apiserver is already ready here
+	// (mgr.ReadyCh returned above), so the proxy upstream is live. Auth is
+	// disabled in v1, so the proxy carries no credentials; gate by network
+	// reachability like /admin. Empty --console-addr disables it.
+	if *consoleAddr != "" {
+		// The apiserver may bind 0.0.0.0 (cluster profile), but the proxy
+		// must dial loopback, not the wildcard address.
+		upstreamHost := *bindAddr
+		if upstreamHost == "" || upstreamHost == "0.0.0.0" || upstreamHost == "::" {
+			upstreamHost = "127.0.0.1"
+		}
+		upstream := &url.URL{Scheme: "https", Host: net.JoinHostPort(upstreamHost, strconv.Itoa(*bindPort))}
+		consoleLis, err := net.Listen("tcp", *consoleAddr)
+		if err != nil {
+			log.Error(err, "Unable to bind console listener", "addr", *consoleAddr)
+			os.Exit(1)
+		}
+		if console.PlaceholderOnly() {
+			slog.Warn("Console served from a placeholder build (real pnpm assets absent); rebuild the cm image with the console build step")
+		}
+		consoleSrv := &http.Server{Handler: console.NewHandler(upstream)}
+		go func() {
+			slog.Info("Serving console", "addr", consoleLis.Addr().String(), "apiserver", upstream.String())
+			if err := consoleSrv.Serve(consoleLis); err != nil && err != http.ErrServerClosed {
+				log.Error(err, "console HTTP server exited")
+			}
+		}()
+		defer func() {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = consoleSrv.Shutdown(shutCtx)
+		}()
+	}
 
 	if *ingressController {
 		if *ingressExtProcHost == "" {

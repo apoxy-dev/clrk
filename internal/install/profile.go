@@ -21,6 +21,11 @@ const (
 	// EnvoyGatewayServiceName fronts the cm's in-process envoy-gateway xDS
 	// listener under the well-known name the EG data-plane bootstrap dials.
 	EnvoyGatewayServiceName = "envoy-gateway"
+	// ConsoleServiceName fronts the cm's embedded web console port. It's a
+	// dedicated single-port Service (not a port on the cm Service) so the
+	// `clrk dev` auto-forwarder — which forwards a Service's first TCP port —
+	// targets the console rather than the apiserver.
+	ConsoleServiceName = "clrk-console"
 	// APIServiceName is the aggregated APIService routing
 	// clrk.apoxy.dev/v1alpha1 to the cm.
 	APIServiceName = "v1alpha1.clrk.apoxy.dev"
