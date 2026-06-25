@@ -196,23 +196,33 @@ func (us *upstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders) *extprocv3.
 func (us *upstreamStream) commitBodyless() *extprocv3.ProcessingResponse {
 	st, cand := us.state, us.cand
 	injs := us.creds.lookupForBackend(st.rule, cand.name)
-	authority := net.JoinHostPort(cand.host, strconv.Itoa(cand.port))
-	hdrInjs, sigInjs := splitInjections(injs)
-	mut := setHeaderMut(nil, ":authority", authority)
-	mut = applyInjections(mut, hdrInjs)
-	mut = applySigning(mut, sigInjs, signInput{
-		method:    us.method,
-		authority: authority,
-		path:      us.path,
-		body:      nil,
-		headers:   us.reqHeaders,
-	}, us.logger)
+	mut := us.repointAndInject(injs, nil)
 	st.appendAttempt(attemptFact{
 		backendNamespace: cand.namespace,
 		backendName:      cand.name,
 		backendSchema:    cand.system,
 	})
 	return headersContinueWithHeaders(mut, false)
+}
+
+// repointAndInject builds the per-attempt request-header mutation shared
+// by the same-schema commit paths: the :authority repoint to the picked
+// endpoint, the backend's header-form credential injections, and any
+// SigV4 signature over body -- the bytes that actually go out (nil for a
+// bodyless attempt, the empty-body hash). Cross-schema attempts build
+// their own mutation in commitTranslated because path/body change too.
+func (us *upstreamStream) repointAndInject(injs []credInjection, body []byte) *extprocv3.HeaderMutation {
+	authority := net.JoinHostPort(us.cand.host, strconv.Itoa(us.cand.port))
+	hdrInjs, sigInjs := splitInjections(injs)
+	mut := setHeaderMut(nil, ":authority", authority)
+	mut = applyInjections(mut, hdrInjs)
+	return applySigning(mut, sigInjs, signInput{
+		method:    us.method,
+		authority: authority,
+		path:      us.path,
+		body:      body,
+		headers:   us.reqHeaders,
+	}, us.logger)
 }
 
 // onRequestBody is the attempt's commit point: the router replayed the
@@ -256,17 +266,7 @@ func (us *upstreamStream) onRequestBody(m *extprocv3.HttpBody) *extprocv3.Proces
 	if newBody, changed := rewriteRequestBody(m.GetBody(), us.path, st.model, *cand); changed {
 		finalBody, bodyChanged = newBody, true
 	}
-	authority := net.JoinHostPort(cand.host, strconv.Itoa(cand.port))
-	hdrInjs, sigInjs := splitInjections(injs)
-	mut := setHeaderMut(nil, ":authority", authority)
-	mut = applyInjections(mut, hdrInjs)
-	mut = applySigning(mut, sigInjs, signInput{
-		method:    us.method,
-		authority: authority,
-		path:      us.path,
-		body:      finalBody,
-		headers:   us.reqHeaders,
-	}, us.logger)
+	mut := us.repointAndInject(injs, finalBody)
 	fact := attemptFact{
 		backendNamespace: cand.namespace,
 		backendName:      cand.name,

@@ -251,17 +251,19 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 	ds.provMatch = provisionalMatch(ds.routes, ds.rec.RequestHeaders)
 	ds.deferReselect = ds.provMatch != nil && len(ds.provMatch.backends) > 0
 	if ds.deferReselect && requestIsBodyless(m.GetEndOfStream(), ds.rec.RequestHeaders) {
-		// Bodyless request (GET/HEAD/DELETE) on a reselectable rule: no
-		// RequestBody phase will arrive, so deferring to RequestBody EOS
-		// would never pin or inject and the request egresses with the
-		// agent's placeholder credential -- the cause of the 401s on
-		// provider control-plane endpoints (e.g. Anthropic's
-		// /api/claude_code/*). Resolve the pin now, at headers. With no
-		// body there is no model and no cross-schema translation, so this
-		// is the bodyless subset of pinAtBodyEOS. The mutations computed
-		// above (authority port, traceparent) ride along. Clear
-		// deferReselect so a stray body phase (a client that lied about
-		// having no body) falls to the plain path instead of re-pinning.
+		// Bodyless request (a GET/HEAD/DELETE/OPTIONS/TRACE or an
+		// explicit content-length: 0 -- see requestIsBodyless) on a
+		// reselectable rule: no RequestBody phase will arrive, so
+		// deferring to RequestBody EOS would never pin or inject and the
+		// request egresses with the agent's placeholder credential -- the
+		// cause of the 401s on provider control-plane endpoints (e.g.
+		// Anthropic's /api/claude_code/*). Resolve the pin now, at
+		// headers. With no body there is no model and no cross-schema
+		// translation, so this is the bodyless subset of pinAtBodyEOS. The
+		// mutations computed above (authority port, traceparent) ride
+		// along. Clear deferReselect so a stray body phase (a client that
+		// lied about having no body) falls to the plain path instead of
+		// re-pinning.
 		ds.deferReselect = false
 		return ds.pinAtHeadersEOS(mut)
 	}
@@ -279,7 +281,8 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 		mut = applyInjections(mut, hdrInjs)
 		if len(sigInjs) > 0 {
 			if requestIsBodyless(m.GetEndOfStream(), ds.rec.RequestHeaders) {
-				// Bodyless request (GET/HEAD/DELETE) on a
+				// Bodyless request (a GET/HEAD/DELETE/OPTIONS/TRACE or
+				// content-length: 0 -- see requestIsBodyless) on a
 				// non-reselectable rule: no RequestBody phase will
 				// arrive to defer the signature to, so deferring would
 				// egress unsigned (an AWS-shaped host 403s). Sign now,
@@ -600,29 +603,8 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 	}
 	ds.rec.TranslationSkippedBackends = skipped
 
-	// Split the per-request-viable candidates from the refuse-mode
-	// entries. Refuse (InferencePool) backends are not cluster
-	// endpoints: an all-refuse rule still fails cleanly with a 501,
-	// but on a mixed rule a refuse candidate can no longer win a
-	// weighted pick — mixed rules never 501 (documented semantic
-	// change from the in-extproc selector).
-	viable := make([]resolvedBackend, 0, len(cands))
-	hasNonRefuse := false
-	refuseReason := ""
-	for _, c := range cands {
-		if c.refuse {
-			if refuseReason == "" {
-				refuseReason = c.unsupportedReason
-			}
-			continue
-		}
-		hasNonRefuse = true
-		if c.host == "" {
-			continue
-		}
-		viable = append(viable, c)
-	}
-	if len(cands) > 0 && !hasNonRefuse {
+	viable, refuseReason, ok := splitViable(cands)
+	if !ok {
 		return immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+refuseReason)
 	}
 
@@ -654,19 +636,58 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 		return bodyContinue(true)
 	}
 
-	// Redact (names-only) every header any candidate's credential
-	// policies are configured to inject, BEFORE the captured headers
-	// reach the sink: injection itself happens per attempt in the
-	// upstream filter, but an agent-supplied credential header must
-	// never reach OTLP raw.
+	// A body larger than the synthesized route's retry buffer is still
+	// served, but Envoy silently disables retries for it — an attached
+	// FallbackRoutingPolicy cannot fire. Surface that on telemetry
+	// instead of letting it read as fallback that never triggers.
+	if len(ds.fullReqBody) > llmroute.RetryBodyBufferBytes {
+		ds.rec.RetryIneligibleReason = otelemit.RetryIneligibleBodyTooLarge
+	}
+
+	st := &requestState{system: system, model: model, srcIR: ir, rule: final}
+	return ds.commitPin(final, viable, st, nil, reqPath, false)
+}
+
+// splitViable separates a rule's per-request candidates into the
+// servable set (non-refuse, resolvable host) and the refuse-mode
+// entries. Refuse (InferencePool) backends are not cluster endpoints:
+// an all-refuse rule still fails cleanly with a 501 (ok == false,
+// refuseReason carrying the first reason), but on a mixed rule a refuse
+// candidate can no longer win a weighted pick — mixed rules never 501
+// (documented semantic change from the in-extproc selector).
+func splitViable(cands []resolvedBackend) (viable []resolvedBackend, refuseReason string, ok bool) {
+	viable = make([]resolvedBackend, 0, len(cands))
+	hasNonRefuse := false
+	for _, c := range cands {
+		if c.refuse {
+			if refuseReason == "" {
+				refuseReason = c.unsupportedReason
+			}
+			continue
+		}
+		hasNonRefuse = true
+		if c.host == "" {
+			continue
+		}
+		viable = append(viable, c)
+	}
+	ok = !(len(cands) > 0 && !hasNonRefuse)
+	return viable, refuseReason, ok
+}
+
+// redactViableInjections name-redacts (in the captured-record header
+// map) every header any viable candidate's credential policies are
+// configured to inject, BEFORE the captured headers reach the sink.
+// Injection itself happens per attempt in the upstream filter, but an
+// agent-supplied credential header must never reach OTLP raw. Dedupe is
+// on the header names an injection sets (the whole signature set for
+// SigV4 policies) — redaction is per-name, so a policy contributing no
+// new name is already covered.
+func (ds *downstreamStream) redactViableInjections(final *routeRule, viable []resolvedBackend) {
 	seen := map[string]bool{}
 	var injUnion []credInjection
 	for _, c := range viable {
 		for _, inj := range ds.creds.lookupForBackend(final, c.name) {
-			// Dedupe on the header names the injection will set (the
-			// whole signature set for SigV4 policies) — redaction is
-			// per-name, so a policy contributing no new name is
-			// already covered.
 			fresh := false
 			for _, name := range inj.headerNames() {
 				if !seen[name] {
@@ -683,27 +704,26 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 		ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
 			"policies", collisions)
 	}
+}
 
-	// Publish the shared state the upstream attempts adapt from, then
-	// pin: the rule-key header steers the re-evaluated route table
-	// onto the synthesized route (a BODY-phase header mutation, honored
-	// because this stream was promoted to BUFFERED at headers time).
-	st := &requestState{
-		system: system,
-		model:  model,
-		srcIR:  ir,
-		rule:   final,
-	}
+// commitPin is the shared tail of pinAtBodyEOS and pinAtHeadersEOS:
+// redact agent-supplied injected headers, publish the shared
+// requestState the upstream attempts adapt from, and pin the rule. The
+// rule-key header steers the re-evaluated route table onto the
+// synthesized route; when the per-request viable set is smaller than the
+// synthesized cluster's membership (a translation gate or model-rewrite
+// miss dropped someone), an envoy.lb subset key pins ONE viable backend,
+// weighted like the old in-extproc selector, so the LB cannot pick a
+// dropped one. A bodyless request emits the mutation from the headers
+// phase (no BUFFERED promotion needed) and carries baseMut — the
+// authority/traceparent mutations computed at headers time; the body
+// path emits from the body phase with baseMut nil. st.model is "" on the
+// bodyless path, so the subset key fallback collapses to "\x00"+reqPath.
+func (ds *downstreamStream) commitPin(final *routeRule, viable []resolvedBackend, st *requestState, baseMut *extprocv3.HeaderMutation, reqPath string, bodyless bool) *extprocv3.ProcessingResponse {
+	ds.redactViableInjections(final, viable)
+
 	ds.pinState = st
 	ds.srv.states.put(ds.requestID, st)
-
-	// A body larger than the synthesized route's retry buffer is still
-	// served, but Envoy silently disables retries for it — an attached
-	// FallbackRoutingPolicy cannot fire. Surface that on telemetry
-	// instead of letting it read as fallback that never triggers.
-	if len(ds.fullReqBody) > llmroute.RetryBodyBufferBytes {
-		ds.rec.RetryIneligibleReason = otelemit.RetryIneligibleBodyTooLarge
-	}
 
 	ruleKey := llmroute.RuleKey(
 		ds.egKey,
@@ -711,19 +731,18 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 		final.ruleIdx,
 		final.provider,
 	)
-	mut := setHeaderMut(nil, llmroute.PinHeader, ruleKey)
-	resp := bodyContinueWithHeaders(true, mut, true)
+	mut := setHeaderMut(baseMut, llmroute.PinHeader, ruleKey)
+	var resp *extprocv3.ProcessingResponse
+	if bodyless {
+		resp = headersContinueWithHeaders(mut, true)
+	} else {
+		resp = bodyContinueWithHeaders(true, mut, true)
+	}
 
-	// The synthesized cluster holds the rule's full servable candidate
-	// set. When this request's viable set is smaller (a translation
-	// gate or model-rewrite miss dropped someone), Envoy's LB must not
-	// pick a dropped backend — pin ONE viable backend through the
-	// envoy.lb subset key, weighted like the old in-extproc selector
-	// so existing weight semantics hold on this narrowed path.
 	if clusterCount := servableCount(final.backends); len(viable) < clusterCount {
 		key := ds.rec.InvocationID
 		if key == "" {
-			key = model + "\x00" + reqPath
+			key = st.model + "\x00" + reqPath
 		}
 		if chosen, ok := weightedPick(viable, key); ok {
 			resp.DynamicMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{
@@ -766,23 +785,8 @@ func (ds *downstreamStream) pinAtHeadersEOS(baseMut *extprocv3.HeaderMutation) *
 	}
 	ds.rec.TranslationSkippedBackends = skipped
 
-	viable := make([]resolvedBackend, 0, len(cands))
-	hasNonRefuse := false
-	refuseReason := ""
-	for _, c := range cands {
-		if c.refuse {
-			if refuseReason == "" {
-				refuseReason = c.unsupportedReason
-			}
-			continue
-		}
-		hasNonRefuse = true
-		if c.host == "" {
-			continue
-		}
-		viable = append(viable, c)
-	}
-	if len(cands) > 0 && !hasNonRefuse {
+	viable, refuseReason, ok := splitViable(cands)
+	if !ok {
 		return immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+refuseReason)
 	}
 
@@ -795,57 +799,8 @@ func (ds *downstreamStream) pinAtHeadersEOS(baseMut *extprocv3.HeaderMutation) *
 		return headersContinueWithHeaders(mut, false)
 	}
 
-	// Redact (names-only) every header any viable candidate's policies
-	// inject, before the captured headers reach the sink -- injection
-	// itself happens per attempt in the upstream filter.
-	seen := map[string]bool{}
-	var injUnion []credInjection
-	for _, c := range viable {
-		for _, inj := range ds.creds.lookupForBackend(final, c.name) {
-			fresh := false
-			for _, name := range inj.headerNames() {
-				if !seen[name] {
-					fresh = true
-					seen[name] = true
-				}
-			}
-			if fresh {
-				injUnion = append(injUnion, inj)
-			}
-		}
-	}
-	if collisions := redactInjected(ds.rec.RequestHeaders, injUnion); len(collisions) > 0 {
-		ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
-			"policies", collisions)
-	}
-
 	st := &requestState{system: system, rule: final}
-	ds.pinState = st
-	ds.srv.states.put(ds.requestID, st)
-
-	ruleKey := llmroute.RuleKey(
-		ds.egKey,
-		types.NamespacedName{Namespace: final.routeNamespace, Name: final.routeName},
-		final.ruleIdx,
-		final.provider,
-	)
-	mut := setHeaderMut(baseMut, llmroute.PinHeader, ruleKey)
-	resp := headersContinueWithHeaders(mut, true)
-
-	if clusterCount := servableCount(final.backends); len(viable) < clusterCount {
-		key := ds.rec.InvocationID
-		if key == "" {
-			key = "\x00" + reqPath
-		}
-		if chosen, ok := weightedPick(viable, key); ok {
-			resp.DynamicMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{
-				"envoy.lb": structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
-					llmroute.SubsetKeyBackend: structpb.NewStringValue(chosen.name),
-				}}),
-			}}
-		}
-	}
-	return resp
+	return ds.commitPin(final, viable, st, baseMut, reqPath, true)
 }
 
 // servableCount mirrors the egextension's servableCandidates filter:
