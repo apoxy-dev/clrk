@@ -1564,7 +1564,6 @@
   display: flex;
   flex-direction: column;
   gap: 40px;
-  max-width: 1180px;
 }
 
 /* Range selector (page-head action) */
