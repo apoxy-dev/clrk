@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# pre-commit: ban the em-dash (U+2014) from documentation markdown.
+#
+# Em-dashes read as machine-generated writing. Docs prose must use plain ASCII
+# punctuation instead (comma, colon, period, semicolon, parens). This hook
+# rejects any staged .md/.mdx file under docs/ that still contains an em-dash.
+#
+# Install (once per clone):  git config core.hooksPath .githooks
+
+# Roots whose markdown is gated.
+roots='^docs/'
+
+bad=0
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  case "$f" in
+    *.md | *.mdx) ;;
+    *) continue ;;
+  esac
+  # Scan the staged blob (not the working tree) for the em-dash UTF-8 bytes
+  # E2 80 94, matched at the byte level so perl's input encoding is irrelevant.
+  lines=$(git show ":$f" | perl -ne 'print "    line $.\n" if /\xE2\x80\x94/')
+  if [ -n "$lines" ]; then
+    if [ "$bad" -eq 0 ]; then
+      echo "pre-commit: em-dash (U+2014) is banned in docs markdown." >&2
+      echo "Replace each with plain ASCII punctuation (, . : ; ()), then re-stage." >&2
+      echo "" >&2
+      bad=1
+    fi
+    echo "  $f" >&2
+    printf '%s' "$lines" >&2
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM | grep -E "$roots")
+
+if [ "$bad" -ne 0 ]; then
+  exit 1
+fi
+exit 0

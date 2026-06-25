@@ -321,7 +321,7 @@ clrk dev [flags]
       --k3s-image string             k3s image ref. (default "rancher/k3s:v1.34.1-k3s1")
       --pull string                  Forwarded to 'docker run --pull' for every clrk-managed container. Accepted: "always", "missing" (docker default), "never". Use "always" to force a re-pull when a SHA-tagged image was retagged out-of-band.
   -R, --recursive                    Recurse into subdirectories when --apply targets a directory.
-      --registry-image stringArray   Override an image to a local-registry ref and force '--pull always' on the matching container (repeatable). Format: COMPONENT=REF where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --registry-image=worker=clrk-registry:5000/clrk/worker:dev — pair with 'clrk dev reload <component>' after pushing to the local registry.
+      --registry-image stringArray   Override an image to a local-registry ref and force '--pull always' on the matching container (repeatable). Format: COMPONENT=REF where COMPONENT is 'worker[-N]' or 'controller-manager'. Example: --registry-image=worker=clrk-registry:5000/clrk/worker:dev - pair with 'clrk dev reload <component>' after pushing to the local registry.
       --registry-port int            Host port to publish the local OCI registry on. 0 picks a free port; the actual port is logged at startup and is the target for 'docker push localhost:<port>/clrk/...'.
       --secret stringArray           Materialize an Opaque Secret from the host env before --apply runs (repeatable). Format: NAME=ENVVAR[:KEY]. KEY defaults to ENVVAR lowercased with '_' → '-' (e.g. ANTHROPIC_API_KEY → anthropic-api-key). Multiple --secret flags sharing a NAME merge into one Secret with multiple keys.
       --skip-preflight               Skip the host-readiness checks (docker daemon, /dev/net/tun, IPv6, image-pullable). Use only when the checks are wrong about your environment.
@@ -439,7 +439,7 @@ clrk dev reload <component> [flags]
 ```
       --data-dir string                       Host path of the running session's data dir (defaults to --clrk-dir).
   -h, --help                                  help for reload
-      --worker-index clrk dev reload worker   Ignored — clrk dev reload worker rolls the whole Deployment.
+      --worker-index clrk dev reload worker   Ignored - clrk dev reload worker rolls the whole Deployment.
 ```
 
 ### Options inherited from parent commands
@@ -710,9 +710,9 @@ clrk secret set NAME [flags]
 ### Options
 
 ```
-      --from-env stringArray       key=ENVVAR — read the value of the named environment variable into the Secret under data[key]. Repeatable.
-      --from-file stringArray      key=PATH — file contents into data[key]. Repeatable.
-      --from-literal stringArray   key=VALUE — verbatim string into data[key]. Repeatable.
+      --from-env stringArray       key=ENVVAR - read the value of the named environment variable into the Secret under data[key]. Repeatable.
+      --from-file stringArray      key=PATH - file contents into data[key]. Repeatable.
+      --from-literal stringArray   key=VALUE - verbatim string into data[key]. Repeatable.
   -h, --help                       help for set
   -n, --namespace string           Target namespace (default: kubeconfig context).
 ```
@@ -739,7 +739,7 @@ Upgrade an existing clrk control plane in a Kubernetes cluster
 
 ### Synopsis
 
-Re-applies the clrk control plane at a new version. Gates the version transition (refuses a downgrade or an unorderable jump without a flag), force-applies the Gateway-API + Envoy-Gateway CRD bundle, rolls the controller-manager and the workers, and waits for the cluster to converge. The controller-manager uses a Recreate strategy, so the aggregated API is briefly unavailable while it rolls. No data migration is performed — the controller-manager migrates its embedded stores at boot.
+Re-applies the clrk control plane at a new version. Gates the version transition (refuses a downgrade or an unorderable jump without a flag), force-applies the Gateway-API + Envoy-Gateway CRD bundle, rolls the controller-manager and the workers, and waits for the cluster to converge. The controller-manager uses a Recreate strategy, so the aggregated API is briefly unavailable while it rolls. No data migration is performed - the controller-manager migrates its embedded stores at boot.
 
 ```
 clrk upgrade [flags]
