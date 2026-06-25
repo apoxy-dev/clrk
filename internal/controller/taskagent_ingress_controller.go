@@ -18,7 +18,6 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/ports"
 )
 
 // TaskAgentIngressReconciler owns the k8s-side half of TaskAgent.
@@ -456,10 +455,23 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 	// a dynamic_forward_proxy cluster with no static endpoints; the
 	// destination host is read off the request `:authority`, which
 	// the ingress ext_proc rewrites to the worker pod IP picked by
-	// WorkerHealthChecker. The X-Clrk-TaskAgent header injected here
-	// gives the worker dispatcher its lookup key on the receiving
-	// end (ext_proc has set `:authority` to a pod IP, so the worker
-	// can't infer the TaskAgent from Host).
+	// WorkerHealthChecker.
+	//
+	// We do NOT override X-Clrk-TaskAgent on the route. The header is
+	// already on the request - the ingress ext_proc requires it (it 400s
+	// when absent) and uses it to resolve the TaskAgent, pick the worker,
+	// label the ingress.dispatch span, and key the invocationctx trace
+	// parent. The ext_proc rewrites only `:authority` (to a pod IP) and
+	// leaves X-Clrk-TaskAgent intact, so it reaches the worker dispatcher
+	// unchanged as the same value the ext_proc resolved. A route-level
+	// Set ran AFTER the ext_proc (RequestHeaderModifier is applied by the
+	// terminal router filter), so it could only ever overwrite the value
+	// the ext_proc had already acted on - when a client sent a header that
+	// didn't match this gateway's TaskAgent, the ingress.dispatch span was
+	// attributed to the client's agent while the worker/sandbox/egress used
+	// the overwritten one, and the single invocation surfaced under both
+	// agents in telemetry. Letting the one header flow through keeps every
+	// hop on the same identity.
 	beGroup := gwapiv1.Group(envoyGatewayGroup)
 	beKind := gwapiv1.Kind("Backend")
 	beName := gwapiv1.ObjectName(dynamicBackendName(ta))
@@ -504,27 +516,6 @@ func desiredHTTPRoute(ta *clrkv1alpha1.TaskAgent) *gwapiv1.HTTPRoute {
 							Path: &gwapiv1.HTTPPathMatch{
 								Type:  &pathPrefix,
 								Value: ptr.To("/"),
-							},
-						},
-					},
-					Filters: []gwapiv1.HTTPRouteFilter{
-						{
-							Type: gwapiv1.HTTPRouteFilterRequestHeaderModifier,
-							// Stamp the routing header authoritatively. We deliberately
-							// do NOT set X-Clrk-Trigger here: the worker defaults an
-							// absent value to HTTP, so ordinary ingress traffic still
-							// records as HTTP, while a trusted caller-set trigger (the
-							// run-task invoke Connecter sends "cli") survives to the
-							// worker instead of being clobbered. The ingress ext_proc
-							// reads the trigger before this filter, so its
-							// Dispatched/Rejected events already classify it correctly.
-							RequestHeaderModifier: &gwapiv1.HTTPHeaderFilter{
-								Set: []gwapiv1.HTTPHeader{
-									{
-										Name:  ports.HeaderTaskAgent,
-										Value: ta.Namespace + "/" + ta.Name,
-									},
-								},
 							},
 						},
 					},
