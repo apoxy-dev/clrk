@@ -162,9 +162,10 @@ func headersContinueWithHeaders(mut *extprocv3.HeaderMutation, clearRouteCache b
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{RequestHeaders: r}}
 }
 
-// mergeHeaderMut folds b's mutations into a (allocating if a is nil),
-// so a base mutation (authority port, traceparent) can carry additional
-// set/remove entries computed later in the same phase.
+// mergeHeaderMut folds b's set/remove entries into a and returns a, so a
+// base mutation (authority port, traceparent) can carry additional
+// entries computed later in the same phase. When either side is nil the
+// other is returned as-is (no copy); otherwise a is mutated in place.
 func mergeHeaderMut(a, b *extprocv3.HeaderMutation) *extprocv3.HeaderMutation {
 	if b == nil {
 		return a

@@ -278,16 +278,34 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 		hdrInjs, sigInjs := splitInjections(injs)
 		mut = applyInjections(mut, hdrInjs)
 		if len(sigInjs) > 0 {
-			// A SigV4 policy can't inject at headers time — the
-			// signature covers the payload hash. Defer it to body
-			// EOS and promote the request body mode so the
-			// body-phase header mutation is honored.
-			ds.deferSign = true
-			ds.sigInjs = sigInjs
-			resp.ModeOverride = modeOverride(
-				extprocfilterv3.ProcessingMode_BUFFERED,
-				extprocfilterv3.ProcessingMode_BUFFERED,
-			)
+			if requestIsBodyless(m.GetEndOfStream(), ds.rec.RequestHeaders) {
+				// Bodyless request (GET/HEAD/DELETE) on a
+				// non-reselectable rule: no RequestBody phase will
+				// arrive to defer the signature to, so deferring would
+				// egress unsigned (an AWS-shaped host 403s). Sign now,
+				// over the empty body — a SigV4 signature covers the
+				// payload hash, which for no body is the hash of the
+				// empty string. Same signInput plainBodyEOS builds,
+				// minus the body.
+				mut = applySigning(mut, sigInjs, signInput{
+					method:    ds.rec.RequestHeaders[":method"],
+					authority: effectiveAuthority(ds.rec.RequestHeaders[":authority"]),
+					path:      ds.rec.RequestHeaders[":path"],
+					body:      nil,
+					headers:   ds.rec.RequestHeaders,
+				}, ds.logger)
+			} else {
+				// A SigV4 policy can't inject at headers time — the
+				// signature covers the payload hash. Defer it to body
+				// EOS and promote the request body mode so the
+				// body-phase header mutation is honored.
+				ds.deferSign = true
+				ds.sigInjs = sigInjs
+				resp.ModeOverride = modeOverride(
+					extprocfilterv3.ProcessingMode_BUFFERED,
+					extprocfilterv3.ProcessingMode_BUFFERED,
+				)
+			}
 		}
 	}
 	if mut != nil {
@@ -1008,7 +1026,13 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 	// chunks. rec.Provider.System is already canonical and reflects the
 	// SELECTED backend's schema when re-selection fired, so the right
 	// decoder is chosen for translated legs too.
-	if rec.Provider != nil && rec.Provider.StreamResponse {
+	//
+	// Only on a COMPLETE capture: the keep-last-N capture ring drops the
+	// HEAD of a long stream, so a truncated body reassembles into a
+	// message missing its beginning. Surfacing that as the authoritative
+	// "assembled response" would mislead — the raw body is still carried
+	// (and already flagged truncated), so consumers can see the frames.
+	if rec.Provider != nil && rec.Provider.StreamResponse && !rec.ResponseTruncated {
 		if asm, ok := llmcall.AssembleStreamedResponse(llmcall.ByName(rec.Provider.System), respBody); ok {
 			rec.Provider.ResponseContent = asm.Rendered()
 		}
