@@ -33,8 +33,8 @@ importers:
   apps/clrk-console:
     dependencies:
       '@apoxy/console-core':
-        specifier: github:apoxy-dev/apoxy#9b05d622cf864a3b91a3ede7aea9ff57049ce721&path:console/packages/core
-        version: https://codeload.github.com/apoxy-dev/apoxy/tar.gz/9b05d622cf864a3b91a3ede7aea9ff57049ce721#path:console/packages/core(@tanstack/react-query@5.101.0(react@19.2.7))(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        specifier: github:apoxy-dev/apoxy#dfc03cd526f634bb7f942aab78eb986df21a96d4&path:console/packages/core
+        version: https://codeload.github.com/apoxy-dev/apoxy/tar.gz/dfc03cd526f634bb7f942aab78eb986df21a96d4#path:console/packages/core(@tanstack/react-query@5.101.0(react@19.2.7))(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@carbon/icons-react':
         specifier: ^11.48.0
         version: 11.82.0(react@19.2.7)
@@ -87,8 +87,8 @@ importers:
 
 packages:
 
-  '@apoxy/console-core@https://codeload.github.com/apoxy-dev/apoxy/tar.gz/9b05d622cf864a3b91a3ede7aea9ff57049ce721#path:console/packages/core':
-    resolution: {path: console/packages/core, tarball: https://codeload.github.com/apoxy-dev/apoxy/tar.gz/9b05d622cf864a3b91a3ede7aea9ff57049ce721}
+  '@apoxy/console-core@https://codeload.github.com/apoxy-dev/apoxy/tar.gz/dfc03cd526f634bb7f942aab78eb986df21a96d4#path:console/packages/core':
+    resolution: {path: console/packages/core, tarball: https://codeload.github.com/apoxy-dev/apoxy/tar.gz/dfc03cd526f634bb7f942aab78eb986df21a96d4}
     version: 0.0.0
     peerDependencies:
       '@tanstack/react-query': ^5.0.0
@@ -1784,7 +1784,7 @@ packages:
 
 snapshots:
 
-  '@apoxy/console-core@https://codeload.github.com/apoxy-dev/apoxy/tar.gz/9b05d622cf864a3b91a3ede7aea9ff57049ce721#path:console/packages/core(@tanstack/react-query@5.101.0(react@19.2.7))(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+  '@apoxy/console-core@https://codeload.github.com/apoxy-dev/apoxy/tar.gz/dfc03cd526f634bb7f942aab78eb986df21a96d4#path:console/packages/core(@tanstack/react-query@5.101.0(react@19.2.7))(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@carbon/icons-react': 11.82.0(react@19.2.7)
       '@tanstack/react-query': 5.101.0(react@19.2.7)
