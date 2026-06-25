@@ -140,6 +140,23 @@ export function bucketCount(
   return Math.max(1, lastIdx - originIdx + 1);
 }
 
+/** UTC step-grid start (epoch ms) of each bucket densify produces — same origin
+ *  and length — so the chart can label a hovered bucket with its real time. */
+export function bucketStarts(
+  sinceMs: number,
+  untilMs: number,
+  stepMs: number,
+): number[] {
+  const buckets = bucketCount(sinceMs, untilMs, stepMs);
+  if (stepMs <= 0 || !Number.isFinite(sinceMs)) {
+    return new Array<number>(buckets).fill(NaN);
+  }
+  const originIdx = Math.floor(sinceMs / stepMs);
+  const out = new Array<number>(buckets);
+  for (let i = 0; i < buckets; i++) out[i] = (originIdx + i) * stepMs;
+  return out;
+}
+
 /**
  * Densify a series set onto the UTC step grid: returns one value per bucket
  * (0 for buckets the server omitted because they were empty). When `measure` is
@@ -270,8 +287,14 @@ export interface OverviewModel {
   xticks: string[];
   kpis: OvwKpis;
   spark: OvwSparks;
-  /** Traffic chart series (dense): invocations area + errors line. */
-  traffic: { inv: number[]; err: number[] };
+  /** Traffic chart series (dense): invocations area + errors line, with each
+   *  bucket's UTC start (epoch ms) for hover labels and the step width. */
+  traffic: {
+    inv: number[];
+    err: number[];
+    bucketStartMs: number[];
+    stepMs: number;
+  };
   delta: { inv: number; tok: number; tool: number; err: number };
   health: HealthModel;
   topAgents: AgentRow[];
@@ -376,6 +399,7 @@ export function buildOverview(input: BuildOverviewInput): OverviewModel {
   const sinceMs = haveWindow ? rawSince : 0;
   const untilMs = haveWindow ? rawUntil : meta.windowMs;
 
+  const bucketStartMs = bucketStarts(sinceMs, untilMs, stepMs);
   const inv = densify(series[M_INVOCATIONS], sinceMs, untilMs, stepMs);
   const tokIn = densify(series[M_TOKENS], sinceMs, untilMs, stepMs, "input");
   const tokOut = densify(series[M_TOKENS], sinceMs, untilMs, stepMs, "output");
@@ -409,7 +433,7 @@ export function buildOverview(input: BuildOverviewInput): OverviewModel {
       activeAgents,
     },
     spark: { inv, tok, tool, err },
-    traffic: { inv, err },
+    traffic: { inv, err, bucketStartMs, stepMs },
     delta: {
       inv: deltaPct(inv),
       tok: deltaPct(tok),

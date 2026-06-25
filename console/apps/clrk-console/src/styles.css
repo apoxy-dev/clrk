@@ -1874,10 +1874,6 @@
   height: 9px;
   opacity: 0.5;
 }
-.ovw-chart svg {
-  display: block;
-  width: 100%;
-}
 .ovw-chart-empty {
   height: 240px;
   display: flex;

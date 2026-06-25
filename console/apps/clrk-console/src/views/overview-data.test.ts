@@ -5,6 +5,7 @@ import type { EgGatewayRow } from "./egress-data";
 import {
   buildOverview,
   bucketCount,
+  bucketStarts,
   deltaPct,
   densify,
   mostCommonNamespace,
@@ -180,6 +181,25 @@ describe("densify", () => {
 });
 
 // --- deltaPct + sum ---------------------------------------------------------
+
+describe("bucketStarts", () => {
+  it("aligns each bucket start to the UTC step grid", () => {
+    // since=1620 floors to origin bucket start 1000; 5 buckets of width 1000,
+    // matching the densify misalignment case (1:1 with the server buckets).
+    expect(bucketStarts(1620, 5620, 1000)).toEqual([
+      1000, 2000, 3000, 4000, 5000,
+    ]);
+  });
+  it("matches the densify bucket count and origin", () => {
+    const starts = bucketStarts(1620, 5620, 1000);
+    expect(starts.length).toBe(bucketCount(1620, 5620, 1000));
+    expect(starts[0]).toBe(Math.floor(1620 / 1000) * 1000);
+  });
+  it("returns NaN starts for a non-finite or zero step", () => {
+    expect(bucketStarts(0, 1000, 0).every(Number.isNaN)).toBe(true);
+    expect(bucketStarts(NaN, 1000, 1000).every(Number.isNaN)).toBe(true);
+  });
+});
 
 describe("deltaPct", () => {
   it("compares the first third to the last third", () => {
