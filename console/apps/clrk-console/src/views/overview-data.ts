@@ -239,6 +239,70 @@ export function mostCommonNamespace(agentRows: AgentRow[]): string {
   return best;
 }
 
+// --- recent invocations (the Observe surface on the landing page) -----------
+
+/** The minimal shape of an Invocation CR the recent panel reads. */
+export interface InvocationObj {
+  metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
+  spec?: {
+    trigger?: { type?: string };
+    parentRef?: { kind?: string; name?: string };
+  };
+  status?: { phase?: string };
+}
+
+export interface RecentInvocation {
+  id: string;
+  name: string;
+  namespace: string;
+  phase: string;
+  /** `Kind/name` of the agent that owns the invocation. */
+  parent: string;
+  trigger: string;
+  /** Age in ms at the time the rows were built (caller-supplied clock). */
+  ageMs: number;
+  /** False for a terminal failure phase (drives the row's status pip). */
+  ok: boolean;
+}
+
+const FAILED_PHASES = new Set(["Failed", "Error", "Errored"]);
+
+function invocationMs(o: InvocationObj): number {
+  const t = Date.parse(o.metadata?.creationTimestamp ?? "");
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/**
+ * Newest-first invocations (by creation time), capped at `limit`. Pure: the
+ * caller passes the clock so ages are deterministic and unit-testable. (The
+ * sort is client-side over the full list — see clrk-improvements for the
+ * unbounded-list caveat / a server-sorted recent query.)
+ */
+export function mapRecentInvocations(
+  items: InvocationObj[],
+  nowMs: number,
+  limit = 8,
+): RecentInvocation[] {
+  return [...items]
+    .sort((a, b) => invocationMs(b) - invocationMs(a))
+    .slice(0, limit)
+    .map((o) => {
+      const phase = o.status?.phase ?? "Pending";
+      const p = o.spec?.parentRef;
+      const name = o.metadata?.name ?? "";
+      return {
+        id: name,
+        name,
+        namespace: o.metadata?.namespace ?? "",
+        phase,
+        parent: p?.name ? `${p.kind ?? "Agent"}/${p.name}` : (p?.kind ?? "—"),
+        trigger: o.spec?.trigger?.type ?? "—",
+        ageMs: Math.max(0, nowMs - invocationMs(o)),
+        ok: !FAILED_PHASES.has(phase),
+      };
+    });
+}
+
 export interface OvwKpis {
   invocations: number;
   tokensIn: number;

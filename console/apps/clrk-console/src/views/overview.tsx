@@ -8,8 +8,13 @@
 
 import { ArrowRight } from "@carbon/icons-react";
 import { Sparkline, TimeSeriesChart } from "@apoxy/console-core";
-import { fmtK } from "../telemetry/format";
-import type { AttnItem, OverviewModel, OvwRange } from "./overview-data";
+import { fmtAgo, fmtK } from "../telemetry/format";
+import type {
+  AttnItem,
+  OverviewModel,
+  OvwRange,
+  RecentInvocation,
+} from "./overview-data";
 import { OVW_RANGES } from "./overview-data";
 
 const DAY_MS = 86_400_000;
@@ -43,6 +48,11 @@ export interface OverviewViewProps {
   onOpenAgent?: (id: string) => void;
   onOpenGateway?: (id: string) => void;
   onAll?: (path: string) => void;
+  /** Recent invocations (the Observe surface), newest first. */
+  recent?: RecentInvocation[];
+  recentLoading?: boolean;
+  onOpenInvocation?: (id: string) => void;
+  onAllInvocations?: () => void;
 }
 
 function DeltaTag({ pct, invert }: { pct: number; invert?: boolean }) {
@@ -155,6 +165,91 @@ function Kpi({
   );
 }
 
+// ---- recent invocations -------------------------------------------------
+function RecentInvocations({
+  rows,
+  isLoading,
+  onOpen,
+  onAll,
+}: {
+  rows: RecentInvocation[];
+  isLoading?: boolean;
+  onOpen?: (id: string) => void;
+  onAll?: () => void;
+}) {
+  return (
+    <div>
+      <SecHead
+        label="Recent invocations"
+        sub={rows.length ? `last ${rows.length}` : undefined}
+        onAll={onAll}
+      />
+      <div className="viz-frame">
+        <table className="ovw-table">
+          <thead>
+            <tr>
+              <th style={{ width: 24 }} />
+              <th>Invocation</th>
+              <th>Agent</th>
+              <th>Trigger</th>
+              <th>Status</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr
+                key={r.id}
+                className={onOpen ? "gws-row" : undefined}
+                onClick={onOpen ? () => onOpen(r.id) : undefined}
+              >
+                <td>
+                  <span
+                    className={"gws-pip" + (r.ok ? "" : " err")}
+                    title={r.phase}
+                  />
+                </td>
+                <td style={{ fontFamily: "var(--font-mono)" }}>{r.name}</td>
+                <td
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  {r.parent}
+                </td>
+                <td style={{ fontFamily: "var(--font-mono)" }}>{r.trigger}</td>
+                <td>
+                  <span
+                    className={r.ok ? "chip chip--leaf" : "chip chip--coral"}
+                  >
+                    {r.phase}
+                  </span>
+                </td>
+                <td
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  {fmtAgo(r.ageMs)}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} className="viz-empty-state">
+                  {isLoading ? "Loading invocations…" : "No invocations yet."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function OverviewView({
   model,
   range,
@@ -166,6 +261,10 @@ export function OverviewView({
   onOpenAgent,
   onOpenGateway,
   onAll,
+  recent,
+  recentLoading,
+  onOpenInvocation,
+  onAllInvocations,
 }: OverviewViewProps) {
   const { kpis, spark, delta, traffic, health, topAgents, topGateways } = model;
 
@@ -527,6 +626,14 @@ export function OverviewView({
           </div>
         </div>
       </div>
+
+      {/* Recent invocations */}
+      <RecentInvocations
+        rows={recent ?? []}
+        isLoading={recentLoading}
+        onOpen={onOpenInvocation}
+        onAll={onAllInvocations}
+      />
     </div>
   );
 }

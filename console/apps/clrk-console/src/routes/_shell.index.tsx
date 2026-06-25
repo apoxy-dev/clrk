@@ -14,9 +14,11 @@ import { mapAgents } from "../views/agents-data";
 import { mapEgress } from "../views/egress-data";
 import {
   buildOverview,
+  mapRecentInvocations,
   mostCommonNamespace,
   overviewQueries,
   OVW_RANGES,
+  type InvocationObj,
   type OvwRange,
   type PoolTally,
 } from "../views/overview-data";
@@ -35,6 +37,7 @@ const TASK_GVR = gvr("taskagents");
 const DAEMON_GVR = gvr("daemonagents");
 const EG_GVR = gvr("egressgateways");
 const WP_GVR = gvr("workerpools");
+const INVOCATION_GVR = gvr("invocations");
 
 const RANGE_KEY = "clrk.ovwRange";
 
@@ -65,8 +68,19 @@ function Overview() {
   const daemon = useK8sList(DAEMON_GVR);
   const gateways = useK8sList(EG_GVR);
   const pools = useK8sList(WP_GVR);
+  const invocations = useK8sList(INVOCATION_GVR);
   const taskMetrics = useAgentMetrics("TaskAgent");
   const daemonMetrics = useAgentMetrics("DaemonAgent");
+
+  const recent = useMemo(
+    () =>
+      mapRecentInvocations(
+        (invocations.data?.items ?? []) as InvocationObj[],
+        Date.now(),
+        8,
+      ),
+    [invocations.data],
+  );
 
   const { rows: agentRows } = useMemo(
     () =>
@@ -141,6 +155,14 @@ function Overview() {
         void router.navigate({ to: `/egress/${id}` as never })
       }
       onAll={(path) => void router.navigate({ to: `/${path}` as never })}
+      recent={recent}
+      recentLoading={invocations.isLoading}
+      onOpenInvocation={(id) =>
+        void router.navigate({ to: `/invocations/${id}` as never })
+      }
+      onAllInvocations={() =>
+        void router.navigate({ to: "/invocations" as never })
+      }
     />
   );
 }

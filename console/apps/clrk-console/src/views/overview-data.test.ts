@@ -8,6 +8,7 @@ import {
   bucketStarts,
   deltaPct,
   densify,
+  mapRecentInvocations,
   mostCommonNamespace,
   overviewQueries,
   rangeWindow,
@@ -16,6 +17,7 @@ import {
   M_INVOCATIONS,
   M_TOKENS,
   M_TOOLS,
+  type InvocationObj,
 } from "./overview-data";
 
 // --- fixtures ---------------------------------------------------------------
@@ -412,5 +414,68 @@ describe("buildOverview", () => {
     });
     expect(m.topAgents.map((a) => a.name)).toEqual(["flaky", "busy", "quiet"]);
     expect(m.topGateways.map((g) => g.name)).toEqual(["fast", "slow"]);
+  });
+});
+
+function inv(p: {
+  name: string;
+  created: string;
+  phase?: string;
+  parent?: { kind?: string; name?: string };
+  trigger?: string;
+}): InvocationObj {
+  return {
+    metadata: { name: p.name, namespace: "ns", creationTimestamp: p.created },
+    spec: {
+      trigger: p.trigger ? { type: p.trigger } : undefined,
+      parentRef: p.parent,
+    },
+    status: p.phase ? { phase: p.phase } : undefined,
+  };
+}
+
+describe("mapRecentInvocations", () => {
+  const now = Date.parse("2026-06-25T12:00:00Z");
+
+  it("sorts newest-first and caps at the limit", () => {
+    const rows = mapRecentInvocations(
+      [
+        inv({ name: "a", created: "2026-06-25T11:00:00Z" }),
+        inv({ name: "b", created: "2026-06-25T11:59:00Z" }),
+        inv({ name: "c", created: "2026-06-25T09:00:00Z" }),
+      ],
+      now,
+      2,
+    );
+    expect(rows.map((r) => r.id)).toEqual(["b", "a"]);
+  });
+
+  it("derives parent, trigger, age and the failure flag", () => {
+    const [x] = mapRecentInvocations(
+      [
+        inv({
+          name: "x",
+          created: "2026-06-25T11:00:00Z",
+          phase: "Failed",
+          parent: { kind: "TaskAgent", name: "ta1" },
+          trigger: "http",
+        }),
+      ],
+      now,
+    );
+    expect(x?.parent).toBe("TaskAgent/ta1");
+    expect(x?.trigger).toBe("http");
+    expect(x?.phase).toBe("Failed");
+    expect(x?.ok).toBe(false);
+    expect(x?.ageMs).toBe(now - Date.parse("2026-06-25T11:00:00Z"));
+  });
+
+  it("defaults a missing phase to Pending and treats it as ok", () => {
+    const [r] = mapRecentInvocations(
+      [inv({ name: "z", created: "2026-06-25T11:00:00Z" })],
+      now,
+    );
+    expect(r?.phase).toBe("Pending");
+    expect(r?.ok).toBe(true);
   });
 });

@@ -41,6 +41,7 @@ import {
 } from '@apoxy/console-core'
 import {
   Asleep,
+  Dashboard,
   Document,
   Light,
   Notification,
@@ -211,6 +212,11 @@ function ShellBody() {
           <Sidebar
             model={model}
             activePath={activePath}
+            home={{
+              to: '/',
+              label: 'Overview',
+              icon: <Dashboard size={16} />,
+            }}
             collapsed={collapsed}
             onToggleCollapsed={toggleCollapsed}
             toggleIcon={
