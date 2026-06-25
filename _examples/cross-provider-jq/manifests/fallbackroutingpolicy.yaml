@@ -1,0 +1,36 @@
+# OPTIONAL. The opt-in switch from weighted load-balancing to ordered
+# cross-provider failover.
+#
+# Attaching this policy to the AIProviderRoute flips its rule's
+# backendRefs list from a ~50/50 weighted split into an ordered failover
+# chain (weights ignored; list order is priority): anthropic-haiku
+# serves ALL traffic while healthy, and openai-gpt only catches its
+# failures -- a failed Anthropic attempt (connection refused/reset, or
+# 429/503) is transparently retried against OpenAI, WITH per-attempt
+# cross-schema translation and OpenAI credential injection. The agent
+# sees one clean Anthropic-shaped 200.
+#
+# Delete this file and re-apply to go back to the weighted split.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: FallbackRoutingPolicy
+metadata:
+  name: cross-provider-jq
+spec:
+  # Whole-route attachment. AIProviderRoute rules are unnamed, so
+  # sectionName scoping is rejected at admission -- every rule on the
+  # route switches to ordered fallback.
+  targetRefs:
+    - group: clrk.apoxy.dev
+      kind: AIProviderRoute
+      name: cross-provider-jq
+  # Defaults suit most deployments; spelled out to make the knobs
+  # visible. Connection failures/resets always retry; numRetries
+  # defaults to one fewer than the backend count (capped at 5);
+  # perTryTimeout defaults to unset (a retry only fires before response
+  # headers arrive, so a bound would only cut healthy LLM streams).
+  retry:
+    retriableStatusCodes: [429, 503]
+  # Bounds how long a flapping backend stays ejected by passive outlier
+  # detection (Envoy's 300s when unset).
+  ejection:
+    maxEjectionTime: 60s

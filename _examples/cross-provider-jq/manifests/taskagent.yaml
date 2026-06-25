@@ -1,0 +1,45 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: TaskAgent
+metadata:
+  name: cross-provider-jq
+spec:
+  workerPoolRef: default
+  egressRefs:
+    - gatewayRef: cross-provider-jq
+  # Cold-start + a cross-provider round-trip (Anthropic OR a translated
+  # OpenAI call) can take 10-30s with no warm pool. The ingress
+  # HTTPRoute timeout is pinned to this value, so the cap holds
+  # end-to-end. See _examples/jq-bot for the timeout rationale.
+  timeout: 100s
+  template:
+    spec:
+      # SAME image as _examples/jq-bot. The agent is byte-for-byte
+      # identical: it speaks the Anthropic API (`claude --model haiku`).
+      # It has no idea its call may be served by OpenAI under
+      # translation -- the canonization + load-balancing layer is fully
+      # transparent to the workload. That is the entire point of this
+      # example.
+      image: us-west1-docker.pkg.dev/apoxy-dev/public/clrk-jq-bot:latest
+      env:
+        # Placeholder. Whichever backend wins, the agent's credential is
+        # stripped and the real key is injected at the egress boundary
+        # per the sectionName-scoped CredentialInjectionPolicies. This
+        # value never reaches any provider.
+        - name: ANTHROPIC_API_KEY
+          value: clrk-injected-by-proxy
+        # Claude Code (Bun-bundled) writes session artifacts under $HOME
+        # at startup; /root in a fresh clrk rootfs isn't writable the way
+        # the CLI expects, so claude --print exits 0 with no output.
+        # Pinning HOME to a writable path fixes it.
+        - name: HOME
+          value: /tmp
+        # Cap the canonical request's output budget to the SMALLEST
+        # backend ceiling. Claude Code defaults max_tokens to Haiku's
+        # 32000, which Anthropic serves fine -- but the openai-gpt
+        # backend translates that request to gpt-4o-mini, whose
+        # completion cap is 16384, so the untranslated 32000 makes
+        # OpenAI 400. When one canonical request is load-balanced across
+        # providers with different output ceilings, it must fit them all.
+        # 4096 is ample for a one-line jq filter.
+        - name: CLAUDE_CODE_MAX_OUTPUT_TOKENS
+          value: "4096"

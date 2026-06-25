@@ -1,0 +1,52 @@
+# Two clrk Backends behind ONE canonical model name. The agent always
+# asks for Anthropic "haiku"; these two backends serve that request from
+# two DIFFERENT providers speaking two DIFFERENT wire schemas. The proxy
+# canonizes the request to whichever backend wins.
+#
+# Backends carry NO credentials. The key injected after a backend is
+# selected comes from a sectionName-scoped CredentialInjectionPolicy
+# (credentialinjectionpolicy.yaml) -- one key per backend.
+---
+# The Anthropic backend. Same wire schema the agent already speaks, so
+# nothing is translated -- the request passes through and the agent's
+# chosen haiku model id is served as-is. No modelRewrite needed.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: anthropic-haiku
+spec:
+  type: Upstream
+  schema:
+    name: anthropic
+  upstream:
+    host: api.anthropic.com
+    port: 443
+---
+# The OpenAI backend. A DIFFERENT wire schema: when this backend wins,
+# the proxy translates the Anthropic /v1/messages request into an OpenAI
+# /v1/chat/completions request (and translates the response, including
+# streams, back to the Anthropic schema the agent expects).
+#
+# A Claude model id means nothing to OpenAI, so the canonical model name
+# MUST be rewritten here. This modelRewrite is the canonization layer:
+# any claude-* id the agent sends is remapped to an OpenAI model on the
+# wire. gpt-4.1-mini is a solid haiku-class peer (correct on this task,
+# non-reasoning so the output-token cap is safe); swap it for whichever
+# OpenAI model you want. Validated live: gpt-4o-mini is a weaker jq
+# author, and reasoning models (gpt-5-mini) can exhaust the capped
+# output budget on reasoning tokens -- raise CLAUDE_CODE_MAX_OUTPUT_TOKENS
+# if you switch to one.
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: Backend
+metadata:
+  name: openai-gpt
+spec:
+  type: Upstream
+  schema:
+    name: openai
+  upstream:
+    host: api.openai.com
+    port: 443
+  modelRewrites:
+    - from: claude-*
+      to: gpt-4.1-mini

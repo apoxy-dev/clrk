@@ -1,0 +1,21 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: EgressGateway
+metadata:
+  name: cross-provider-jq
+spec:
+  defaultPolicy: allow-all
+  listeners:
+    - name: egress
+      protocol: TLS
+      tls:
+        # MITM: terminate the agent's TLS at the EG Envoy so the
+        # AIProviderRoute can read the model out of the JSON body, run
+        # backend selection, translate the request when an off-schema
+        # backend wins, and inject the right credential -- then
+        # re-encrypt to the chosen upstream.
+        mode: Terminate
+  # No `otlp` block needed: body capture is always on for a Terminate
+  # listener (64 KiB/direction default, JSON/ndjson/SSE), and the sink
+  # is picked at runtime (clrk dev TUI/ClickHouse in dev). Add an `otlp`
+  # block only to point at a real collector (spec.otlp.endpoint) or to
+  # change the capture bounds (spec.otlp.captureBody.maxBytes).

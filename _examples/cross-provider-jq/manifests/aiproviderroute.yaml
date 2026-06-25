@@ -1,0 +1,38 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: AIProviderRoute
+metadata:
+  name: cross-provider-jq
+spec:
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: EgressGateway
+      name: cross-provider-jq
+  # One rule, two candidates of DIFFERENT wire schemas. The rule matches
+  # on provider + endpoint only (no `models` field), so it is model-blind
+  # -- which matters: whether a request defers selection to body time is
+  # decided at request-HEADERS time by a model-blind match. A
+  # model-scoped rule would be invisible at header time and re-selection
+  # would never arm. This rule arms it.
+  #
+  # WITHOUT a FallbackRoutingPolicy attached (the default here), the two
+  # backendRefs are a standard Gateway API WEIGHTED split: ~50/50 per
+  # request, rolled fresh by Envoy's load balancer. Half the calls are
+  # served by Anthropic Haiku, half by OpenAI under translation -- the
+  # agent cannot tell the difference.
+  #
+  # Apply fallbackroutingpolicy.yaml to flip this SAME list into an
+  # ordered failover chain (weights ignored; list order is priority).
+  rules:
+    - matches:
+        - provider: anthropic
+          endpoints:
+            - /v1/messages
+      backendRefs:
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-haiku
+          weight: 50
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: openai-gpt
+          weight: 50
