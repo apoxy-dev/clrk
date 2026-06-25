@@ -44,6 +44,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/apiserver/agentmetrics"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
+	"github.com/apoxy-dev/clrk/internal/apiserver/metricsquery"
 	"github.com/apoxy-dev/clrk/internal/apiserver/telemetry"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 )
@@ -504,6 +505,39 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 		metricsv1alpha1.SchemeGroupVersion.WithResource("daemonagentmetrics"),
 		agentmetrics.NewDaemonAgentMetricsProvider(agentMetricsDeps),
 	)
+
+	// Tier-2: the metric catalog + time-series query (the charts the Tier-1
+	// snapshot shape can't carry -- labeled series, histogram percentiles,
+	// free-dimension groupBy). Same query-time aggregation over otel_traces /
+	// otel_logs, no separate metrics store; all typed kinds in the metrics group
+	// (internal/apiserver/metricsquery). The catalog is the `metrics` resource
+	// (a Lister/Getter over the recipe registry); the query is its `series`
+	// connect subresource, returning a typed MetricSeriesSet via content
+	// negotiation. Per-agent scoping rides taskagentmetrics/daemonagentmetrics as
+	// their own `series` subresource (the metrics analogue of pods/log), so the
+	// scope is path-derived and server-enforced; per-gateway and cross-cutting
+	// scopes use the fleet metrics/{id}/series with scopeKind / scopeName.
+	metricsQueryDeps := metricsquery.Deps{Pool: lazyPool}
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("metrics"),
+		metricsquery.NewCatalogProvider(metricsQueryDeps),
+	)
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("metrics/series"),
+		metricsquery.NewFleetSeriesProvider(metricsQueryDeps),
+	)
+	for _, sub := range []struct {
+		resource string
+		kind     metricsquery.EntityKind
+	}{
+		{"taskagentmetrics/series", metricsquery.EntityTaskAgent},
+		{"daemonagentmetrics/series", metricsquery.EntityDaemonAgent},
+	} {
+		srvBuilder = srvBuilder.WithStorage(
+			metricsv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
+			metricsquery.NewEntitySeriesProvider(metricsQueryDeps, sub.kind),
+		)
+	}
 
 	if o.disableAuth {
 		srvBuilder = srvBuilder.DisableAuthorization()
