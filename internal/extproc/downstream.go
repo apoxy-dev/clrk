@@ -250,6 +250,21 @@ func (ds *downstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders, now time.
 	// pre-flight).
 	ds.provMatch = provisionalMatch(ds.routes, ds.rec.RequestHeaders)
 	ds.deferReselect = ds.provMatch != nil && len(ds.provMatch.backends) > 0
+	if ds.deferReselect && requestIsBodyless(m.GetEndOfStream(), ds.rec.RequestHeaders) {
+		// Bodyless request (GET/HEAD/DELETE) on a reselectable rule: no
+		// RequestBody phase will arrive, so deferring to RequestBody EOS
+		// would never pin or inject and the request egresses with the
+		// agent's placeholder credential -- the cause of the 401s on
+		// provider control-plane endpoints (e.g. Anthropic's
+		// /api/claude_code/*). Resolve the pin now, at headers. With no
+		// body there is no model and no cross-schema translation, so this
+		// is the bodyless subset of pinAtBodyEOS. The mutations computed
+		// above (authority port, traceparent) ride along. Clear
+		// deferReselect so a stray body phase (a client that lied about
+		// having no body) falls to the plain path instead of re-pinning.
+		ds.deferReselect = false
+		return ds.pinAtHeadersEOS(mut)
+	}
 	if ds.deferReselect {
 		resp.ModeOverride = modeOverride(
 			extprocfilterv3.ProcessingMode_BUFFERED,
@@ -703,6 +718,118 @@ func (ds *downstreamStream) pinAtBodyEOS(host, reqPath string) *extprocv3.Proces
 	return resp
 }
 
+// pinAtHeadersEOS is pinAtBodyEOS for a bodyless request (GET/HEAD/
+// DELETE): the RequestHeaders message carried end_of_stream, so no body
+// will arrive. With no body there is no model and no source IR, so
+// cross-schema candidates cannot translate and drop out -- only
+// same-schema candidates are viable -- and there is no include-usage
+// rewrite or MCP body gate to run. It publishes the same requestState
+// and pins the same rule-key the body path does, but emits the mutation
+// as a headers-phase response (which takes effect without a BUFFERED
+// promotion). baseMut carries the authority/traceparent mutations
+// already computed at headers time.
+func (ds *downstreamStream) pinAtHeadersEOS(baseMut *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
+	host, _ := splitHostPort(ds.rec.RequestHeaders[":authority"])
+	reqPath := ds.rec.RequestHeaders[":path"]
+
+	system := parsers.SystemFor(host)
+	final := ds.routes.match(system, reqPath, "")
+	if final == nil {
+		final = ds.provMatch
+	}
+	ds.finalRule = final
+
+	// Bodyless: ir is nil, so filterTranslatable drops every cross-schema
+	// candidate and keeps same-schema ones. A custom rule trusts the
+	// operator's refs wholesale, same as the body path.
+	cands, skipped := final.backends, 0
+	if final.provider != "custom" {
+		cands, skipped = filterTranslatable(final.backends, system, nil, nil)
+	}
+	ds.rec.TranslationSkippedBackends = skipped
+
+	viable := make([]resolvedBackend, 0, len(cands))
+	hasNonRefuse := false
+	refuseReason := ""
+	for _, c := range cands {
+		if c.refuse {
+			if refuseReason == "" {
+				refuseReason = c.unsupportedReason
+			}
+			continue
+		}
+		hasNonRefuse = true
+		if c.host == "" {
+			continue
+		}
+		viable = append(viable, c)
+	}
+	if len(cands) > 0 && !hasNonRefuse {
+		return immediateResponse(typev3.StatusCode_NotImplemented, "clrk: "+refuseReason)
+	}
+
+	if len(viable) == 0 || ds.egKey == (types.NamespacedName{}) || ds.requestID == "" {
+		// Nothing servable for this request, or the stream lacks the
+		// identity the pin needs: fall back to the header-time host with
+		// the rule's route-wide credentials, injected here (a bodyless
+		// request has no body to defer a SigV4 signature to).
+		mut := mergeHeaderMut(baseMut, injectFallbackCreds(ds.creds, final, ds.rec.RequestHeaders, nil, reqPath, ds.logger))
+		return headersContinueWithHeaders(mut, false)
+	}
+
+	// Redact (names-only) every header any viable candidate's policies
+	// inject, before the captured headers reach the sink -- injection
+	// itself happens per attempt in the upstream filter.
+	seen := map[string]bool{}
+	var injUnion []credInjection
+	for _, c := range viable {
+		for _, inj := range ds.creds.lookupForBackend(final, c.name) {
+			fresh := false
+			for _, name := range inj.headerNames() {
+				if !seen[name] {
+					fresh = true
+					seen[name] = true
+				}
+			}
+			if fresh {
+				injUnion = append(injUnion, inj)
+			}
+		}
+	}
+	if collisions := redactInjected(ds.rec.RequestHeaders, injUnion); len(collisions) > 0 {
+		ds.logger.Info("Agent supplied a header that policy is configured to inject; proxy overwriting",
+			"policies", collisions)
+	}
+
+	st := &requestState{system: system, rule: final}
+	ds.pinState = st
+	ds.srv.states.put(ds.requestID, st)
+
+	ruleKey := llmroute.RuleKey(
+		ds.egKey,
+		types.NamespacedName{Namespace: final.routeNamespace, Name: final.routeName},
+		final.ruleIdx,
+		final.provider,
+	)
+	mut := setHeaderMut(baseMut, llmroute.PinHeader, ruleKey)
+	resp := headersContinueWithHeaders(mut, true)
+
+	if clusterCount := servableCount(final.backends); len(viable) < clusterCount {
+		key := ds.rec.InvocationID
+		if key == "" {
+			key = "\x00" + reqPath
+		}
+		if chosen, ok := weightedPick(viable, key); ok {
+			resp.DynamicMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{
+				"envoy.lb": structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
+					llmroute.SubsetKeyBackend: structpb.NewStringValue(chosen.name),
+				}}),
+			}}
+		}
+	}
+	return resp
+}
+
 // servableCount mirrors the egextension's servableCandidates filter:
 // the number of a rule's candidates that became cluster endpoints
 // (non-refuse, resolvable host). The pin only narrows via the subset
@@ -873,6 +1000,20 @@ func enrichRecord(rec *Record, routes *routeTable, matched *routeRule) *routeRul
 			RespTruncated: rec.ResponseTruncated,
 		})
 	}
+
+	// Reassemble a streamed response into the readable assistant message.
+	// The captured SSE body is a pile of delta frames; fold them back via
+	// the serving schema's StreamCodec so telemetry and the console carry
+	// what the model actually said, without each consumer re-parsing
+	// chunks. rec.Provider.System is already canonical and reflects the
+	// SELECTED backend's schema when re-selection fired, so the right
+	// decoder is chosen for translated legs too.
+	if rec.Provider != nil && rec.Provider.StreamResponse {
+		if asm, ok := llmcall.AssembleStreamedResponse(llmcall.ByName(rec.Provider.System), respBody); ok {
+			rec.Provider.ResponseContent = asm.Rendered()
+		}
+	}
+
 	if matched != nil {
 		rec.MatchedRouteNamespace = matched.routeNamespace
 		rec.MatchedRouteName = matched.routeName
@@ -941,6 +1082,32 @@ func lookupCreds(creds *credTable, routes *routeTable, headers map[string]string
 // the pre-flight semantics (model="") but, unlike lookupCreds, does not
 // gate on a known provider host so a custom-provider rule (which matches
 // any host) can still drive re-selection.
+// requestIsBodyless reports whether no request body will reach the body
+// phase, so a deferred (reselectable) pin must be resolved at the headers
+// phase. Envoy sets end_of_stream on the headers for a bodyless request
+// under most framings, but NOT under this filter's BUFFERED_PARTIAL
+// request-body mode -- there it sends headers with end_of_stream=false
+// and then no body callback at all. So fall back to the request's own
+// declaration: an explicit content-length of 0, or a body-less method
+// with neither content-length nor transfer-encoding.
+func requestIsBodyless(eos bool, headers map[string]string) bool {
+	if eos {
+		return true
+	}
+	switch headers["content-length"] {
+	case "0":
+		return true
+	case "":
+		if headers["transfer-encoding"] == "" {
+			switch headers[":method"] {
+			case "GET", "HEAD", "DELETE", "OPTIONS", "TRACE":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func provisionalMatch(routes *routeTable, headers map[string]string) *routeRule {
 	if routes == nil {
 		return nil

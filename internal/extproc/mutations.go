@@ -147,6 +147,36 @@ func headersContinue(isRequest bool) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{ResponseHeaders: r}}
 }
 
+// headersContinueWithHeaders is headersContinue plus a header mutation
+// and an optional route-cache clear. Unlike the body-phase
+// bodyContinueWithHeaders, a header mutation on a headers response takes
+// effect directly -- no BUFFERED body-mode promotion is required -- so
+// this is what the bodyless-EOS reselection pin uses to set the rule-key
+// header and clear the route cache from the RequestHeaders phase.
+func headersContinueWithHeaders(mut *extprocv3.HeaderMutation, clearRouteCache bool) *extprocv3.ProcessingResponse {
+	r := &extprocv3.HeadersResponse{Response: &extprocv3.CommonResponse{
+		Status:          extprocv3.CommonResponse_CONTINUE,
+		HeaderMutation:  mut,
+		ClearRouteCache: clearRouteCache,
+	}}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{RequestHeaders: r}}
+}
+
+// mergeHeaderMut folds b's mutations into a (allocating if a is nil),
+// so a base mutation (authority port, traceparent) can carry additional
+// set/remove entries computed later in the same phase.
+func mergeHeaderMut(a, b *extprocv3.HeaderMutation) *extprocv3.HeaderMutation {
+	if b == nil {
+		return a
+	}
+	if a == nil {
+		return b
+	}
+	a.SetHeaders = append(a.SetHeaders, b.SetHeaders...)
+	a.RemoveHeaders = append(a.RemoveHeaders, b.RemoveHeaders...)
+	return a
+}
+
 // modeOverride builds a complete ProcessingMode for ModeOverride
 // replies. Envoy REPLACES the stream's whole ProcessingMode rather
 // than merging with the filter's static config (ext_proc.cc

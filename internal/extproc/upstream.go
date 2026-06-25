@@ -174,7 +174,45 @@ func (us *upstreamStream) onRequestHeaders(m *extprocv3.HttpHeaders) *extprocv3.
 		"requestID", us.requestID,
 		"backend", us.backend.namespace+"/"+us.backend.name,
 		"schema", us.backend.schema)
+	// A bodyless request (GET/HEAD/DELETE control-plane calls) carries
+	// end_of_stream on its headers: no RequestBody message will arrive, so
+	// onRequestBody -- the usual commit point for repoint + credential
+	// injection -- never fires. Commit here instead. There is no body to
+	// translate or rewrite, and the downstream pin already dropped every
+	// cross-schema candidate for a bodyless request, so the picked backend
+	// is same-schema: repoint :authority and inject the backend's
+	// credentials over the (empty) body.
+	if m.GetEndOfStream() {
+		return us.commitBodyless()
+	}
 	return headersContinue(true)
+}
+
+// commitBodyless adapts a bodyless attempt at request-headers time: the
+// same-schema repoint + credential injection onRequestBody would do, minus
+// the body rewrite and translation (there is no body). It signs over an
+// empty payload, which is correct for the GET/HEAD/DELETE control-plane
+// calls that reach this path.
+func (us *upstreamStream) commitBodyless() *extprocv3.ProcessingResponse {
+	st, cand := us.state, us.cand
+	injs := us.creds.lookupForBackend(st.rule, cand.name)
+	authority := net.JoinHostPort(cand.host, strconv.Itoa(cand.port))
+	hdrInjs, sigInjs := splitInjections(injs)
+	mut := setHeaderMut(nil, ":authority", authority)
+	mut = applyInjections(mut, hdrInjs)
+	mut = applySigning(mut, sigInjs, signInput{
+		method:    us.method,
+		authority: authority,
+		path:      us.path,
+		body:      nil,
+		headers:   us.reqHeaders,
+	}, us.logger)
+	st.appendAttempt(attemptFact{
+		backendNamespace: cand.namespace,
+		backendName:      cand.name,
+		backendSchema:    cand.system,
+	})
+	return headersContinueWithHeaders(mut, false)
 }
 
 // onRequestBody is the attempt's commit point: the router replayed the

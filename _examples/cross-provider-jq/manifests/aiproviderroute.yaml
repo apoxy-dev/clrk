@@ -23,6 +23,9 @@ spec:
   # Apply fallbackroutingpolicy.yaml to flip this SAME list into an
   # ordered failover chain (weights ignored; list order is priority).
   rules:
+    # Rule 1: inference. /v1/messages is the only path that is
+    # load-balanced and cross-schema translated, matched explicitly and
+    # split 50/50 across the two providers.
     - matches:
         - provider: anthropic
           endpoints:
@@ -36,3 +39,28 @@ spec:
           kind: Backend
           name: openai-gpt
           weight: 50
+    # Rule 2: Anthropic control-plane. Claude Code fetches session config
+    # from Anthropic (NOT inference) and those calls must carry the real
+    # x-api-key or they 401. They route to the anthropic backend ALONE --
+    # no split, no translation -- so the sectionName: anthropic-haiku
+    # CredentialInjectionPolicy authenticates them. These are bodyless
+    # GETs; credential injection on a reselectable rule is resolved at
+    # RequestHeaders end-of-stream (pinAtHeadersEOS) since no body arrives.
+    #
+    # Endpoints are matched EXACTLY (no glob): path.Match's `*` does not
+    # cross '/', and an empty list would match every Anthropic path. List
+    # new control-plane endpoints here if a Claude Code version adds them.
+    # The GETs are bodyless and authenticate at request-headers EOS; the
+    # /metrics POST carries a body and authenticates on the normal body
+    # path -- both need the real x-api-key or they 401.
+    - matches:
+        - provider: anthropic
+          endpoints:
+            - /api/claude_code/settings
+            - /api/claude_code/policy_limits
+            - /api/claude_code/organizations/metrics_enabled
+            - /api/claude_code/metrics
+      backendRefs:
+        - group: clrk.apoxy.dev
+          kind: Backend
+          name: anthropic-haiku
