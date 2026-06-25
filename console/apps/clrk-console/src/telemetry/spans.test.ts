@@ -54,7 +54,7 @@ describe('flattenSpans / classification', () => {
     span({ name: SPAN_INGRESS_DISPATCH, spanId: 'a', start: 0, dur: 1000, attrs: { 'invocation.id': INV, 'http.request.method': 'POST', 'url.path': '/run' } }),
     span({ name: 'chat', spanId: 'b', start: 50, dur: 400, attrs: { 'invocation.id': INV, 'gen_ai.system': 'anthropic', 'gen_ai.request.model': 'claude-sonnet-4', 'gen_ai.usage.input_tokens': 1200, 'gen_ai.usage.output_tokens': 300, 'gen_ai.response.stream': true } }),
     span({ name: 'tools/call', spanId: 'c', start: 500, dur: 120, attrs: { 'invocation.id': INV, 'mcp.method': 'tools/call', 'mcp.tool.name': 'read_file' } }),
-    span({ name: 'GET github', spanId: 'd', start: 650, dur: 90, attrs: { 'invocation.id': INV, 'server.address': 'api.github.com', 'http.response.status_code': 200 } }),
+    span({ name: 'GET github', spanId: 'd', start: 650, dur: 90, attrs: { 'invocation.id': INV, 'server.address': 'api.github.com', 'url.path': '/repos/cli/cli', 'http.request.method': 'GET', 'http.response.status_code': 200 } }),
     span({ name: 'GET stripe', spanId: 'e', start: 700, dur: 40, attrs: { 'invocation.id': INV, 'server.address': 'api.stripe.com', 'http.response.status_code': 503 }, error: true }),
   ])
   const spans = flattenSpans(data)
@@ -88,6 +88,13 @@ describe('flattenSpans / classification', () => {
 
   it('merges resource attributes onto each span', () => {
     expect(spans[0]!.attrs['agent.name']).toBe('review-bot')
+  })
+
+  it('labels a network call with method + host + url path and exposes path/method', () => {
+    const net = spans.find((s) => s.id === 'd')!
+    expect(net.label).toBe('GET api.github.com/repos/cli/cli')
+    expect(net.path).toBe('/repos/cli/cli')
+    expect(net.httpMethod).toBe('GET')
   })
 })
 

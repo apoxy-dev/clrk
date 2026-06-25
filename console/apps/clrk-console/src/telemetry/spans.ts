@@ -52,6 +52,10 @@ export interface Span {
   attrs: Record<string, string>
   host: string
   label: string
+  /** Request path for a network/inbound call (url.path / http.target). */
+  path?: string
+  /** HTTP method for a network/inbound call (http.request.method / http.method). */
+  httpMethod?: string
   // LLM dimensions (gen_ai.*)
   provider?: string
   model?: string
@@ -139,8 +143,18 @@ function labelOf(lane: Lane, name: string, a: Record<string, string>, host: stri
       return a['gen_ai.request.model'] ?? a['gen_ai.response.model'] ?? a['gen_ai.system'] ?? 'llm'
     case 'mcp':
       return a['mcp.tool.name'] ?? a['mcp.method'] ?? 'mcp'
-    default:
-      return host || name || 'request'
+    default: {
+      // A network call is most legible as `METHOD host/path`. `host` may already
+      // be a full URL (the url.full fallback) and carry its own path, so only
+      // append the path when host is a bare authority (no '/').
+      const method = a['http.request.method'] ?? a['http.method']
+      const path = a['url.path'] ?? a['http.target']
+      const loc =
+        host && path && !host.includes('/')
+          ? `${host}${path}`
+          : host || a['url.full'] || name || 'request'
+      return method ? `${method} ${loc}` : loc
+    }
   }
 }
 
@@ -207,6 +221,8 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
           attrs: a,
           host,
           label: labelOf(lane, name, a, host),
+          path: a['url.path'] ?? a['http.target'],
+          httpMethod: a['http.request.method'] ?? a['http.method'],
           provider: a['gen_ai.system'],
           model: a['gen_ai.request.model'] ?? a['gen_ai.response.model'],
           stream: a['gen_ai.response.stream'] === 'true',

@@ -30,10 +30,16 @@ const EG_GVR = gvr('egressgateways')
 
 export const Route = createFileRoute('/_shell/agents_/$name')({
   component: AgentDetailPage,
+  // `?inv=<id>` deep-links a specific invocation in the Interaction tab (the
+  // landing target for an Invocation row).
+  validateSearch: (s: Record<string, unknown>): { inv?: string } => ({
+    inv: typeof s.inv === 'string' && s.inv ? s.inv : undefined,
+  }),
 })
 
 function AgentDetailPage() {
   const { name } = Route.useParams()
+  const { inv } = Route.useSearch()
   const navigate = useNavigate()
 
   const task = useK8sList(TASK_GVR)
@@ -89,6 +95,7 @@ function AgentDetailPage() {
       traces={traces.data}
       tracesLoading={traces.isLoading}
       onOpenGateway={(gw) => void navigate({ to: `/egress/${gw}` as never })}
+      initialInvocationId={inv}
     />
   )
 }

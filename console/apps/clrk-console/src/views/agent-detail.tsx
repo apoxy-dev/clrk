@@ -53,6 +53,9 @@ export interface AgentDetailViewProps {
   traces?: OtlpTracesData
   tracesLoading?: boolean
   onOpenGateway?: (name: string) => void
+  /** Invocation to pre-select in the Interaction tab (deep-link from an
+   *  Invocation row, `/agents/<name>?inv=<id>`). */
+  initialInvocationId?: string
 }
 
 type TabId = 'interaction' | 'activity' | 'revisions' | 'egress' | 'events'
@@ -67,6 +70,7 @@ export function AgentDetailView({
   traces,
   tracesLoading,
   onOpenGateway,
+  initialInvocationId,
 }: AgentDetailViewProps) {
   const isTask = row.kind === 'TaskAgent'
   const spans = useMemo(() => flattenSpans(traces), [traces])
@@ -153,7 +157,7 @@ export function AgentDetailView({
       </div>
 
       {tab === 'interaction' && (
-        <InteractionTab spans={spans} loading={tracesLoading} />
+        <InteractionTab spans={spans} loading={tracesLoading} initialId={initialInvocationId} />
       )}
       {tab === 'activity' && (
         <ActivityTab row={row} spans={spans} loading={tracesLoading} />
@@ -174,9 +178,12 @@ const LANES_TASK: LaneDef[] = [
   { id: 'net', label: 'Network', sub: 'HTTP/L4 Route' },
 ]
 
-function InteractionTab({ spans, loading }: { spans: Span[]; loading?: boolean }) {
+function InteractionTab({ spans, loading, initialId }: { spans: Span[]; loading?: boolean; initialId?: string }) {
   const invs = useMemo(() => toInvocations(spans), [spans])
-  const [invId, setInvId] = useState<string | null>(null)
+  // Seed the selection from a deep-link (`?inv=<id>`); it persists through the
+  // async traces load, and falls back to the newest invocation if that id isn't
+  // in the captured window.
+  const [invId, setInvId] = useState<string | null>(initialId ?? null)
   const inv = invs.find((i) => i.id === invId) ?? invs[0]
   const [spanId, setSpanId] = useState<string | null>(null)
   const span = inv?.spans.find((s) => s.id === spanId) ?? inv?.spans[0]
@@ -809,21 +816,23 @@ function SpanInspector({ span, traceId, invocationId }: { span: Span; traceId: s
           <span className={span.ok ? 'chip chip--leaf' : 'chip chip--coral'}>{span.statusCode || '—'}</span>
           <span className="chip">{fmtMs(span.durMs)}</span>
           {span.route && <span className="chip">via {span.route}</span>}
-          <button
-            type="button"
-            className="span-attrs-btn"
-            onClick={() => setAttrsOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={attrsOpen}
-          >
-            <ListBulleted size={16} />
-            Attributes
-          </button>
         </div>
       </div>
       <div className="span-inspector-bd">
         <div className="span-main">
-          <div className="span-section-lab">{laneHeading(span.lane)}</div>
+          <div className="span-section-head">
+            <div className="span-section-lab">{laneHeading(span.lane)}</div>
+            <button
+              type="button"
+              className="span-attrs-btn"
+              onClick={() => setAttrsOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={attrsOpen}
+            >
+              <ListBulleted size={16} />
+              Attributes
+            </button>
+          </div>
           <KvBlock rows={curatedRows(span)} />
           {span.lane === 'llm' && (span.tokIn != null || span.tokOut != null) && (
             <>
@@ -912,6 +921,8 @@ function curatedRows(s: Span): Array<[string, ReactNode]> {
   }
   return [
     ['host', s.host || '—'],
+    ['path', s.path || '—'],
+    ['method', s.httpMethod ?? '—'],
     ['status', String(s.statusCode)],
     ['route', s.route ?? '—'],
     ['latency', fmtMs(s.durMs)],

@@ -1126,6 +1126,18 @@
 .span-section-lab:first-child {
   margin-top: 0;
 }
+/* The first content section carries the Attributes action on its right, so the
+   raw-attribute tray trigger lives in the content box rather than the header. */
+.span-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.span-section-head .span-section-lab {
+  margin: 0;
+}
 
 /* Key/value block, code, headers */
 .kvblock {
