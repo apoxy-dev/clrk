@@ -67,6 +67,10 @@ export interface Span {
   // captured payloads (http.request.body / http.response.body events)
   reqBody?: SpanBody
   respBody?: SpanBody
+  /** Assistant message reassembled from a streamed response, when the
+   *  backend emitted gen_ai.response.content. Readable counterpart to the
+   *  raw SSE frames in respBody. */
+  respContent?: string
 }
 
 /** An invocation span carries its start offset from the invocation root. */
@@ -214,6 +218,7 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
           route: a['clrk.aiproviderroute.name'] ?? a['clrk.mcproute.name'] ?? a['clrk.egress_gateway'],
           reqBody: bodies.req,
           respBody: bodies.resp,
+          respContent: a['gen_ai.response.content'],
         })
       }
     }

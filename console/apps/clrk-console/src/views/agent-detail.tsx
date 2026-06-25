@@ -837,9 +837,17 @@ function SpanInspector({ span, traceId, invocationId }: { span: Span; traceId: s
               <CodeBlock>{prettyBody(span.reqBody.text)}</CodeBlock>
             </>
           )}
+          {span.respContent && (
+            <>
+              <div className="span-section-lab">Assembled response</div>
+              <CodeBlock>{span.respContent}</CodeBlock>
+            </>
+          )}
           {span.respBody && (
             <>
-              <div className="span-section-lab">{bodyLabel('Response body', span.respBody)}</div>
+              <div className="span-section-lab">
+                {bodyLabel(span.respContent ? 'Response body (raw)' : 'Response body', span.respBody)}
+              </div>
               <CodeBlock>{prettyBody(span.respBody.text)}</CodeBlock>
             </>
           )}

@@ -36,13 +36,14 @@ const (
 	// that via clrk.body.truncated and UTF-8/JSON validity.
 	AttrBodyContentEncoding = "clrk.body.content_encoding"
 
-	AttrGenAISystem        = "gen_ai.system"
-	AttrGenAIOperationName = "gen_ai.operation.name"
-	AttrGenAIRequestModel  = "gen_ai.request.model"
-	AttrGenAIResponseModel = "gen_ai.response.model"
-	AttrGenAIInputTokens   = "gen_ai.usage.input_tokens"
-	AttrGenAIOutputTokens  = "gen_ai.usage.output_tokens"
-	AttrGenAIStream        = "gen_ai.response.stream"
+	AttrGenAISystem          = "gen_ai.system"
+	AttrGenAIOperationName   = "gen_ai.operation.name"
+	AttrGenAIRequestModel    = "gen_ai.request.model"
+	AttrGenAIResponseModel   = "gen_ai.response.model"
+	AttrGenAIInputTokens     = "gen_ai.usage.input_tokens"
+	AttrGenAIOutputTokens    = "gen_ai.usage.output_tokens"
+	AttrGenAIStream          = "gen_ai.response.stream"
+	AttrGenAIResponseContent = "gen_ai.response.content"
 
 	AttrAPRRouteMatched   = "clrk.aiproviderroute.matched"
 	AttrAPRRouteName      = "clrk.aiproviderroute.name"

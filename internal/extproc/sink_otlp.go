@@ -326,6 +326,12 @@ func genAIAttrs(r Record) []attribute.KeyValue {
 	if p.StreamResponse {
 		out = append(out, attribute.Bool(otelemit.AttrGenAIStream, true))
 	}
+	// The reassembled assistant message for a streamed response — the
+	// readable counterpart to the raw SSE frames carried in the body
+	// event. Bounded by the captured body size; empty for non-streams.
+	if p.ResponseContent != "" {
+		out = append(out, attribute.String(otelemit.AttrGenAIResponseContent, p.ResponseContent))
+	}
 	// Surface the visibility-of-usage signal only when it's actionable:
 	// usage hidden behind truncation. Any other "absent" state (error
 	// response, stream) doesn't benefit from raising the byte cap.

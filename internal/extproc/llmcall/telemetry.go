@@ -44,6 +44,17 @@ type ProviderInfo struct {
 	// sink emit clrk.body.usage_visible=false to nudge operators to
 	// raise CaptureBody.MaxBytes.
 	UsageVisible bool
+
+	// ResponseContent is the assistant message reconstructed from a
+	// streamed response: concatenated text plus any tool calls. Unlike
+	// the fields above it is NOT filled by the Parser — enrichRecord
+	// populates it post-parse via AssembleStreamedResponse, which drives
+	// the serving schema's StreamCodec so every provider is reassembled
+	// by one path. Empty for non-streamed responses (whose body is
+	// already a single readable JSON), when no stream codec exists, and
+	// when nothing decoded. Best-effort: partial under a truncated
+	// capture (the keep-last-N ring drops the head of long streams).
+	ResponseContent string
 }
 
 // Input is the narrow shape passed to a telemetry parser. Avoids
