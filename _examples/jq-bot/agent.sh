@@ -15,8 +15,28 @@
 set -eu
 
 ce=$(cat)
-printf '%s' "$ce" | jq '.data.input'   > /tmp/input.json
-printf '%s' "$ce" | jq -r '.data.want' > /tmp/want.txt
+
+# The dispatcher delivers a CloudEvents JSON envelope with the request body
+# inlined under .data. Validate it before building the prompt: a malformed
+# body would otherwise abort under `set -e` with no output, and a missing
+# .input would let jq write the literal `null` into input.json -- the model
+# then "succeeds" with a filter computed over null and returns confident
+# garbage. Reject both up front with a structured {filter:"", error} envelope.
+if ! printf '%s' "$ce" | jq -e . >/dev/null 2>&1; then
+  jq -nc '{filter:"", error:"request body is not valid JSON"}'
+  exit 0
+fi
+if ! printf '%s' "$ce" | jq -e '(.data.input // null) != null' >/dev/null 2>&1; then
+  jq -nc '{filter:"", error:"request body has no .input document"}'
+  exit 0
+fi
+want=$(printf '%s' "$ce" | jq -r '.data.want // empty')
+if [ -z "$want" ]; then
+  jq -nc '{filter:"", error:"request body has no .want description"}'
+  exit 0
+fi
+printf '%s' "$ce" | jq '.data.input' > /tmp/input.json
+printf '%s' "$want" > /tmp/want.txt
 
 prompt=$(cat <<EOF
 Write ONE jq filter that, applied to /tmp/input.json, produces what
@@ -35,9 +55,12 @@ EOF
 
 raw=$(printf '%s' "$prompt" | claude --print --bare --no-session-persistence --model haiku 2>/tmp/claude.err) || true
 
-# Strip surrounding backticks / ```jq fences if the model added them.
+# Strip code fences of any language (```jq, ```json, bare ```) and surrounding
+# backticks the model may have added, then take the first non-empty line -- the
+# prompt asks for a single-line filter.
 filter=$(printf '%s' "$raw" \
-  | sed -e 's/^```jq$//' -e 's/^```$//' -e 's/^`//' -e 's/`$//' \
+  | sed -e 's/^[[:space:]]*```[a-zA-Z]*[[:space:]]*$//' \
+  | sed -e 's/^`*//' -e 's/`*$//' \
   | awk 'NF{print; exit}')
 
 if [ -z "$filter" ]; then
