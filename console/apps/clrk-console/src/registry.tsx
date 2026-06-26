@@ -195,6 +195,10 @@ export const registry = createRegistry([
     createWizard: EgressGatewayWizard,
     columns: [nameCol, statusCol, createdCol],
   }),
+  // Invocations render as a generic list, but there is no generic detail page:
+  // `_shell.invocations_.$id` shadows the splat for `/invocations/<id>` and
+  // redirects each row to the owning agent's trace panel
+  // (`/agents/<parent>?inv=<id>`), so the columns below feed only the list view.
   defineResource<Phased>({
     kind: 'Invocation',
     displayName: 'Invocations',

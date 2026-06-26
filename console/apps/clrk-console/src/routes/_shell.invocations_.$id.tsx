@@ -6,7 +6,7 @@
 // Overview "Recent invocations" rows and the generic Invocations list land here.
 
 import { createFileRoute, Navigate } from '@tanstack/react-router'
-import { useK8sList, type GVR, type K8sObject } from '@apoxy/console-core'
+import { useK8sObject, type GVR, type K8sObject } from '@apoxy/console-core'
 
 const INVOCATION_GVR: GVR = {
   group: 'clrk.apoxy.dev',
@@ -24,13 +24,10 @@ interface InvocationObj extends K8sObject {
 
 function InvocationRedirect() {
   const { id } = Route.useParams()
-  const invocations = useK8sList(INVOCATION_GVR)
-  const obj = invocations.data?.items.find((o) => o.metadata.name === id) as
-    | InvocationObj
-    | undefined
-  const parent = obj?.spec?.parentRef?.name
+  const invocation = useK8sObject<InvocationObj>(INVOCATION_GVR, id)
+  const parent = invocation.data?.spec?.parentRef?.name
 
-  if (invocations.isLoading && !invocations.data) {
+  if (invocation.isLoading && !invocation.data) {
     return <div className="viz-empty-state">Loading invocation…</div>
   }
   // The agent's trace panel selects an invocation by its id (== the Invocation

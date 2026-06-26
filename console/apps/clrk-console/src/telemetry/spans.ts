@@ -135,10 +135,17 @@ function hostOf(a: Record<string, string>): string {
   )
 }
 
-function labelOf(lane: Lane, name: string, a: Record<string, string>, host: string): string {
+function labelOf(
+  lane: Lane,
+  name: string,
+  a: Record<string, string>,
+  host: string,
+  method: string | undefined,
+  path: string | undefined,
+): string {
   switch (lane) {
     case 'inbound':
-      return `${a['http.request.method'] ?? a['http.method'] ?? 'POST'} ${a['url.path'] ?? a['http.target'] ?? '/'}`
+      return `${method ?? 'POST'} ${path ?? '/'}`
     case 'llm':
       return a['gen_ai.request.model'] ?? a['gen_ai.response.model'] ?? a['gen_ai.system'] ?? 'llm'
     case 'mcp':
@@ -147,8 +154,6 @@ function labelOf(lane: Lane, name: string, a: Record<string, string>, host: stri
       // A network call is most legible as `METHOD host/path`. `host` may already
       // be a full URL (the url.full fallback) and carry its own path, so only
       // append the path when host is a bare authority (no '/').
-      const method = a['http.request.method'] ?? a['http.method']
-      const path = a['url.path'] ?? a['http.target']
       const loc =
         host && path && !host.includes('/')
           ? `${host}${path}`
@@ -203,6 +208,10 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
         const ok = !errored && statusCode < 400
         const host = hostOf(a)
         const bodies = bodyEvents(sp.events)
+        // Derive the HTTP method/path once -- the label and the inspector's
+        // dedicated path/method fields read the same OTLP attribute pair.
+        const httpMethod = a['http.request.method'] ?? a['http.method']
+        const path = a['url.path'] ?? a['http.target']
         out.push({
           // A missing spanId would collide with every other id-less span,
           // producing duplicate React keys and cross-selecting them in the
@@ -220,9 +229,9 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
           statusCode,
           attrs: a,
           host,
-          label: labelOf(lane, name, a, host),
-          path: a['url.path'] ?? a['http.target'],
-          httpMethod: a['http.request.method'] ?? a['http.method'],
+          label: labelOf(lane, name, a, host, httpMethod, path),
+          path,
+          httpMethod,
           provider: a['gen_ai.system'],
           model: a['gen_ai.request.model'] ?? a['gen_ai.response.model'],
           stream: a['gen_ai.response.stream'] === 'true',
