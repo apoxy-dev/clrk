@@ -295,6 +295,52 @@
   background: var(--apx-coral);
 }
 
+/* Table-footer pager (ported verbatim from the design app.css): a left-side
+   "Showing A-B of N" count, a rows-per-page segmented control, and prev /
+   numbered / next nav with ellipsis collapsing. Lives inside .viz-frame below
+   the table. */
+.pager {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  padding: 12px 18px; background: var(--apx-paper);
+  border-top: 1px solid var(--border-default);
+}
+.pager-info {
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.pager-info b { color: var(--text-secondary); font-weight: 500; }
+.pager-ctrls { display: flex; align-items: center; gap: 16px; }
+.pager-size { display: inline-flex; align-items: center; gap: 8px; }
+.pager-size-lab {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.pager-seg { display: inline-flex; border: 1px solid var(--border-default); background: var(--apx-white); }
+.pager-seg button {
+  font-family: var(--font-mono); font-size: 12px; padding: 4px 9px;
+  background: transparent; color: var(--text-muted); border: 0;
+  border-left: 1px solid var(--border-default); cursor: pointer; line-height: 1.4;
+}
+.pager-seg button:first-child { border-left: 0; }
+.pager-seg button:hover { background: var(--apx-mist); color: var(--text-primary); }
+.pager-seg button.is-on { background: var(--apx-ink); color: var(--apx-bone); }
+.pager-nav { display: inline-flex; align-items: center; gap: 2px; }
+.pager-btn {
+  min-width: 30px; height: 30px; padding: 0 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 13px;
+  border: 1px solid var(--border-default); background: var(--apx-white);
+  color: var(--text-primary); cursor: pointer;
+}
+.pager-btn:hover:not(:disabled) { background: var(--apx-mist); }
+.pager-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.pager-btn.is-active { background: var(--apx-ink); color: var(--apx-bone); border-color: var(--apx-ink); }
+.pager-gap {
+  min-width: 22px; text-align: center; color: var(--text-muted);
+  font-family: var(--font-mono); font-size: 13px; user-select: none;
+}
+
 /* ============================================================
    CLRK design view primitives — Egress detail (Miller columns)
    ------------------------------------------------------------

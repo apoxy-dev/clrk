@@ -12,6 +12,7 @@ import {
   listAgentMetrics,
   type AgentKind,
   type AgentMetrics,
+  type AgentTraceRef,
   type TraceQuery,
 } from "./client";
 import {
@@ -20,6 +21,11 @@ import {
   type MetricSeriesSet,
 } from "./metrics";
 import type { OtlpTracesData } from "./otlp";
+import {
+  flattenSpans,
+  rollupByInvocation,
+  type InvocationRollup,
+} from "./spans";
 
 /** Minimal async result, mirroring the react-query fields the views read. */
 export interface AsyncResult<T> {
@@ -183,6 +189,82 @@ export function useAgentTraces(
       cancelled = true;
     };
   }, [client, kind, namespace, name, qKey, enabled]);
+
+  return state;
+}
+
+/** Newest-first row cap per agent — enough to cover the recent invocations the
+ *  list shows without dragging the full history of a busy agent. */
+const TRACES_PER_AGENT = 200;
+const TRACES_POLL_MS = 20_000;
+
+/**
+ * Roll up recent traces for a bounded set of agents into one telemetry map
+ * keyed by invocation id (== the Invocation CR name), so the Invocations list
+ * can show each row's duration, tokens, span count, and status without a
+ * first-class field on the Invocation CR (its status is phase-only — the
+ * numbers live on the OTel spans, keyed by invocation.id).
+ *
+ * The Invocation CR list is the cheap, watched source of truth; this is the
+ * enrichment. Fan-out is one `traces` GET per distinct agent (the caller caps
+ * the ref set), merged client-side; `enabled=false` pauses the poll (the list's
+ * "Pause stream"). `refs` identity drives re-fetch — a stable order keeps the
+ * key from thrashing as the watch re-emits.
+ */
+export function useInvocationsTelemetry(
+  refs: AgentTraceRef[],
+  enabled = true,
+): AsyncResult<Map<string, InvocationRollup>> {
+  const client = useConsoleClient();
+  const [state, setState] = useState<AsyncResult<Map<string, InvocationRollup>>>(
+    { isLoading: false, isSuccess: false },
+  );
+  // Sort the refs into a stable identity so an unordered watch re-emit (same
+  // agents, different order) doesn't re-run the effect.
+  const key = useMemo(
+    () =>
+      JSON.stringify(
+        [...refs]
+          .map((r) => `${r.kind}/${r.namespace}/${r.name}`)
+          .sort(),
+      ),
+    [refs],
+  );
+  const refsRef = useRef(refs);
+  refsRef.current = refs;
+
+  useEffect(() => {
+    // Disabled (paused) or nothing to fetch: stop polling but KEEP the last
+    // rollup, so resuming doesn't flash the columns back to "—" while a refetch
+    // is in flight -- the pause is a freeze, not a clear.
+    if (!enabled || refsRef.current.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    const run = () => {
+      const reqs = refsRef.current.map((r) =>
+        fetchAgentTraces(client, r.kind, r.namespace, r.name, {
+          limit: TRACES_PER_AGENT,
+        }).catch(() => undefined),
+      );
+      Promise.all(reqs).then((results) => {
+        if (cancelled) return;
+        const spans = results.flatMap((d) => (d ? flattenSpans(d) : []));
+        setState({
+          data: rollupByInvocation(spans),
+          isLoading: false,
+          isSuccess: true,
+        });
+      });
+    };
+    setState((s) => ({ ...s, isLoading: s.data == null }));
+    run();
+    const id = setInterval(run, TRACES_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [client, key, enabled]);
 
   return state;
 }

@@ -55,6 +55,14 @@ export function usage(m: AgentMetrics | undefined, key: string): number {
   return Number.isFinite(n) ? n : 0
 }
 
+/** One agent to pull traces from, resolved from an Invocation's
+ *  spec.parentRef + namespace. */
+export interface AgentTraceRef {
+  kind: AgentKind
+  namespace: string
+  name: string
+}
+
 export interface TraceQuery {
   /** Scope to one invocation id. */
   invocation?: string

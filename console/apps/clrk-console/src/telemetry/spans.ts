@@ -293,6 +293,38 @@ export function toInvocations(spans: Span[]): Invocation[] {
   return invs.sort((a, b) => b.startNano - a.startNano)
 }
 
+/** Per-invocation telemetry totals the Invocations list joins onto each
+ *  Invocation CR, keyed by invocation id (== the CR's metadata.name). A thin
+ *  projection of {@link Invocation} that drops the span array but keeps its
+ *  count, so a list spanning many agents stays cheap to hold. */
+export interface InvocationRollup {
+  durMs: number
+  tokIn: number
+  tokOut: number
+  /** Total spans captured for the invocation. */
+  spanCount: number
+  statusCode: number
+  ok: boolean
+}
+
+/** Roll a span pool up into per-invocation telemetry keyed by invocation id.
+ *  Built on {@link toInvocations} so the list and the per-agent swimlane derive
+ *  duration/tokens/status the same way. */
+export function rollupByInvocation(spans: Span[]): Map<string, InvocationRollup> {
+  const out = new Map<string, InvocationRollup>()
+  for (const inv of toInvocations(spans)) {
+    out.set(inv.id, {
+      durMs: inv.durMs,
+      tokIn: inv.tokIn,
+      tokOut: inv.tokOut,
+      spanCount: inv.spans.length,
+      statusCode: inv.statusCode,
+      ok: inv.ok,
+    })
+  }
+  return out
+}
+
 /**
  * Project spans into a DaemonAgent wall-clock list: the inbound lane is dropped
  * (a daemon is never invoked), and each call carries its age in seconds before

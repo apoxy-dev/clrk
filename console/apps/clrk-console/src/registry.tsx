@@ -195,10 +195,13 @@ export const registry = createRegistry([
     createWizard: EgressGatewayWizard,
     columns: [nameCol, statusCol, createdCol],
   }),
-  // Invocations render as a generic list, but there is no generic detail page:
-  // `_shell.invocations_.$id` shadows the splat for `/invocations/<id>` and
-  // redirects each row to the owning agent's trace panel
-  // (`/agents/<parent>?inv=<id>`), so the columns below feed only the list view.
+  // Invocations surface as a bespoke live-tail list: `_shell.invocations`
+  // shadows the generic splat for `/invocations` (the design's InvocationsPage),
+  // so the generic `columns` below are unused -- the kind stays registered only
+  // for the rail item, breadcrumb, and command palette. There is no generic
+  // detail page either: `_shell.invocations_.$id` shadows the splat for
+  // `/invocations/<id>` and redirects each row to the owning agent's trace panel
+  // (`/agents/<parent>?inv=<id>`).
   defineResource<Phased>({
     kind: 'Invocation',
     displayName: 'Invocations',
