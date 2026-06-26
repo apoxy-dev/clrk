@@ -1,0 +1,32 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: TaskAgent
+metadata:
+  name: jq-bot-codex
+spec:
+  workerPoolRef: default
+  egressRefs:
+    - gatewayRef: jq-bot-codex
+  # Codex cold-start + a Responses-API round trip (gpt-5-mini can spend a
+  # beat on reasoning) runs longer than Claude Haiku. The ingress
+  # HTTPRoute timeout is pinned to this value by
+  # taskagent_ingress_controller, so the cap holds end-to-end.
+  timeout: 120s
+  template:
+    spec:
+      # No prebuilt image is published for this example -- build it from
+      # _examples/jq-bot-codex/Dockerfile and push somewhere your worker
+      # pool can pull from. For `clrk dev`, push to the local registry
+      # and reference it here:
+      image: clrk-registry:5000/clrk-jq-bot-codex:latest
+      env:
+        # Placeholder. The CredentialInjectionPolicy rewrites the
+        # Authorization header on the egress side; this value never
+        # reaches OpenAI. Codex still requires it to be present.
+        - name: OPENAI_API_KEY
+          value: clrk-injected-by-proxy
+        # Codex writes config + scratch under these paths; a fresh clrk
+        # rootfs needs them pointed at a writable location.
+        - name: HOME
+          value: /tmp
+        - name: CODEX_HOME
+          value: /tmp/.codex

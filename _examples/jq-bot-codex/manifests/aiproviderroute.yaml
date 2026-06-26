@@ -1,0 +1,23 @@
+apiVersion: clrk.apoxy.dev/v1alpha1
+kind: AIProviderRoute
+metadata:
+  name: openai
+spec:
+  parentRefs:
+    - group: clrk.apoxy.dev
+      kind: EgressGateway
+      name: jq-bot-codex
+  rules:
+    # Codex (with wire_api="responses") makes one POST /v1/responses per
+    # model turn. No backendRefs: this rule does not reselect or
+    # translate -- it only arms credential injection on the matched path,
+    # passing the request through to api.openai.com. The attached
+    # CredentialInjectionPolicy supplies the real Authorization header.
+    #
+    # If a future Codex version calls additional api.openai.com paths
+    # that need auth, list them here (an empty list would match every
+    # OpenAI path).
+    - matches:
+        - provider: openai
+          endpoints:
+            - /v1/responses
