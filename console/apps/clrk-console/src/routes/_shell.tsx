@@ -38,6 +38,7 @@ import {
   useKeyboardScope,
   type Command,
   type GVR,
+  type K8sObject,
 } from '@apoxy/console-core'
 import {
   Asleep,
@@ -49,6 +50,7 @@ import {
   SidePanelOpen,
 } from '@carbon/icons-react'
 import { registry, daemonAgentEntry } from '../registry'
+import { POLICY_RESOURCE, POLICY_SHORT, type PolicyKind } from '../views/policies-data'
 import wordmark from '../assets/apoxy-wordmark.svg'
 import { RouterLink } from '../router-link'
 import { rootCrumbLabel } from '../project-context'
@@ -70,6 +72,21 @@ export const Route = createFileRoute('/_shell')({ component: Shell })
 // A never-served GVR placeholder so the breadcrumb sibling query can be declared
 // unconditionally (rules of hooks) and simply disabled off detail views.
 const EMPTY_GVR: GVR = { group: '', version: '', resource: '' }
+
+const v1alpha1 = (resource: string): GVR => ({
+  group: 'clrk.apoxy.dev',
+  version: 'v1alpha1',
+  resource,
+})
+
+// Short CRD name (cip/frp/edp/rlp/lp) → kind, for resolving the policy detail
+// route's `<kindShort>` segment back to a kind.
+const POLICY_KIND_BY_SHORT: Record<string, PolicyKind> = Object.fromEntries(
+  (Object.entries(POLICY_SHORT) as Array<[PolicyKind, string]>).map(([kind, short]) => [
+    short,
+    kind,
+  ]),
+)
 
 const COLLAPSE_KEY = 'clrk.console.sidebar-collapsed'
 function readCollapsed(): boolean {
@@ -112,10 +129,17 @@ function ShellBody() {
   const { pathname } = useLocation()
   const segments = pathname.split('/').filter(Boolean)
   const slug = segments[0]
+  const entry = slug ? registry.byPath(slug) : undefined
+  // Most detail routes are two-segment (`/<slug>/<name>`), so the leaf object is
+  // segments[1]. The Policies detail is the lone bespoke three-segment route
+  // (`/policies/<kindShort>/<name>`): there the object is segments[2] and
+  // segments[1] names its kind. Resolve the leaf name from the right segment so
+  // the breadcrumb labels the policy, not its kind.
   // k8s names are URL-safe single segments — use the raw segment (no decode, so
   // a malformed %-escape in the URL can't throw and crash the chrome).
-  const name = segments[1]
-  const entry = slug ? registry.byPath(slug) : undefined
+  const isPolicyLeaf = slug === 'policies' && segments.length >= 3
+  const policyShort = isPolicyLeaf ? segments[1] : undefined
+  const name = isPolicyLeaf ? segments[2] : segments[1]
 
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const toggleCollapsed = useCallback(() => {
@@ -131,9 +155,10 @@ function ShellBody() {
 
   // Breadcrumb object-switcher: on a detail view (slug + name) offer a dropdown
   // of sibling objects of the same kind. The list is only queried there; lists
-  // and the overview pass `enabled: false`, so the leaf crumb stays plain.
+  // and the overview pass `enabled: false`, so the leaf crumb stays plain. The
+  // policy leaf has its own (cross-kind) switcher below, so it disables this one.
   const siblings = useK8sList(entry?.gvr ?? EMPTY_GVR, {
-    enabled: Boolean(entry && name),
+    enabled: Boolean(entry && name && !isPolicyLeaf),
   })
   // The combined `Agent` entry (path `agents`) aggregates two kinds under one
   // route, so its sibling switcher must offer BOTH TaskAgents and DaemonAgents —
@@ -143,8 +168,51 @@ function ShellBody() {
   const daemonSiblings = useK8sList(daemonAgentEntry.gvr, {
     enabled: Boolean(isAgentLeaf && name),
   })
+  // The combined `Policy` entry spans five kinds, and its detail route is
+  // three-segment (`/policies/<short>/<name>`). Its switcher offers EVERY policy
+  // across the five kinds — one list per kind, queried only on the policy leaf —
+  // and navigates back to the kind-qualified URL. Mirrors the agent leaf, scaled
+  // to five kinds.
+  const polEnabled = Boolean(isPolicyLeaf && name)
+  const cipList = useK8sList(v1alpha1(POLICY_RESOURCE.CredentialInjectionPolicy), { enabled: polEnabled })
+  const frpList = useK8sList(v1alpha1(POLICY_RESOURCE.FallbackRoutingPolicy), { enabled: polEnabled })
+  const edpList = useK8sList(v1alpha1(POLICY_RESOURCE.EgressDenyPolicy), { enabled: polEnabled })
+  const rlpList = useK8sList(v1alpha1(POLICY_RESOURCE.RateLimitPolicy), { enabled: polEnabled })
+  const lpList = useK8sList(v1alpha1(POLICY_RESOURCE.LoggingPolicy), { enabled: polEnabled })
+
   const leafSwitch = useMemo(() => {
     if (!entry || !name) return undefined
+
+    // Policy leaf: a cross-kind switcher keyed by `<short>/<name>`.
+    if (isPolicyLeaf) {
+      const groups: Array<[PolicyKind, K8sObject[] | undefined]> = [
+        ['CredentialInjectionPolicy', cipList.data?.items],
+        ['FallbackRoutingPolicy', frpList.data?.items],
+        ['EgressDenyPolicy', edpList.data?.items],
+        ['RateLimitPolicy', rlpList.data?.items],
+        ['LoggingPolicy', lpList.data?.items],
+      ]
+      const options = groups
+        .flatMap(([kind, items]) =>
+          (items ?? [])
+            .map((o) => o.metadata?.name)
+            .filter((n): n is string => Boolean(n))
+            .map((n) => ({ id: `${POLICY_SHORT[kind]}/${n}`, label: n })),
+        )
+        .sort((a, b) => a.label.localeCompare(b.label))
+      if (options.length < 2) return undefined
+      const current = `${policyShort}/${name}`
+      const kind = policyShort ? POLICY_KIND_BY_SHORT[policyShort] : undefined
+      return {
+        value: current,
+        options,
+        ariaLabel: kind ? `Switch ${kind}` : 'Switch policy',
+        onSelect: (id: string) => {
+          if (id !== current) navigate(`/policies/${id}`)
+        },
+      }
+    }
+
     const items = isAgentLeaf
       ? [...(siblings.data?.items ?? []), ...(daemonSiblings.data?.items ?? [])]
       : siblings.data?.items ?? []
@@ -163,7 +231,21 @@ function ShellBody() {
         if (id !== name) navigate(`/${entry.path}/${id}`)
       },
     }
-  }, [entry, name, isAgentLeaf, siblings.data, daemonSiblings.data, navigate])
+  }, [
+    entry,
+    name,
+    isPolicyLeaf,
+    policyShort,
+    cipList.data,
+    frpList.data,
+    edpList.data,
+    rlpList.data,
+    lpList.data,
+    isAgentLeaf,
+    siblings.data,
+    daemonSiblings.data,
+    navigate,
+  ])
 
   // The root crumb names the deployment: the project slug, or `localhost` when
   // self-hosted — not a fixed brand label.

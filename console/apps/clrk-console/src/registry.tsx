@@ -14,10 +14,11 @@ import {
   type K8sObject,
   type ResourceEntry,
 } from '@apoxy/console-core'
-import { Activity, Bot, Gateway, Layers } from '@carbon/icons-react'
+import { Activity, Bot, Gateway, Layers, Security } from '@carbon/icons-react'
 import type { ReactNode } from 'react'
 import { schemaFor } from './schema/schema-for'
 import { EgressGatewayWizard } from './views/egress-gateway-wizard'
+import { POLICY_RESOURCE, type PolicyKind } from './views/policies-data'
 
 /** Objects that carry a coarse status phase we can badge (plus the free-form
  *  status/spec fields the columns read). */
@@ -72,6 +73,9 @@ const invocationIcon = <Activity size={16} />
 // Egress Gateways use Carbon's Gateway glyph — the same icon the CLRK dashboard
 // design picked for the egress rail item.
 const egressIcon = <Gateway size={16} />
+// Policies use Carbon's Security (shield) glyph, the icon the design's rail
+// picked for the combined Policies item.
+const policyIcon = <Security size={16} />
 
 const nameCol = {
   id: 'name',
@@ -195,6 +199,26 @@ export const registry = createRegistry([
     createWizard: EgressGatewayWizard,
     columns: [nameCol, statusCol, createdCol],
   }),
+  // Policies surface as one combined rail item spanning the five egress policy
+  // kinds (CredentialInjectionPolicy, FallbackRoutingPolicy, EgressDenyPolicy,
+  // RateLimitPolicy, LoggingPolicy). `_shell.policies` shadows the generic splat
+  // for `/policies` with a bespoke grouped-by-kind list, so the generic columns
+  // and gvr below only feed the rail item, breadcrumb, and ⌘K "Go to" — the
+  // gvr is one representative kind. Per-kind entries (for the row YAML tray) are
+  // exported below. No generic "New": creation is per real kind, not the
+  // synthetic Policy kind.
+  defineResource<Phased>({
+    kind: 'Policy',
+    displayName: 'Policies',
+    group: 'clrk.apoxy.dev',
+    resource: 'credentialinjectionpolicies',
+    servedVersion: 'v1alpha1',
+    sidebarGroup: 'Egress',
+    path: 'policies',
+    icon: policyIcon,
+    shortcut: 'p',
+    columns: [nameCol],
+  }),
   // Invocations surface as a bespoke live-tail list: `_shell.invocations`
   // shadows the generic splat for `/invocations` (the design's InvocationsPage),
   // so the generic `columns` below are unused -- the kind stays registered only
@@ -239,3 +263,23 @@ function agentKindEntry(kind: string, resource: string): ResourceEntry {
 
 export const taskAgentEntry = agentKindEntry('TaskAgent', 'taskagents')
 export const daemonAgentEntry = agentKindEntry('DaemonAgent', 'daemonagents')
+
+// Per-kind entries for the Policies list's row YAML tray. Like the agent
+// entries, these are NOT registered as rail items (the combined "Policies" entry
+// owns the sidebar) — they carry the real per-kind GVR + schema so the tray
+// writes and validates against the right kind.
+export function policyKindEntry(kind: PolicyKind): ResourceEntry {
+  const gvr: GVR = { group: 'clrk.apoxy.dev', version: 'v1alpha1', resource: POLICY_RESOURCE[kind] }
+  return {
+    gvr,
+    kind,
+    displayName: kind,
+    path: POLICY_RESOURCE[kind],
+    sidebarGroup: 'Egress',
+    servedVersion: 'v1alpha1',
+    columns: [],
+    yamlEditable: true,
+    requires: [gvr],
+    schema: schemaFor('clrk.apoxy.dev', 'v1alpha1', kind),
+  }
+}
