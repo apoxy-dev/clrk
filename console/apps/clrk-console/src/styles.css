@@ -1838,6 +1838,11 @@
   gap: 12px;
   margin-bottom: 8px;
 }
+/* The request heading is the first section and sits at the panel top (span-main
+   padding); the response heading needs the same gap a section-lab would give. */
+.span-section-head--response {
+  margin-top: 16px;
+}
 .span-section-head .span-section-lab {
   margin: 0;
 }
@@ -1871,17 +1876,12 @@
   word-break: break-all;
 }
 
-.codeblock {
-  font-family: var(--font-mono);
-  font-size: var(--fs-body);
-  line-height: 1.5;
-  background: var(--apx-paper);
-  border: 1px solid var(--border-default);
-  padding: 12px 14px;
-  margin: 4px 0 0;
-  overflow-x: auto;
-  white-space: pre;
-  color: var(--text-primary);
+/* Captured request/response payloads render with console-core's BodyBox (a
+   capped, line-numbered viewer), introduced by a `.span-section-lab` (Request /
+   Response) like every other inspector section -- so the box itself needs no top
+   margin; the label's bottom margin sets the gap. */
+.span-body {
+  margin-top: 4px;
 }
 
 /* Token bar (LLM detail) */
@@ -2227,11 +2227,6 @@
 [data-theme="dark"] .token-bar-fill--out {
   background: var(--apx-blue);
 }
-[data-theme="dark"] .codeblock {
-  background: #100f0d;
-  border-color: var(--apx-fog);
-}
-
 /* Daemon activity header (from the design view-daemon inline styles) */
 .dtrace-head {
   display: flex;

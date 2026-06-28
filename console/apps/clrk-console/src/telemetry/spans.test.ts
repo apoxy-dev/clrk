@@ -139,7 +139,7 @@ describe('flattenSpans / captured bodies', () => {
   const withBodies: OtlpSpan = {
     ...span({ name: 'chat', spanId: 'b', start: 50, dur: 400, attrs: { 'invocation.id': INV, 'gen_ai.system': 'anthropic' } }),
     events: [
-      { name: 'http.request.headers', attributes: kv({ 'content-type': 'application/json' }) },
+      { name: 'http.request.headers', attributes: kv({ 'http.request.header.content-type': 'application/json' }) },
       { name: 'http.request.body', attributes: kv({ 'clrk.body.bytes': new TextEncoder().encode(reqText).length, 'clrk.body.truncated': false, 'clrk.body.b64': b64(reqText) }) },
       { name: 'http.response.body', attributes: kv({ 'clrk.body.bytes': 999999, 'clrk.body.truncated': true, 'clrk.body.b64': b64(respText) }) },
     ],
@@ -163,6 +163,56 @@ describe('flattenSpans / captured bodies', () => {
     const plain = flattenSpans(traces([span({ name: 'chat', spanId: 'z', start: 0, dur: 1, attrs: { 'invocation.id': INV } })]))[0]!
     expect(plain.reqBody).toBeUndefined()
     expect(plain.respBody).toBeUndefined()
+  })
+})
+
+describe('flattenSpans / captured headers', () => {
+  // Headers ride span events keyed `http.request.header.<name>` /
+  // `http.response.header.<name>`, HTTP/2 pseudo-headers and all; the parser
+  // strips that prefix and the inspector drops the pseudo-headers for display.
+  const withHeaders: OtlpSpan = {
+    ...span({ name: 'chat', spanId: 'h', start: 0, dur: 1, attrs: { 'invocation.id': INV, 'gen_ai.system': 'anthropic', 'url.full': 'https://api.anthropic.com/v1/messages' } }),
+    events: [
+      {
+        name: 'http.request.headers',
+        attributes: kv({
+          'http.request.header.:authority': 'api.anthropic.com',
+          'http.request.header.content-type': 'application/json',
+          'http.request.header.authorization': '[redacted]',
+        }),
+      },
+      {
+        name: 'http.response.headers',
+        attributes: kv({
+          'http.response.header.:status': '200',
+          'http.response.header.content-type': 'application/json',
+        }),
+      },
+    ],
+  }
+  const s = flattenSpans(traces([withHeaders]))[0]!
+
+  it('reads request/response headers off the events, dropping the prefix and keeping pseudo-headers', () => {
+    expect(s.reqHeaders).toEqual({
+      ':authority': 'api.anthropic.com',
+      'content-type': 'application/json',
+      authorization: '[redacted]',
+    })
+    expect(s.respHeaders).toEqual({ ':status': '200', 'content-type': 'application/json' })
+  })
+
+  it('surfaces url.full as the span url', () => {
+    expect(s.url).toBe('https://api.anthropic.com/v1/messages')
+  })
+
+  it('keeps the header values out of the span attribute map', () => {
+    expect(s.attrs['http.request.header.authorization']).toBeUndefined()
+  })
+
+  it('leaves headers undefined when a span carries no header events', () => {
+    const plain = flattenSpans(traces([span({ name: 'chat', spanId: 'z', start: 0, dur: 1, attrs: {} })]))[0]!
+    expect(plain.reqHeaders).toBeUndefined()
+    expect(plain.respHeaders).toBeUndefined()
   })
 })
 

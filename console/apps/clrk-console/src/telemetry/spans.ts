@@ -75,6 +75,13 @@ export interface Span {
    *  backend emitted gen_ai.response.content. Readable counterpart to the
    *  raw SSE frames in respBody. */
   respContent?: string
+  /** Full request URL (url.full), when captured. */
+  url?: string
+  /** Captured HTTP request headers (http.request.headers event); lowercased
+   *  names, sensitive values already `[redacted]` at the sink. */
+  reqHeaders?: Record<string, string>
+  /** Captured HTTP response headers (http.response.headers event). */
+  respHeaders?: Record<string, string>
 }
 
 /** An invocation span carries its start offset from the invocation root. */
@@ -187,6 +194,42 @@ function bodyEvents(events?: OtlpSpan['events']): { req?: SpanBody; resp?: SpanB
   return out
 }
 
+/**
+ * Extract captured HTTP headers from a span's events. Like body capture, the
+ * ext_proc sink emits them as `http.request.headers` / `http.response.headers`
+ * events with each header a distinct event attribute keyed
+ * `http.request.header.<name>` / `http.response.header.<name>` (lowercased,
+ * HTTP/2 pseudo-headers like `:authority` included, sensitive values already
+ * `[redacted]`). They never reach the span's plain attribute map, so the
+ * inspector reads the events directly.
+ */
+function headerEvents(events?: OtlpSpan['events']): {
+  req?: Record<string, string>
+  resp?: Record<string, string>
+} {
+  const out: { req?: Record<string, string>; resp?: Record<string, string> } = {}
+  for (const ev of events ?? []) {
+    let prefix: string
+    let slot: 'req' | 'resp'
+    if (ev.name === 'http.request.headers') {
+      prefix = 'http.request.header.'
+      slot = 'req'
+    } else if (ev.name === 'http.response.headers') {
+      prefix = 'http.response.header.'
+      slot = 'resp'
+    } else {
+      continue
+    }
+    const ea = attrMap(ev.attributes)
+    const hdrs: Record<string, string> = {}
+    for (const k of Object.keys(ea)) {
+      if (k.startsWith(prefix)) hdrs[k.slice(prefix.length)] = ea[k] ?? ''
+    }
+    if (Object.keys(hdrs).length > 0) out[slot] = hdrs
+  }
+  return out
+}
+
 /** Flatten an OTLP TracesData into classified spans (newest-first not guaranteed). */
 export function flattenSpans(data?: OtlpTracesData): Span[] {
   const out: Span[] = []
@@ -208,6 +251,7 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
         const ok = !errored && statusCode < 400
         const host = hostOf(a)
         const bodies = bodyEvents(sp.events)
+        const headers = headerEvents(sp.events)
         // Derive the HTTP method/path once -- the label and the inspector's
         // dedicated path/method fields read the same OTLP attribute pair.
         const httpMethod = a['http.request.method'] ?? a['http.method']
@@ -244,6 +288,9 @@ export function flattenSpans(data?: OtlpTracesData): Span[] {
           reqBody: bodies.req,
           respBody: bodies.resp,
           respContent: a['gen_ai.response.content'],
+          url: a['url.full'],
+          reqHeaders: headers.req,
+          respHeaders: headers.resp,
         })
       }
     }
