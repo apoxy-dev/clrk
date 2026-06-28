@@ -4216,6 +4216,12 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
   "metrics.apoxy.dev/v1alpha1/DaemonAgentMetrics": {
     "type": "object"
   },
+  "metrics.apoxy.dev/v1alpha1/Metric": {
+    "type": "object"
+  },
+  "metrics.apoxy.dev/v1alpha1/MetricSeriesSet": {
+    "type": "object"
+  },
   "metrics.apoxy.dev/v1alpha1/TaskAgentMetrics": {
     "type": "object"
   }

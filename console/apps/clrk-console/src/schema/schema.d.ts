@@ -1391,6 +1391,97 @@ export interface components {
             /** @default {} */
             metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
         };
+        /** @description Metric is one entry of the Tier-2 catalog: a named aggregation recipe over the otel_traces / otel_logs spans, with the dimensions it may be grouped by. Its Name is the stable metric id (e.g. "gen_ai.tokens") used as the path element of the series subresource. The catalog is the LIST of this resource, so the console renders its metric menus, units, and legends from a typed object instead of hardcoded JS, and `kubectl get metrics` prints it. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.Metric": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description DefaultGroupBy is the dimension the console selects by default. */
+            defaultGroupBy?: string;
+            /** @description Description is a one-line human summary. */
+            description?: string;
+            /** @description GroupBy is the set of dimension keys this metric may be grouped by (the chart legends). One is passed as ?groupBy on the series subresource. */
+            groupBy?: string[];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @description Legend is a short human label for the default dimension. */
+            legend?: string;
+            /** @description Measures are the named sub-values a single point carries when a metric reports more than one (e.g. gen_ai.tokens -> input/output). Each becomes a "measure" label on its series. Empty for single-valued metrics. */
+            measures?: string[];
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            /**
+             * @description Source is the backing table the recipe scans: "traces" or "logs".
+             * @default
+             */
+            source: string;
+            /**
+             * @description Type is Counter, Gauge, or Histogram. A histogram is queried with ?quantiles and returns one series per (group x quantile).
+             * @default
+             */
+            type: string;
+            /**
+             * @description Unit is the value unit ("tokens", "requests", "bytes", "ms", ...).
+             * @default
+             */
+            unit: string;
+        };
+        /** @description MetricList is the catalog: the full set of queryable metrics. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricList": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            items: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.Metric"][];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
+        };
+        /** @description MetricPoint is one sample. Timestamp is the bucket start on a range query and the window end on a scalar query. Value is a resource.Quantity (the same exact decimal wire type the Tier-1 UsageList uses), so an integer counter total stays exact regardless of the client's JSON number precision. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricPoint": {
+            timestamp: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            value: components["schemas"]["io.k8s.apimachinery.pkg.api.resource.Quantity"];
+        };
+        /** @description MetricSeries is one labeled line/area: the group value (under the groupBy key) plus a "measure" or "quantile" label when the metric carries several. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricSeries": {
+            labels?: {
+                [key: string]: string;
+            };
+            points: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricPoint"][];
+        };
+        /** @description MetricSeriesSet is the result of a metric series query: one labeled series per (group value x measure/quantile), each carrying one point (scalar) or a point per time bucket (range). It is returned through content negotiation by the `series` connect subresource, so a client gets a typed object in json, yaml, or protobuf per its Accept header. Its Name echoes the metric id. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricSeriesSet": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description GroupBy echoes the grouping dimension, when one was requested. */
+            groupBy?: string;
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            /**
+             * @description Metric echoes the queried metric id.
+             * @default
+             */
+            metric: string;
+            /** @description Series is the labeled lines. A query with no groupBy and a single measure returns exactly one series with empty labels. */
+            series: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.MetricSeries"][];
+            /** @description Since / Until are the resolved half-open [since, until) window bounds. */
+            since: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /** @description Step is the bucket width on a range query; nil on a scalar query. */
+            step?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Duration"];
+            /** @description Truncated is set when the distinct group count exceeded the per-query series cap and only the top groups (by total value) were returned. */
+            truncated?: boolean;
+            /**
+             * @description Type echoes the metric type.
+             * @default
+             */
+            type: string;
+            /**
+             * @description Unit echoes the metric unit.
+             * @default
+             */
+            unit: string;
+            until: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+        };
         /** @description TaskAgentMetrics is a point-in-time rollup of one TaskAgent's activity over Window, derived by aggregating the agent's otel_traces spans. Its name and namespace match the TaskAgent it summarizes, so a list of these is the agents page in a single call. */
         "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.TaskAgentMetrics": {
             /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
@@ -7383,20 +7474,6 @@ export interface components {
          * @description BackendRef defines how a Route should forward a request to a Kubernetes resource.
          *
          *     Note that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
-         *
-         *     <gateway:experimental:description>
-         *
-         *     When the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.
-         *
-         *     Implementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.
-         *
-         *     If a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.
-         *
-         *     If a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the "ResolvedRefs" condition to "False" with the "UnsupportedProtocol" reason.
-         *
-         *     </gateway:experimental:description>
-         *
-         *     Note that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.
          */
         "io.k8s.sigs.gateway-api.apis.v1.BackendRef": {
             /** @description Group is the group of the referent. For example, "gateway.networking.k8s.io". When unspecified or empty string, core API group is inferred. */
@@ -9446,11 +9523,9 @@ export interface components {
             namespace?: string;
         };
         /**
-         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with "Core" support:
+         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with "Core" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.
          *
-         *     * Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)
-         *
-         *     This API may be extended in the future to support additional kinds of parent resources.
+         *     Note that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.
          *
          *     The API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.
          */
