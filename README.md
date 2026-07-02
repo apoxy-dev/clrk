@@ -17,7 +17,7 @@ tool calls without the agent code being aware of it. Yes, that includes TLS-encr
 The agent inside can be anything that makes HTTP(S) calls - a Python script using the OpenAI or
 Anthropic SDK, a Node MCP client, a shell one-liner. There is no required agent library; CLRK
 intercepts at the network and process boundary. See [`_examples/`](_examples) for runnable agents
-(`openai-bot`, `gemini-bot`, `cron-bot`, `jq-bot`, MITM variants, ...).
+(`openai-bot`, `gemini-bot`, `cron-bot`, `jq-bot`, MITM variants, and more).
 
 ## Motivation
 
@@ -31,7 +31,7 @@ orchestration does not solve on its own. CLRK is built to address them directly:
   (where an agent may connect, what credentials it may use) at the egress boundary.
 - **Attribution.** Tie agent loops back to the customer request or trigger that
   started them, captured as first-class `Invocation` records.
-- **Connectivity.** Give agents audited, authorized access to internal services
+- **Zero-Trust Access.** Give agents audited, authorized access to internal services
   instead of all-or-nothing network access.
 - **Scalability.** One model for both serverless bursts and long-lived "on-prem"
   Kubernetes fleets.
@@ -50,7 +50,7 @@ CLRK ships two long-running binaries plus a CLI:
 - **`cmd/controller-manager`** - the control plane. Runs the
   controller-runtime reconcilers for the CRDs below and embeds an aggregated API
   server for the `clrk.apoxy.dev` group. Deployed as a Deployment on Kubernetes but
-  can be run standalone.
+  can be run standalone. It also hosts UI dashboard.
 
 - **`cmd/worker`** - Manages sandbox lifecycle via [gVisor](https://gvisor.dev)/`runsc`,
   sets up per-sandbox network interception via our custom [sentrystack plugin](https://pkg.go.dev/gvisor.dev/gvisor/pkg/sentry/socket/plugin/stack) to be
@@ -106,14 +106,15 @@ restart policy.
 ### Does my agent need to use a specific framework or SDK?
 
 No. CLRK intercepts at the network and process boundary, so any agent that makes
-HTTP/TLS calls works. The provided examples use the OpenAI and Gemini SDKs, plain
+HTTP/S calls works. The provided examples use the OpenAI and Gemini SDKs, plain
 shell tools, and MCP clients.
 
 ### Where do API keys live?
 
 Not in the agent. Credentials are injected by the egress MITM at request time via a
 credential-injection policy - never in pod env, mounts, or args. A compromised
-sandbox has no secrets to leak.
+sandbox has no secrets to leak. The secret material iself is safe and sound in a
+Kubernetes Secret.
 
 ### How is the sandbox isolated?
 
