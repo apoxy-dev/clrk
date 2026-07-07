@@ -14,7 +14,7 @@ import {
   type K8sObject,
   type ResourceEntry,
 } from '@apoxy/console-core'
-import { Activity, Bot, Gateway, Layers, Security } from '@carbon/icons-react'
+import { Activity, Bot, Gateway, Layers, Notification, Security } from '@carbon/icons-react'
 import type { ReactNode } from 'react'
 import { schemaFor } from './schema/schema-for'
 import { EgressGatewayWizard } from './views/egress-gateway-wizard'
@@ -76,6 +76,8 @@ const egressIcon = <Gateway size={16} />
 // Policies use Carbon's Security (shield) glyph, the icon the design's rail
 // picked for the combined Policies item.
 const policyIcon = <Security size={16} />
+// Notifications use Carbon's Notification (bell) glyph, matching the topbar bell.
+const notificationIcon = <Notification size={16} />
 
 const nameCol = {
   id: 'name',
@@ -238,6 +240,24 @@ export const registry = createRegistry([
     // Invocations are system-written and immutable from clients (create/update
     // return 405), so the kind is read-only: no YAML edit, no "New".
     columns: [nameCol, statusCol, triggerCol, parentCol, createdCol],
+  }),
+  // Notifications surface as a bespoke page: `_shell.notifications` shadows the
+  // generic splat for `/notifications` (the gate + Notification Center over real
+  // events.k8s.io/v1 Events), so the generic `columns`/gvr below only feed the
+  // rail item, breadcrumb, and ⌘K "Go to". The rail item is always visible; the
+  // signup gate lives inside the page so a new user can navigate in and sign up.
+  // Read-only: Events are system-written (no YAML edit, no "New").
+  defineResource<Phased>({
+    kind: 'Notification',
+    displayName: 'Notifications',
+    group: 'events.k8s.io',
+    resource: 'events',
+    servedVersion: 'v1',
+    sidebarGroup: 'Observe',
+    path: 'notifications',
+    icon: notificationIcon,
+    shortcut: 'n',
+    columns: [nameCol],
   }),
 ])
 

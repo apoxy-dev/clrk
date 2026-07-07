@@ -45,11 +45,11 @@ import {
   Dashboard,
   Document,
   Light,
-  Notification,
   SidePanelClose,
   SidePanelOpen,
 } from '@carbon/icons-react'
 import { registry, daemonAgentEntry } from '../registry'
+import { NotificationBell } from '../views/notification-bell'
 import { POLICY_RESOURCE, POLICY_SHORT, type PolicyKind } from '../views/policies-data'
 import wordmark from '../assets/apoxy-wordmark.svg'
 import { RouterLink } from '../router-link'
@@ -325,9 +325,7 @@ function ShellBody() {
                   {DocsIcon}
                 </IconButton>
                 <ThemeToggle />
-                <IconButton label="Notifications" badge>
-                  {BellIcon}
-                </IconButton>
+                <NotificationBell />
               </>
             }
           />
@@ -368,7 +366,6 @@ function Brand() {
 const SunIcon = <Light size={16} />
 const MoonIcon = <Asleep size={16} />
 const DocsIcon = <Document size={16} />
-const BellIcon = <Notification size={16} />
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(readTheme)

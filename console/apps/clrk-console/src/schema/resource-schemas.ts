@@ -455,6 +455,47 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
     },
     "type": "object"
   },
+  "clrk.apoxy.dev/v1alpha1/CLRKConfig": {
+    "$defs": {
+      "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigSpec": {
+        "properties": {
+          "notifications": {
+            "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsConfig"
+          }
+        },
+        "type": "object"
+      },
+      "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsConfig": {
+        "properties": {
+          "advisoryPollEnabled": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": "string"
+          },
+          "eventRetention": {
+            "$ref": "io.k8s.apimachinery.pkg.apis.meta.v1.Duration"
+          },
+          "signedUpAt": {
+            "$ref": "io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+          }
+        },
+        "type": "object"
+      },
+      "io.k8s.apimachinery.pkg.apis.meta.v1.Duration": {
+        "type": "string"
+      },
+      "io.k8s.apimachinery.pkg.apis.meta.v1.Time": {
+        "type": "string"
+      }
+    },
+    "properties": {
+      "spec": {
+        "$ref": "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigSpec"
+      }
+    },
+    "type": "object"
+  },
   "clrk.apoxy.dev/v1alpha1/CredentialInjectionPolicy": {
     "$defs": {
       "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionSpec": {

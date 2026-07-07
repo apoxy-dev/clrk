@@ -282,6 +282,45 @@ export interface components {
              */
             jsonPath: string;
         };
+        /** @description CLRKConfig is the install-wide singleton configuration object. Exactly one object, named "default", lives in the clrk system namespace. It is the home for cross-cutting settings; the Notifications feature is one section (spec.notifications), and future settings live beside it. The spec is browser-writable (the console's signup gate sets spec.notifications.email); the status is controller-written (phone-home registration health). The registration token itself is never here -- it lives in a core/v1 Secret the browser cannot reach, referenced from status.notifications. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfig": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            /** @default {} */
+            spec: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigSpec"];
+            /** @default {} */
+            status: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigStatus"];
+        };
+        /** @description CLRKConfigList contains a list of CLRKConfig resources. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigList": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            items: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfig"][];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
+        };
+        /** @description CLRKConfigSpec holds the install-wide configuration sections. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigSpec": {
+            /**
+             * @description Notifications configures the Notification Center + phone-home feature.
+             * @default {}
+             */
+            notifications: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsConfig"];
+        };
+        /** @description CLRKConfigStatus is the controller-written status. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CLRKConfigStatus": {
+            /**
+             * @description Notifications carries the phone-home registration + health.
+             * @default {}
+             */
+            notifications: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsStatus"];
+        };
         "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.CredentialInjectionPolicy": {
             /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
             apiVersion?: string;
@@ -978,6 +1017,47 @@ export interface components {
              */
             to: string;
         };
+        /** @description NotificationsConfig is the browser-writable notifications settings. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsConfig": {
+            /** @description AdvisoryPollEnabled opts into INBOUND security-advisory polling from api.apoxy.dev. Defaults true on signup. */
+            advisoryPollEnabled?: boolean;
+            /** @description Email captured by the console signup gate. Empty => the feature is inert (no notifications recorded to phone home, no registration). */
+            email?: string;
+            /** @description EventRetention is the retention window for events.k8s.io/v1 notification Events in the embedded apiserver; older Events are pruned. Unset falls back to the controller-manager's --notifications-event-retention flag. */
+            eventRetention?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Duration"];
+            /** @description SignedUpAt is stamped by the defaulter when Email is first set. */
+            signedUpAt?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+        };
+        /** @description NotificationsStatus reflects the phone-home lifecycle. The registration token is NOT here (it lives in a core/v1 Secret); only the browser-safe reference and non-secret correlation fields are. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.NotificationsStatus": {
+            /**
+             * Format: int64
+             * @description AdvisoryPollIntervalSeconds is the server-driven advisory poll cadence returned at registration. Persisted so it survives restarts (the poller reverts to the flag default if unset).
+             */
+            advisoryPollIntervalSeconds?: number;
+            /** @description Conditions: Registered, PhoneHomeHealthy, AdvisorySyncHealthy. */
+            conditions?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Condition"][];
+            /** @description DeploymentID is the non-secret correlation id api.apoxy.dev returns at registration. Safe to surface in the console. */
+            deploymentID?: string;
+            lastAdvisorySync?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            lastReportAt?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /**
+             * Format: int64
+             * @description ObservedGeneration is the spec generation this status reflects.
+             */
+            observedGeneration?: number;
+            /** @description RegisteredAt / LastAdvisorySync / LastReportAt for the health panel. */
+            registeredAt?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /** @description RegisteredEmail is the spec.notifications.email that produced the current registration. The controller compares it to the live spec email to detect a changed signup and re-register (metadata.generation is unreliable in this apiserver). Not secret -- it is already the browser-writable spec email. */
+            registeredEmail?: string;
+            /** @description RegistrationTokenSecretRef points at the Secret holding the phone-home bearer token. The console sees the reference but cannot fetch the Secret (core/v1 is not proxied by the embedded apiserver). */
+            registrationTokenSecretRef?: components["schemas"]["com.github.apoxy-dev.clrk.api.clrk.v1alpha1.SecretKeyReference"];
+            /**
+             * Format: int64
+             * @description ReportsDropped counts security reports dropped under queue backpressure.
+             */
+            reportsDropped?: number;
+        };
         /** @description OTLPLogsSinkSpec configures where the controller-manager re-exports captured signals to and how much of each request/response body is captured. The controller-manager always persists captured signals to its embedded ClickHouse regardless of this field; Endpoint only adds a best-effort fan-out copy to an external collector. */
         "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.OTLPLogsSinkSpec": {
             /** @description CaptureBody bounds the request/response body bytes captured by ext_proc and emitted as OTLP log records. Defaults: 64KiB per direction; capture application/json, application/x-ndjson, text/event-stream. */
@@ -1028,6 +1108,15 @@ export interface components {
             scope?: string;
             /** @default  */
             window: string;
+        };
+        /** @description SecretKeyReference names a key within a Secret in a namespace. */
+        "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.SecretKeyReference": {
+            /** @default  */
+            key: string;
+            /** @default  */
+            name: string;
+            /** @default  */
+            namespace: string;
         };
         /** @description TaskAgent defines a triggered agent workload — HTTP or cron, runs to completion, exits. Executions are multiplexed across shared worker pods managed by WorkerPool. */
         "com.github.apoxy-dev.clrk.api.clrk.v1alpha1.TaskAgent": {
@@ -6468,6 +6557,80 @@ export interface components {
             /** @description The UserName in Windows to run the entrypoint of the container process. Defaults to the user specified in image metadata if unspecified. May also be set in PodSecurityContext. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence. */
             runAsUserName?: string;
         };
+        /** @description Event is a report of an event somewhere in the cluster. It generally denotes some state change in the system. Events have a limited retention time and triggers and messages may evolve with time.  Event consumers should not rely on the timing of an event with a given Reason reflecting a consistent underlying trigger, or the continued existence of events with that Reason.  Events should be treated as informative, best-effort, supplemental data. */
+        "io.k8s.api.events.v1.Event": {
+            /** @description action is what action was taken/failed regarding to the regarding object. It is machine-readable. This field cannot be empty for new Events and it can have at most 128 characters. */
+            action?: string;
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /**
+             * Format: int32
+             * @description deprecatedCount is the deprecated field assuring backward compatibility with core.v1 Event type.
+             */
+            deprecatedCount?: number;
+            /** @description deprecatedFirstTimestamp is the deprecated field assuring backward compatibility with core.v1 Event type. */
+            deprecatedFirstTimestamp?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /** @description deprecatedLastTimestamp is the deprecated field assuring backward compatibility with core.v1 Event type. */
+            deprecatedLastTimestamp?: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /**
+             * @description deprecatedSource is the deprecated field assuring backward compatibility with core.v1 Event type.
+             * @default {}
+             */
+            deprecatedSource: components["schemas"]["io.k8s.api.core.v1.EventSource"];
+            /** @description eventTime is the time when this Event was first observed. It is required. */
+            eventTime: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime"];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /**
+             * @description Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+             * @default {}
+             */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            /** @description note is a human-readable description of the status of this operation. Maximal length of the note is 1kB, but libraries should be prepared to handle values up to 64kB. */
+            note?: string;
+            /** @description reason is why the action was taken. It is human-readable. This field cannot be empty for new Events and it can have at most 128 characters. */
+            reason?: string;
+            /**
+             * @description regarding contains the object this Event is about. In most cases it's an Object reporting controller implements, e.g. ReplicaSetController implements ReplicaSets and this event is emitted because it acts on some changes in a ReplicaSet object.
+             * @default {}
+             */
+            regarding: components["schemas"]["io.k8s.api.core.v1.ObjectReference"];
+            /** @description related is the optional secondary object for more complex actions. E.g. when regarding object triggers a creation or deletion of related object. */
+            related?: components["schemas"]["io.k8s.api.core.v1.ObjectReference"];
+            /** @description reportingController is the name of the controller that emitted this Event, e.g. `kubernetes.io/kubelet`. This field cannot be empty for new Events. */
+            reportingController?: string;
+            /** @description reportingInstance is the ID of the controller instance, e.g. `kubelet-xyzf`. This field cannot be empty for new Events and it can have at most 128 characters. */
+            reportingInstance?: string;
+            /** @description series is data about the Event series this event represents or nil if it's a singleton Event. */
+            series?: components["schemas"]["io.k8s.api.events.v1.EventSeries"];
+            /** @description type is the type of this event (Normal, Warning), new types could be added in the future. It is machine-readable. This field cannot be empty for new Events. */
+            type?: string;
+        };
+        /** @description EventList is a list of Event objects. */
+        "io.k8s.api.events.v1.EventList": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description items is a list of schema objects. */
+            items: components["schemas"]["io.k8s.api.events.v1.Event"][];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /**
+             * @description Standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+             * @default {}
+             */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
+        };
+        /** @description EventSeries contain information on series of events, i.e. thing that was/is happening continuously for some time. How often to update the EventSeries is up to the event reporters. The default event reporter in "k8s.io/client-go/tools/events/event_broadcaster.go" shows how this struct is updated on heartbeats and can guide customized reporter implementations. */
+        "io.k8s.api.events.v1.EventSeries": {
+            /**
+             * Format: int32
+             * @description count is the number of occurrences in this series up to the last heartbeat time.
+             * @default 0
+             */
+            count: number;
+            /** @description lastObservedTime is the time when last Event from the series was seen before last heartbeat. */
+            lastObservedTime: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.MicroTime"];
+        };
         /**
          * @description Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.
          *
@@ -7474,6 +7637,20 @@ export interface components {
          * @description BackendRef defines how a Route should forward a request to a Kubernetes resource.
          *
          *     Note that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
+         *
+         *     <gateway:experimental:description>
+         *
+         *     When the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.
+         *
+         *     Implementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.
+         *
+         *     If a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.
+         *
+         *     If a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the "ResolvedRefs" condition to "False" with the "UnsupportedProtocol" reason.
+         *
+         *     </gateway:experimental:description>
+         *
+         *     Note that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.
          */
         "io.k8s.sigs.gateway-api.apis.v1.BackendRef": {
             /** @description Group is the group of the referent. For example, "gateway.networking.k8s.io". When unspecified or empty string, core API group is inferred. */
@@ -9523,9 +9700,11 @@ export interface components {
             namespace?: string;
         };
         /**
-         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with "Core" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.
+         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with "Core" support:
          *
-         *     Note that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.
+         *     * Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)
+         *
+         *     This API may be extended in the future to support additional kinds of parent resources.
          *
          *     The API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.
          */

@@ -2611,3 +2611,811 @@
 [data-theme="dark"] .ovw-attn-chip:hover {
   border-color: var(--text-primary);
 }
+
+/* ==========================================================================
+   Notification Center
+   Ported from the CLRK UI design mock (Notification Center.html). Popover bell
+   tray (triage) + full-page inbox, in the Apoxy paper/ink vocabulary: square
+   corners, warm surfaces, single blue accent, coral/amber/leaf reserved for
+   severity. --tone / --tone-tint are set per row from the notification's
+   severity (see notification-visual.tsx).
+   ========================================================================== */
+
+/* ---- Bell anchor + scrim + popover --------------------------------------- */
+.notif-bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.nc-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 299;
+}
+.nc-pop {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: -6px;
+  width: 388px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  max-height: min(600px, 78vh);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--sh-3);
+  transform-origin: top right;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .nc-pop {
+    animation: nc-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+@keyframes nc-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.nc-caret {
+  position: absolute;
+  top: -6px;
+  right: 20px;
+  width: 11px;
+  height: 11px;
+  background: var(--surface-card);
+  border-left: 1px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
+  transform: rotate(45deg);
+}
+
+/* ---- Popover header ------------------------------------------------------ */
+.nc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 13px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex: none;
+}
+.nc-head-l {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.nc-h-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.nc-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+  letter-spacing: 0.02em;
+}
+[data-theme="dark"] .nc-count {
+  background: var(--apx-bone);
+  color: var(--apx-ink);
+}
+.nc-count.is-zero {
+  background: var(--apx-mist);
+  color: var(--text-muted);
+}
+.nc-markall {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 2px;
+  white-space: nowrap;
+}
+.nc-markall svg {
+  width: 13px;
+  height: 13px;
+}
+.nc-markall:hover {
+  color: var(--text-link-hover);
+}
+.nc-markall:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- List ---------------------------------------------------------------- */
+.nc-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.nc-list::-webkit-scrollbar {
+  width: 10px;
+}
+.nc-list::-webkit-scrollbar-thumb {
+  background: var(--apx-fog);
+  border: 3px solid var(--surface-card);
+}
+
+.nc-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 12px;
+  padding: 13px 16px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.nc-item:last-child {
+  border-bottom: 0;
+}
+.nc-item:hover {
+  background: var(--apx-bone);
+}
+.nc-item:focus-visible {
+  outline: none;
+  background: var(--apx-bone);
+  box-shadow: inset 0 0 0 2px var(--tone);
+}
+.nc-item.is-unread {
+  background: color-mix(in srgb, var(--tone) 5%, var(--surface-card));
+}
+.nc-item.is-unread::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tone);
+}
+.nc-item.is-read {
+  background: var(--surface-card);
+}
+.nc-item.is-read:hover {
+  background: var(--apx-bone);
+}
+.nc-item.is-read .nc-ico {
+  opacity: 0.55;
+}
+.nc-item.is-read .nc-title {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.nc-item.is-selected {
+  background: var(--apx-bone);
+}
+.nc-item.is-selected::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--tone);
+}
+
+.nc-ico {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tone-tint);
+  color: var(--tone);
+}
+.nc-ico svg {
+  width: 16px;
+  height: 16px;
+}
+
+.nc-body {
+  min-width: 0;
+}
+.nc-row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nc-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nc-time {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.nc-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--tone);
+  flex: none;
+}
+.nc-desc {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-top: 3px;
+}
+.nc-res {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  padding: 0 3px;
+  background: var(--surface-inset);
+}
+.nc-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.nc-cat {
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--tone);
+}
+.nc-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+/* ---- Action button (detail + gate) --------------------------------------- */
+.nc-act {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 11px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.nc-act svg {
+  width: 12px;
+  height: 12px;
+}
+.nc-act:hover {
+  border-color: var(--apx-ink);
+}
+[data-theme="dark"] .nc-act:hover {
+  border-color: var(--apx-stone);
+}
+.nc-act--primary {
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+  border-color: var(--apx-ink);
+}
+.nc-act--primary:hover {
+  background: #000;
+}
+[data-theme="dark"] .nc-act--primary {
+  background: var(--apx-bone);
+  color: var(--apx-ink);
+  border-color: var(--apx-bone);
+}
+.nc-act--primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- Popover footer ------------------------------------------------------ */
+.nc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border-subtle);
+  flex: none;
+  background: var(--surface-card);
+}
+.nc-foot a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-link);
+  text-decoration: none;
+}
+.nc-foot a svg {
+  width: 13px;
+  height: 13px;
+}
+.nc-foot a:hover {
+  color: var(--text-link-hover);
+}
+.nc-foot .nc-settings {
+  color: var(--text-muted);
+  display: inline-flex;
+  padding: 4px;
+}
+.nc-foot .nc-settings svg {
+  width: 15px;
+  height: 15px;
+}
+.nc-foot .nc-settings:hover {
+  color: var(--text-primary);
+}
+
+/* ---- Empty / all-caught-up ----------------------------------------------- */
+.nc-empty {
+  padding: 52px 28px 56px;
+  text-align: center;
+}
+.nc-empty .ring {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 16px;
+  border: 1.5px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.nc-empty .ring svg {
+  width: 20px;
+  height: 20px;
+}
+.nc-empty .t {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.nc-empty .s {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-top: 5px;
+}
+
+/* ---- Tabs + day group headers -------------------------------------------- */
+.nc-tabs {
+  display: flex;
+  gap: 20px;
+  padding: 2px 16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  flex: none;
+}
+.nc-tab {
+  position: relative;
+  padding: 10px 1px 11px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.nc-tab:hover {
+  color: var(--text-secondary);
+}
+.nc-tab.is-active {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-bottom-color: var(--apx-ink);
+}
+[data-theme="dark"] .nc-tab.is-active {
+  border-bottom-color: var(--apx-bone);
+}
+.nc-tab .n {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  background: var(--surface-inset);
+  color: var(--text-muted);
+}
+.nc-tab.is-active .n {
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+}
+[data-theme="dark"] .nc-tab.is-active .n {
+  background: var(--apx-bone);
+  color: var(--apx-ink);
+}
+
+.nc-group {
+  padding: 11px 16px 7px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-subtle);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.nc-group .gn {
+  font-family: var(--font-mono);
+  margin-left: 6px;
+  letter-spacing: 0;
+  color: var(--apx-stone);
+}
+
+/* ---- Full-page inbox ----------------------------------------------------- */
+.inbox-panel {
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  margin-top: 4px;
+}
+.inbox-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-right: 12px;
+}
+.inbox-toolbar .nc-tabs {
+  border-bottom: 0;
+}
+.inbox-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-default);
+  background: var(--apx-bone);
+  color: var(--text-muted);
+}
+.inbox-search svg {
+  width: 14px;
+  height: 14px;
+}
+.inbox-search input {
+  border: 0;
+  background: none;
+  outline: none;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-primary);
+  width: 150px;
+}
+.inbox-list .nc-item {
+  padding-left: 18px;
+  padding-right: 18px;
+}
+.inbox-list .nc-group {
+  padding-left: 18px;
+  /* On the full page the scroller is the shell <main>, not .nc-list, so a
+     sticky header would bind to a non-scrolling ancestor and never pin. Keep
+     the inbox day headers static (sticky still applies inside the popover). */
+  position: static;
+}
+
+/* ---- Detail tray inner (reuses .attrs-tray shell) ------------------------ */
+.notif-detail .attrs-tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.notif-detail-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.notif-detail-id .nc-ico {
+  width: 30px;
+  height: 30px;
+}
+.notif-detail-reason {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.notif-detail-sub {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--tone);
+  font-weight: 700;
+  margin-top: 2px;
+}
+.notif-detail-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin: 14px 0 6px;
+  color: var(--text-primary);
+}
+.notif-detail-msg {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.notif-detail-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 18px 0;
+  font-size: 13px;
+}
+.notif-detail-dl dt {
+  color: var(--text-muted);
+}
+.notif-detail-dl dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.notif-detail-goto {
+  margin-top: 4px;
+}
+
+.notif-security-ind {
+  margin-left: 10px;
+  font-size: var(--fs-meta);
+  font-family: var(--font-mono);
+}
+.notif-security-ind.is-ok {
+  color: var(--apx-leaf);
+}
+.notif-security-ind.is-warn {
+  color: var(--apx-amber);
+}
+.notif-error {
+  color: var(--apx-coral);
+  font-size: var(--fs-meta);
+  margin: 0;
+}
+
+/* ---- Signed-out popover gate (redacted triage teaser + veil) -------------
+   Ported from the design mock's SignedOutPanel. Scoped under .nc-pop so the
+   shared .nc-gate / .nc-gate-card / .nc-gate-title names don't collide with the
+   full-page signup gate below (each fully resets the inherited full-page
+   props). clrk has no auth/SSO -- the single CTA sets up the email signup. */
+.nc-pop .nc-gate {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  padding: 0;
+}
+.nc-pop .nc-gate-teaser {
+  pointer-events: none;
+  user-select: none;
+  filter: blur(2.5px) saturate(0.65);
+  opacity: 0.5;
+}
+.nc-pop .nc-gate-teaser .nc-tabs {
+  border-bottom: 1px solid var(--border-subtle);
+}
+.nc-skel-row {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 12px;
+  padding: 13px 16px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.nc-skel-ico {
+  width: 30px;
+  height: 30px;
+  background: var(--surface-inset);
+}
+.nc-skel-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+.nc-skel-bar {
+  height: 9px;
+  background: var(--apx-fog);
+}
+.nc-skel-bar--dim {
+  background: var(--surface-inset);
+}
+.nc-gate-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px 28px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--surface-card) 42%, transparent) 0%,
+    color-mix(in srgb, var(--surface-card) 82%, transparent) 34%,
+    var(--surface-card) 62%
+  );
+}
+.nc-pop .nc-gate-card {
+  width: auto;
+  max-width: 292px;
+  text-align: center;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.nc-gate-ico {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 15px;
+  border: 1.5px solid var(--border-default);
+  background: var(--surface-card);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+.nc-gate-ico svg {
+  width: 22px;
+  height: 22px;
+}
+.nc-pop .nc-gate-title {
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--text-primary);
+}
+.nc-gate-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-top: 6px;
+}
+.nc-gate-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+.nc-gate-btn {
+  width: 100%;
+  justify-content: center;
+  padding: 9px 14px;
+  font-size: 13px;
+}
+.nc-gate-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- Signup gate (full page) --------------------------------------------- */
+.nc-gate {
+  display: flex;
+  justify-content: center;
+  padding: 48px 16px 80px;
+}
+.nc-gate-card {
+  width: 100%;
+  max-width: 520px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--sh-2);
+  padding: 32px 32px 28px;
+}
+.nc-gate-ring {
+  width: 46px;
+  height: 46px;
+  border: 1.5px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  margin-bottom: 18px;
+}
+.nc-gate-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: var(--t-h3);
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
+  color: var(--text-primary);
+}
+.nc-gate-lead {
+  font-size: var(--fs-body);
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin: 0 0 22px;
+}
+.nc-gate-feats {
+  list-style: none;
+  margin: 0 0 24px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.nc-gate-feats li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.nc-gate-feats .nc-ico {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tone-tint);
+  color: var(--tone);
+}
+.nc-gate-feats .ft {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.nc-gate-feats .fs {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  line-height: 1.4;
+}
+.nc-gate-form {
+  display: flex;
+  gap: 8px;
+}
+.nc-gate-input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--apx-bone);
+  border: 1px solid var(--border-default);
+}
+.nc-gate-input:focus {
+  outline: none;
+  border-color: var(--apx-ink);
+}
+[data-theme="dark"] .nc-gate-input:focus {
+  border-color: var(--apx-stone);
+}
+.nc-gate-submit {
+  padding: 9px 16px;
+  font-size: 13px;
+}
+.nc-gate-fine {
+  font-size: var(--fs-meta);
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 16px 0 0;
+}
