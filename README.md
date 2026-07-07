@@ -5,6 +5,8 @@ in a gVisor sandbox and transparently intercepts all egress - LLM APIs, MCP, too
 modifying agent code. That interception point gives you observability, policy enforcement, and
 routing-based cost control over agents you don't otherwise get to see inside.
 
+![CLRK egress control point](docs/clrk-egress-control-point.gif)
+
 ## How it works
 
 CLRK runs untrusted, framework-agnostic agent workloads in [gVisor](https://gvisor.dev/) sandboxes.
