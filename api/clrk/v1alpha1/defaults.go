@@ -158,3 +158,22 @@ func (r *Backend) Default() {
 		r.Spec.Type = BackendTypeUpstream
 	}
 }
+
+// Default stamps the load-bearing notifications defaults once the feature is in
+// use (email set): advisory polling defaults on, and SignedUpAt is stamped when
+// the email is first recorded. EventRetention is intentionally left unset so the
+// controller-manager's --notifications-event-retention flag is the fallback
+// (unstamped => no server-side-apply churn on the common case).
+func (c *CLRKConfig) Default() {
+	n := &c.Spec.Notifications
+	if n.Email == "" {
+		return
+	}
+	if n.AdvisoryPollEnabled == nil {
+		n.AdvisoryPollEnabled = ptr.To(true)
+	}
+	if n.SignedUpAt == nil {
+		now := metav1.Now()
+		n.SignedUpAt = &now
+	}
+}

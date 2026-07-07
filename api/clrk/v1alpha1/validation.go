@@ -824,3 +824,32 @@ func (r *EgressL4Route) ValidateUpdate(ctx context.Context, old runtime.Object) 
 	}
 	return r.Validate(ctx)
 }
+
+// clrkConfigEmailRe is a deliberately loose email shape check -- api.apoxy.dev
+// performs real email-ownership verification, so the submitted value is treated
+// as unverified here; this only rejects obvious garbage.
+var clrkConfigEmailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
+// Validate enforces the CLRKConfig singleton discipline: the only permitted
+// name is "default". Since the resource name is the primary key, name-pinning
+// makes at most one CLRKConfig per namespace possible (a pure per-object hook
+// cannot list-and-reject, which is why the singleton is a name pin, not a status
+// condition). A set email must look like an email.
+func (c *CLRKConfig) Validate(_ context.Context) field.ErrorList {
+	var errs field.ErrorList
+	if c.Name != CLRKConfigSingletonName {
+		errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), c.Name,
+			fmt.Sprintf("CLRKConfig is a singleton; the only permitted name is %q", CLRKConfigSingletonName)))
+	}
+	if email := c.Spec.Notifications.Email; email != "" && !clrkConfigEmailRe.MatchString(email) {
+		errs = append(errs, field.Invalid(field.NewPath("spec", "notifications", "email"), email,
+			"must be a valid email address"))
+	}
+	return errs
+}
+
+// ValidateUpdate re-runs the create validation (the name pin and email shape are
+// invariants, not transition rules).
+func (c *CLRKConfig) ValidateUpdate(ctx context.Context, _ runtime.Object) field.ErrorList {
+	return c.Validate(ctx)
+}

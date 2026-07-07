@@ -539,6 +539,15 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 		)
 	}
 
+	// events.k8s.io/v1: the real Kubernetes Events API, served by the embedded
+	// apiserver and backed by the shared kine store (persistent + watchable).
+	// This is where control-plane notifications live -- the controllers and the
+	// data-plane security bridge record Events here via a client-go events
+	// broadcaster pointed at EmbeddedLoopbackConfig(), and the console lists and
+	// watches them. clrk owns Event GC (internal/notify.Pruner); this only serves
+	// them, on the embedded/loopback surface (never aggregated -- see WithEvents).
+	srvBuilder = srvBuilder.WithEvents(kineStore)
+
 	if o.disableAuth {
 		srvBuilder = srvBuilder.DisableAuthorization()
 	}
@@ -656,6 +665,16 @@ func newLoopbackConfig(hostPort string) *rest.Config {
 		TLSClientConfig: rest.TLSClientConfig{Insecure: true},
 		UserAgent:       "clrk-apiserver",
 	}
+}
+
+// EmbeddedLoopbackConfig returns a rest.Config for the embedded apiserver's
+// loopback endpoint. The notifications recorder and the advisory materializer
+// use it to read/write events.k8s.io/v1 Events against clrk's own apiserver --
+// never the customer cluster, whose built-in Events group an APIService cannot
+// override. Valid only after Start has brought the apiserver up (the caller
+// resolves it lazily, like the invoke/agentmetrics client seams).
+func (m *Manager) EmbeddedLoopbackConfig() *rest.Config {
+	return newLoopbackConfig(m.opts.loopbackHostPort())
 }
 
 // dialDeadline caps how long the background goroutine retries the CH

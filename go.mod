@@ -3,7 +3,7 @@ module github.com/apoxy-dev/clrk
 go 1.25.5
 
 require (
-	github.com/apoxy-dev/apoxy v0.20.1-0.20260621204753-14d2f79bfe15
+	github.com/apoxy-dev/apoxy v0.20.1-0.20260707190119-a30d1e9a4323
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
 	github.com/bytedance/sonic v1.15.1
 	github.com/charmbracelet/bubbles v0.21.0

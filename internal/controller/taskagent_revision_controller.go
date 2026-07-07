@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/notify"
 )
 
 // InvocationActiveCounter reports the number of non-terminal invocations
@@ -42,6 +43,10 @@ type TaskAgentRevisionReconciler struct {
 	// for the embedded-ClickHouse binary-layering rollout window, after
 	// which the fallback can be dropped.
 	ActiveExec InvocationActiveCounter
+
+	// Recorder emits rollout notifications (events.k8s.io/v1) on the
+	// RevisionReady False->True crossing. Nil-safe (tests / no-apiserver builds).
+	Recorder *notify.Recorder
 }
 
 // revisionWorkerSums fetches the named revision once and sums two per-worker
@@ -240,6 +245,18 @@ func (r *TaskAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	ta.Status.ObservedGeneration = ta.Generation
 	if err := r.Status().Patch(ctx, &ta, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+
+	// Notify once, on the RevisionReady False->True crossing (compare the
+	// pre-mutation snapshot to the just-persisted condition). Emitting after the
+	// successful patch avoids a phantom notification if the write failed.
+	if r.Recorder != nil && revisionReady.Status == metav1.ConditionTrue {
+		old := meta.FindStatusCondition(statusBase.Status.Conditions, condRevisionReady)
+		if old == nil || old.Status != metav1.ConditionTrue {
+			ta.TypeMeta = metav1.TypeMeta{Kind: "TaskAgent", APIVersion: clrkv1alpha1.SchemeGroupVersion.String()}
+			r.Recorder.Eventf(&ta, nil, notify.TypeNormal, notify.ReasonRevisionReady, notify.ActionRollout,
+				"Revision %s is ready", revName)
+		}
 	}
 
 	return ctrl.Result{}, nil

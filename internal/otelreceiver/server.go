@@ -14,11 +14,21 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
 	"github.com/apoxy-dev/clrk/internal/chwriter"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/otelforward"
 )
+
+// SecurityObserver observes decoded OTLP payloads for security-relevant signals
+// (egress denials/failures) so the control plane can turn them into
+// events.k8s.io/v1 notifications. The receiver calls it fire-and-forget after
+// its own enqueue, so an implementation must never block or panic. Satisfied by
+// *notify.EgressSecurityBridge.
+type SecurityObserver interface {
+	ObserveTraces(rs []*tracepb.ResourceSpans)
+}
 
 // Server is cm's OTLP/HTTP receiver. Inbound requests are decoded and
 // dispatched to chwriter (always), an unconditional dev sink (when
@@ -35,18 +45,21 @@ type Server struct {
 	// per-EG forwarder registry is empty). The Forwarder is owned by
 	// the caller — Server doesn't Close it on shutdown.
 	devSink *otelforward.Forwarder
+	// obs, when non-nil, is teed the decoded spans so the notifications
+	// security bridge can lift egress denials into Events. Nil disables it.
+	obs SecurityObserver
 
 	addr string
 }
 
 // Start binds an HTTP listener on addr and returns a running Server.
-// writer is required; forwards and devSink may be nil to disable
-// customer re-export and dev fan-out respectively.
-func Start(ctx context.Context, addr string, writer *chwriter.Writer, forwards *otelforward.Registry, devSink *otelforward.Forwarder) (*Server, error) {
+// writer is required; forwards, devSink, and obs may be nil to disable
+// customer re-export, dev fan-out, and the security-event tee respectively.
+func Start(ctx context.Context, addr string, writer *chwriter.Writer, forwards *otelforward.Registry, devSink *otelforward.Forwarder, obs SecurityObserver) (*Server, error) {
 	if writer == nil {
 		return nil, errors.New("writer is required")
 	}
-	s := &Server{writer: writer, forwards: forwards, devSink: devSink}
+	s := &Server{writer: writer, forwards: forwards, devSink: devSink, obs: obs}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/logs", s.handleLogs)
@@ -133,6 +146,9 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		}
 		if s.devSink != nil {
 			s.devSink.EnqueueTraces(body)
+		}
+		if s.obs != nil {
+			s.obs.ObserveTraces(msg.GetResourceSpans())
 		}
 	}
 	w.WriteHeader(http.StatusOK)

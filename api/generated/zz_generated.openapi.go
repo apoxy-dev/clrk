@@ -59,6 +59,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BackendUpstream":                     schema_clrk_api_clrk_v1alpha1_BackendUpstream(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyCaptureSpec":                     schema_clrk_api_clrk_v1alpha1_BodyCaptureSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.BodyExtractor":                       schema_clrk_api_clrk_v1alpha1_BodyExtractor(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfig":                          schema_clrk_api_clrk_v1alpha1_CLRKConfig(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigList":                      schema_clrk_api_clrk_v1alpha1_CLRKConfigList(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigSpec":                      schema_clrk_api_clrk_v1alpha1_CLRKConfigSpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigStatus":                    schema_clrk_api_clrk_v1alpha1_CLRKConfigStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicy":           schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyList":       schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CredentialInjectionPolicyStatus":     schema_clrk_api_clrk_v1alpha1_CredentialInjectionPolicyStatus(ref),
@@ -118,11 +122,14 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.MCPRouteSpec":                        schema_clrk_api_clrk_v1alpha1_MCPRouteSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.MCPRouteStatus":                      schema_clrk_api_clrk_v1alpha1_MCPRouteStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ModelRewrite":                        schema_clrk_api_clrk_v1alpha1_ModelRewrite(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsConfig":                 schema_clrk_api_clrk_v1alpha1_NotificationsConfig(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsStatus":                 schema_clrk_api_clrk_v1alpha1_NotificationsStatus(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.OTLPLogsSinkSpec":                    schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.ProviderAuthConfig":                  schema_clrk_api_clrk_v1alpha1_ProviderAuthConfig(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.RateLimitPolicy":                     schema_clrk_api_clrk_v1alpha1_RateLimitPolicy(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.RateLimitPolicyList":                 schema_clrk_api_clrk_v1alpha1_RateLimitPolicyList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.RateLimitSpec":                       schema_clrk_api_clrk_v1alpha1_RateLimitSpec(ref),
+		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.SecretKeyReference":                  schema_clrk_api_clrk_v1alpha1_SecretKeyReference(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.TaskAgent":                           schema_clrk_api_clrk_v1alpha1_TaskAgent(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.TaskAgentList":                       schema_clrk_api_clrk_v1alpha1_TaskAgentList(ref),
 		"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.TaskAgentSpec":                       schema_clrk_api_clrk_v1alpha1_TaskAgentSpec(ref),
@@ -387,6 +394,9 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"k8s.io/api/core/v1.VsphereVirtualDiskVolumeSource":                               schema_k8sio_api_core_v1_VsphereVirtualDiskVolumeSource(ref),
 		"k8s.io/api/core/v1.WeightedPodAffinityTerm":                                      schema_k8sio_api_core_v1_WeightedPodAffinityTerm(ref),
 		"k8s.io/api/core/v1.WindowsSecurityContextOptions":                                schema_k8sio_api_core_v1_WindowsSecurityContextOptions(ref),
+		"k8s.io/api/events/v1.Event":                                                      schema_k8sio_api_events_v1_Event(ref),
+		"k8s.io/api/events/v1.EventList":                                                  schema_k8sio_api_events_v1_EventList(ref),
+		"k8s.io/api/events/v1.EventSeries":                                                schema_k8sio_api_events_v1_EventSeries(ref),
 		"k8s.io/apimachinery/pkg/api/resource.Quantity":                                   schema_apimachinery_pkg_api_resource_Quantity(ref),
 		"k8s.io/apimachinery/pkg/api/resource.int64Amount":                                schema_apimachinery_pkg_api_resource_int64Amount(ref),
 		"k8s.io/apimachinery/pkg/apis/meta/v1.APIGroup":                                   schema_pkg_apis_meta_v1_APIGroup(ref),
@@ -1609,6 +1619,147 @@ func schema_clrk_api_clrk_v1alpha1_BodyExtractor(ref common.ReferenceCallback) c
 				Required: []string{"jsonPath", "field"},
 			},
 		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_CLRKConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CLRKConfig is the install-wide singleton configuration object. Exactly one object, named \"default\", lives in the clrk system namespace. It is the home for cross-cutting settings; the Notifications feature is one section (spec.notifications), and future settings live beside it. The spec is browser-writable (the console's signup gate sets spec.notifications.email); the status is controller-written (phone-home registration health). The registration token itself is never here -- it lives in a core/v1 Secret the browser cannot reach, referenced from status.notifications.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigStatus"),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigSpec", "github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfigStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_CLRKConfigList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CLRKConfigList contains a list of CLRKConfig resources.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfig"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.CLRKConfig", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_CLRKConfigSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CLRKConfigSpec holds the install-wide configuration sections.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"notifications": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Notifications configures the Notification Center + phone-home feature.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsConfig"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsConfig"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_CLRKConfigStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CLRKConfigStatus is the controller-written status.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"notifications": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Notifications carries the phone-home registration + health.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsStatus"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.NotificationsStatus"},
 	}
 }
 
@@ -4167,6 +4318,133 @@ func schema_clrk_api_clrk_v1alpha1_ModelRewrite(ref common.ReferenceCallback) co
 	}
 }
 
+func schema_clrk_api_clrk_v1alpha1_NotificationsConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "NotificationsConfig is the browser-writable notifications settings.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"email": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Email captured by the console signup gate. Empty => the feature is inert (no notifications recorded to phone home, no registration).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"signedUpAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SignedUpAt is stamped by the defaulter when Email is first set.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"advisoryPollEnabled": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AdvisoryPollEnabled opts into INBOUND security-advisory polling from api.apoxy.dev. Defaults true on signup.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"eventRetention": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EventRetention is the retention window for events.k8s.io/v1 notification Events in the embedded apiserver; older Events are pruned. Unset falls back to the controller-manager's --notifications-event-retention flag.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_NotificationsStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "NotificationsStatus reflects the phone-home lifecycle. The registration token is NOT here (it lives in a core/v1 Secret); only the browser-safe reference and non-secret correlation fields are.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions: Registered, PhoneHomeHealthy, AdvisorySyncHealthy.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"deploymentID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DeploymentID is the non-secret correlation id api.apoxy.dev returns at registration. Safe to surface in the console.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"registeredEmail": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RegisteredEmail is the spec.notifications.email that produced the current registration. The controller compares it to the live spec email to detect a changed signup and re-register (metadata.generation is unreliable in this apiserver). Not secret -- it is already the browser-writable spec email.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"advisoryPollIntervalSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AdvisoryPollIntervalSeconds is the server-driven advisory poll cadence returned at registration. Persisted so it survives restarts (the poller reverts to the flag default if unset).",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"registrationTokenSecretRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RegistrationTokenSecretRef points at the Secret holding the phone-home bearer token. The console sees the reference but cannot fetch the Secret (core/v1 is not proxied by the embedded apiserver).",
+							Ref:         ref("github.com/apoxy-dev/clrk/api/clrk/v1alpha1.SecretKeyReference"),
+						},
+					},
+					"registeredAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RegisteredAt / LastAdvisorySync / LastReportAt for the health panel.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"lastAdvisorySync": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"lastReportAt": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"reportsDropped": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReportsDropped counts security reports dropped under queue backpressure.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the spec generation this status reflects.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/clrk/v1alpha1.SecretKeyReference", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_clrk_api_clrk_v1alpha1_OTLPLogsSinkSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4365,6 +4643,41 @@ func schema_clrk_api_clrk_v1alpha1_RateLimitSpec(ref common.ReferenceCallback) c
 					},
 				},
 				Required: []string{"requests", "window"},
+			},
+		},
+	}
+}
+
+func schema_clrk_api_clrk_v1alpha1_SecretKeyReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "SecretKeyReference names a key within a Secret in a namespace.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"namespace": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"key": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"name", "namespace", "key"},
 			},
 		},
 	}
@@ -19933,6 +20246,217 @@ func schema_k8sio_api_core_v1_WindowsSecurityContextOptions(ref common.Reference
 	}
 }
 
+func schema_k8sio_api_events_v1_Event(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "Event is a report of an event somewhere in the cluster. It generally denotes some state change in the system. Events have a limited retention time and triggers and messages may evolve with time.  Event consumers should not rely on the timing of an event with a given Reason reflecting a consistent underlying trigger, or the continued existence of events with that Reason.  Events should be treated as informative, best-effort, supplemental data.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"eventTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "eventTime is the time when this Event was first observed. It is required.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
+						},
+					},
+					"series": {
+						SchemaProps: spec.SchemaProps{
+							Description: "series is data about the Event series this event represents or nil if it's a singleton Event.",
+							Ref:         ref("k8s.io/api/events/v1.EventSeries"),
+						},
+					},
+					"reportingController": {
+						SchemaProps: spec.SchemaProps{
+							Description: "reportingController is the name of the controller that emitted this Event, e.g. `kubernetes.io/kubelet`. This field cannot be empty for new Events.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reportingInstance": {
+						SchemaProps: spec.SchemaProps{
+							Description: "reportingInstance is the ID of the controller instance, e.g. `kubelet-xyzf`. This field cannot be empty for new Events and it can have at most 128 characters.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"action": {
+						SchemaProps: spec.SchemaProps{
+							Description: "action is what action was taken/failed regarding to the regarding object. It is machine-readable. This field cannot be empty for new Events and it can have at most 128 characters.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "reason is why the action was taken. It is human-readable. This field cannot be empty for new Events and it can have at most 128 characters.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"regarding": {
+						SchemaProps: spec.SchemaProps{
+							Description: "regarding contains the object this Event is about. In most cases it's an Object reporting controller implements, e.g. ReplicaSetController implements ReplicaSets and this event is emitted because it acts on some changes in a ReplicaSet object.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/api/core/v1.ObjectReference"),
+						},
+					},
+					"related": {
+						SchemaProps: spec.SchemaProps{
+							Description: "related is the optional secondary object for more complex actions. E.g. when regarding object triggers a creation or deletion of related object.",
+							Ref:         ref("k8s.io/api/core/v1.ObjectReference"),
+						},
+					},
+					"note": {
+						SchemaProps: spec.SchemaProps{
+							Description: "note is a human-readable description of the status of this operation. Maximal length of the note is 1kB, but libraries should be prepared to handle values up to 64kB.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "type is the type of this event (Normal, Warning), new types could be added in the future. It is machine-readable. This field cannot be empty for new Events.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"deprecatedSource": {
+						SchemaProps: spec.SchemaProps{
+							Description: "deprecatedSource is the deprecated field assuring backward compatibility with core.v1 Event type.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/api/core/v1.EventSource"),
+						},
+					},
+					"deprecatedFirstTimestamp": {
+						SchemaProps: spec.SchemaProps{
+							Description: "deprecatedFirstTimestamp is the deprecated field assuring backward compatibility with core.v1 Event type.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"deprecatedLastTimestamp": {
+						SchemaProps: spec.SchemaProps{
+							Description: "deprecatedLastTimestamp is the deprecated field assuring backward compatibility with core.v1 Event type.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"deprecatedCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "deprecatedCount is the deprecated field assuring backward compatibility with core.v1 Event type.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"eventTime"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/core/v1.EventSource", "k8s.io/api/core/v1.ObjectReference", "k8s.io/api/events/v1.EventSeries", "k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_k8sio_api_events_v1_EventList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EventList is a list of Event objects.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Description: "items is a list of schema objects.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/api/events/v1.Event"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/events/v1.Event", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_k8sio_api_events_v1_EventSeries(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EventSeries contain information on series of events, i.e. thing that was/is happening continuously for some time. How often to update the EventSeries is up to the event reporters. The default event reporter in \"k8s.io/client-go/tools/events/event_broadcaster.go\" shows how this struct is updated on heartbeats and can guide customized reporter implementations.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"count": {
+						SchemaProps: spec.SchemaProps{
+							Description: "count is the number of occurrences in this series up to the last heartbeat time.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"lastObservedTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "lastObservedTime is the time when last Event from the series was seen before last heartbeat.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
+						},
+					},
+				},
+				Required: []string{"count", "lastObservedTime"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"},
+	}
+}
+
 func schema_apimachinery_pkg_api_resource_Quantity(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.EmbedOpenAPIDefinitionIntoV2Extension(common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -22737,7 +23261,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_BackendRef(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.",
+				Description: "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.\n\n<gateway:experimental:description>\n\nWhen the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.\n\nImplementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.\n\nIf a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.\n\nIf a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the \"ResolvedRefs\" condition to \"False\" with the \"UnsupportedProtocol\" reason.\n\n</gateway:experimental:description>\n\nNote that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {
@@ -25357,7 +25881,7 @@ func schema_sigsk8sio_gateway_api_apis_v1_ParentReference(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with \"Core\" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.\n\nNote that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
+				Description: "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with \"Core\" support:\n\n* Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)\n\nThis API may be extended in the future to support additional kinds of parent resources.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"group": {

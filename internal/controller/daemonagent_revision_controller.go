@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/notify"
 )
 
 // DaemonAgentRevisionReconciler manages AgentSandboxRevision snapshots for a
@@ -25,6 +26,10 @@ import (
 type DaemonAgentRevisionReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Recorder emits rollout notifications (events.k8s.io/v1) on the
+	// RevisionReady False->True crossing. Nil-safe.
+	Recorder *notify.Recorder
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=daemonagents,verbs=get;list;watch;update;patch
@@ -172,6 +177,16 @@ func (r *DaemonAgentRevisionReconciler) Reconcile(ctx context.Context, req ctrl.
 	da.Status.ObservedGeneration = da.Generation
 	if err := r.Status().Patch(ctx, &da, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+
+	// Notify once, on the RevisionReady False->True crossing.
+	if r.Recorder != nil && revisionReady.Status == metav1.ConditionTrue {
+		old := meta.FindStatusCondition(statusBase.Status.Conditions, condRevisionReady)
+		if old == nil || old.Status != metav1.ConditionTrue {
+			da.TypeMeta = metav1.TypeMeta{Kind: "DaemonAgent", APIVersion: clrkv1alpha1.SchemeGroupVersion.String()}
+			r.Recorder.Eventf(&da, nil, notify.TypeNormal, notify.ReasonRevisionReady, notify.ActionRollout,
+				"Revision %s is ready", revName)
+		}
 	}
 
 	return ctrl.Result{}, nil

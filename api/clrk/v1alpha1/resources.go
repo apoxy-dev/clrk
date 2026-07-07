@@ -150,6 +150,17 @@ var (
 	_ runtime.Object            = &Invocation{}
 	_ resource.Object           = &Invocation{}
 	_ rest.SingularNameProvider = &Invocation{}
+
+	_ runtime.Object                       = &CLRKConfig{}
+	_ resource.Object                      = &CLRKConfig{}
+	_ resource.ObjectWithStatusSubResource = &CLRKConfig{}
+	_ rest.SingularNameProvider            = &CLRKConfig{}
+	_ resource.StatusSubResource           = &CLRKConfigStatus{}
+	_ resourcestrategy.Defaulter           = &CLRKConfig{}
+	_ resourcestrategy.Validater           = &CLRKConfig{}
+	_ resourcestrategy.ValidateUpdater     = &CLRKConfig{}
+	_ resourcestrategy.TableConverter      = &CLRKConfig{}
+	_ resourcestrategy.TableConverter      = &CLRKConfigList{}
 )
 
 func gvr(resource string) schema.GroupVersionResource {
@@ -437,3 +448,23 @@ func (r *Invocation) GetGroupVersionResource() schema.GroupVersionResource {
 }
 func (r *Invocation) IsStorageVersion() bool  { return true }
 func (r *Invocation) GetSingularName() string { return "invocation" }
+
+// CLRKConfig (install-wide singleton; status subresource for phone-home health).
+
+func (r *CLRKConfig) GetObjectMeta() *metav1.ObjectMeta { return &r.ObjectMeta }
+func (r *CLRKConfig) NamespaceScoped() bool             { return true }
+func (r *CLRKConfig) New() runtime.Object               { return &CLRKConfig{} }
+func (r *CLRKConfig) NewList() runtime.Object           { return &CLRKConfigList{} }
+func (r *CLRKConfig) GetGroupVersionResource() schema.GroupVersionResource {
+	return gvr("clrkconfigs")
+}
+func (r *CLRKConfig) IsStorageVersion() bool                { return true }
+func (r *CLRKConfig) GetSingularName() string               { return "clrkconfig" }
+func (r *CLRKConfig) GetStatus() resource.StatusSubResource { return &r.Status }
+
+func (s *CLRKConfigStatus) SubResourceName() string { return "status" }
+func (s *CLRKConfigStatus) CopyTo(obj resource.ObjectWithStatusSubResource) {
+	if p, ok := obj.(*CLRKConfig); ok {
+		p.Status = *s
+	}
+}

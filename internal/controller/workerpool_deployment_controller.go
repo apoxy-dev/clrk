@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/notify"
 	"github.com/apoxy-dev/clrk/internal/workerpod"
 )
 
@@ -40,6 +41,10 @@ type WorkerPoolDeploymentReconciler struct {
 	// disables injection — the worker simply doesn't publish lifecycle
 	// events.
 	CMNATSAddr string
+
+	// Recorder emits fleet-health notifications (events.k8s.io/v1) when a
+	// WorkerPool crosses the ready>=desired health boundary. Nil-safe.
+	Recorder *notify.Recorder
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
@@ -128,11 +133,53 @@ func (r *WorkerPoolDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		progressing.Reason = "DeploymentComplete"
 		progressing.Message = "deployment rollout complete"
 	}
+	// Persist ready>=desired health as a condition BEFORE the health-crossing
+	// check reads the prior value. Comparing the previously-persisted Healthy
+	// condition against the freshly-computed health is a like-for-like transition
+	// (prior-health vs current-health), unlike comparing the old ReadyReplicas
+	// snapshot against the NEW desired count -- which conflated a scale change
+	// with a health flip and fired spurious healthy/degraded notifications when a
+	// pool was resized.
+	prevHealthy := meta.FindStatusCondition(statusBase.Status.Conditions, condHealthy)
+	isHealthy := readyReplicas >= replicas
+	healthy := metav1.Condition{
+		Type:               condHealthy,
+		ObservedGeneration: wp.Generation,
+		LastTransitionTime: now,
+	}
+	if isHealthy {
+		healthy.Status = metav1.ConditionTrue
+		healthy.Reason = "AtDesiredReplicas"
+		healthy.Message = fmt.Sprintf("%d/%d workers ready", readyReplicas, replicas)
+	} else {
+		healthy.Status = metav1.ConditionFalse
+		healthy.Reason = "BelowDesiredReplicas"
+		healthy.Message = fmt.Sprintf("%d/%d workers ready", readyReplicas, replicas)
+	}
+
 	meta.SetStatusCondition(&wp.Status.Conditions, available)
 	meta.SetStatusCondition(&wp.Status.Conditions, progressing)
+	meta.SetStatusCondition(&wp.Status.Conditions, healthy)
 
 	if err := r.Status().Patch(ctx, &wp, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+
+	// Notify on a genuine health flip. Skip the pool's first reconcile (no prior
+	// Healthy condition) so a cold start isn't reported as a recovery; from then
+	// on a drop below desired is a Warning and a return to full readiness a Normal.
+	if r.Recorder != nil && prevHealthy != nil {
+		wasHealthy := prevHealthy.Status == metav1.ConditionTrue
+		if wasHealthy != isHealthy {
+			wp.TypeMeta = metav1.TypeMeta{Kind: "WorkerPool", APIVersion: clrkv1alpha1.SchemeGroupVersion.String()}
+			if isHealthy {
+				r.Recorder.Eventf(&wp, nil, notify.TypeNormal, notify.ReasonWorkerPoolHealthy, notify.ActionScale,
+					"WorkerPool %s healthy: %d/%d workers ready", wp.Name, readyReplicas, replicas)
+			} else {
+				r.Recorder.Eventf(&wp, nil, notify.TypeWarning, notify.ReasonWorkerPoolDegraded, notify.ActionScale,
+					"WorkerPool %s degraded: %d/%d workers ready", wp.Name, readyReplicas, replicas)
+			}
+		}
 	}
 
 	return ctrl.Result{}, nil

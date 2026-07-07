@@ -6,6 +6,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -25,6 +26,11 @@ func init() {
 	// HTTPRoute/Gateway. They must be registered or controller-runtime fails
 	// to start the watch sources for those owned types.
 	utilruntime.Must(corev1.AddToScheme(Scheme))
+	// events.k8s.io/v1: the notifications recorder (client-go events
+	// broadcaster) and the reporter's Event watch resolve Event types through
+	// this shared scheme; regarding-object GVKs resolve via the clrk types
+	// already installed above.
+	utilruntime.Must(eventsv1.AddToScheme(Scheme))
 	utilruntime.Must(appsv1.AddToScheme(Scheme))
 	// EndpointSlices: the cron HTTPInvoker lists them to find the
 	// WorkerPool dispatch endpoint without going through cluster DNS

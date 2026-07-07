@@ -18,7 +18,10 @@ import (
 	egextpb "github.com/envoyproxy/gateway/proto/extension"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,9 +45,12 @@ import (
 	"github.com/apoxy-dev/clrk/internal/extproc/invocationctx"
 	"github.com/apoxy-dev/clrk/internal/healthcheck"
 	clrknats "github.com/apoxy-dev/clrk/internal/nats"
+	"github.com/apoxy-dev/clrk/internal/notify"
 	"github.com/apoxy-dev/clrk/internal/otelemit"
 	"github.com/apoxy-dev/clrk/internal/otelforward"
 	"github.com/apoxy-dev/clrk/internal/otelreceiver"
+	"github.com/apoxy-dev/clrk/internal/sentry"
+	"github.com/apoxy-dev/clrk/internal/version"
 )
 
 const (
@@ -57,6 +63,11 @@ const (
 	// plane (`ENVOY_GATEWAY_NAMESPACE`) and every clrk-side reference
 	// to the controller's runtime namespace.
 	defaultNamespace = "clrk"
+	// phoneHomeSecretName is the Opaque Secret the clrkconfig controller writes
+	// the api.apoxy.dev bearer token into (system namespace). Referenced from
+	// CLRKConfig.status.notifications.registrationTokenSecretRef; the browser
+	// sees only the reference, never the Secret (core/v1 is not proxied).
+	phoneHomeSecretName = "clrk-phone-home-token"
 )
 
 // runtimeNamespace returns the namespace this process is running in,
@@ -114,6 +125,10 @@ func main() {
 		// customer endpoint via internal/otelforward.
 		otlpAddr         = flag.String("otlp-addr", ":4318", "Bind address for the OTLP/HTTP receiver that captures producer signals into ClickHouse and re-exports to customer endpoints. Empty disables the receiver.")
 		otlpTTLDur       = flag.Duration("otlp-ch-ttl", 7*24*time.Hour, "Retention for OTLP rows in the embedded ClickHouse. The rendered TTL is the ceiling of this in days.")
+		notifyRetention  = flag.Duration("notifications-event-retention", notify.DefaultEventRetention, "Retention window for events.k8s.io/v1 notification Events in the embedded apiserver; older Events are pruned. Overridden per-install by CLRKConfig.spec.notifications.eventRetention when set.")
+		apoxyAPIBaseURL  = flag.String("apoxy-api-base-url", sentry.DefaultBaseURL, "Base URL of the api.apoxy.dev phone-home API (deployment registration + advisory polling).")
+		phoneHome        = flag.Bool("phone-home", true, "Enable phone-home to api.apoxy.dev (registration + advisory polling). Set false for air-gapped installs; notifications stay fully local.")
+		phoneHomeTimeout = flag.Duration("phone-home-timeout", sentry.DefaultTimeout, "Per-request timeout for phone-home calls to api.apoxy.dev.")
 		otlpAdvertiseURI = flag.String("otlp-advertise-uri", fmt.Sprintf("http://controller-manager.%s.svc.cluster.local:4318", runtimeNS), "OTLP/HTTP URL stamped onto worker pods as CLRK_CM_OTLP_ENDPOINT. Workers dial this for every signal; cm persists + per-EG forwards.")
 		// devOTLPFallback wires `clrk dev`'s in-process TUI receiver
 		// as an unconditional fan-out destination on the cm OTLP
@@ -225,6 +240,7 @@ func main() {
 			&clrkv1alpha1.RateLimitPolicy{},
 			&clrkv1alpha1.LoggingPolicy{},
 			&clrkv1alpha1.EgressDenyPolicy{},
+			&clrkv1alpha1.CLRKConfig{},
 		),
 	)
 	if *certDir != "" {
@@ -292,6 +308,100 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Notifications: record events.k8s.io/v1 Events into the embedded apiserver
+	// (loopback -- never the customer cluster, whose built-in Events group an
+	// APIService can't override). The recorder feeds the console Notification
+	// Center; regarding-object GVKs resolve through apiserver.Scheme. On failure
+	// notifyRec stays nil and every emit site degrades to a no-op rather than
+	// crash-looping the control plane. egressBridge is threaded into the OTLP
+	// receiver below to lift worker egress denials into security Events.
+	var notifyRec *notify.Recorder
+	var egressBridge *notify.EgressSecurityBridge
+	var loopback kubernetes.Interface
+	if cs, err := kubernetes.NewForConfig(mgr.EmbeddedLoopbackConfig()); err != nil {
+		log.Error(err, "Unable to build loopback clientset for notifications")
+	} else {
+		loopback = cs
+		if rec, err := notify.NewRecorder(ctx, cs.EventsV1(), apiserver.Scheme); err != nil {
+			log.Error(err, "Unable to start notifications recorder")
+		} else {
+			notifyRec = rec
+			egressBridge = notify.NewEgressSecurityBridge(rec)
+			if err := cm.Add(egressBridge); err != nil {
+				log.Error(err, "Unable to add egress security bridge")
+				os.Exit(1)
+			}
+			// Retention prefers a live CLRKConfig.spec.notifications.eventRetention
+			// override, falling back to the flag. Read uncached (GetAPIReader) so
+			// the sweep does not depend on an informer, and re-read each sweep so a
+			// change takes effect without a restart.
+			if err := cm.Add(&notify.Pruner{
+				Events: cs.EventsV1(),
+				Retention: func() time.Duration {
+					var cc clrkv1alpha1.CLRKConfig
+					if err := cm.GetAPIReader().Get(ctx, types.NamespacedName{Namespace: runtimeNS, Name: clrkv1alpha1.CLRKConfigSingletonName}, &cc); err == nil {
+						if d := cc.Spec.Notifications.EventRetention; d != nil && d.Duration > 0 {
+							return d.Duration
+						}
+					}
+					return *notifyRetention
+				},
+			}); err != nil {
+				log.Error(err, "Unable to add notifications pruner")
+				os.Exit(1)
+			}
+			// Terminal-phase run failures come off the INVOCATIONS JetStream, not a
+			// controller watch. No-op when NATS is disabled.
+			if natsSrv != nil {
+				if nc, err := natsSrv.Connect("clrk-notify"); err != nil {
+					log.Error(err, "Unable to connect notifications invocation watcher to NATS")
+				} else if js, err := jetstream.New(nc); err != nil {
+					log.Error(err, "Unable to build JetStream for notifications invocation watcher")
+				} else {
+					go func() {
+						if err := notify.NewInvocationWatcher(js, rec).Run(ctx); err != nil {
+							log.Error(err, "Notification invocation watcher exited")
+						}
+					}()
+				}
+			}
+		}
+	}
+
+	// Phone-home: registration controller + outbound security-event reporter +
+	// inbound advisory poller. The reconciler needs only cm.GetClient() + the
+	// phone client, so it is registered independently of the recorder/loopback
+	// build above -- a recorder failure must not silently disable registration
+	// (the console gate + token Secret still have to work). It reports
+	// Registered=False/PhoneHomeDisabled when --phone-home=false. cm.GetClient()
+	// reaches core/v1 for the token Secret in cluster mode (embedded-only dev
+	// reports NoSecretStore). The advisory poller additionally needs the loopback
+	// Events client and is skipped when it is unavailable.
+	var phoneClient *sentry.Client
+	if *phoneHome {
+		phoneClient = sentry.NewClient(*apoxyAPIBaseURL, *phoneHomeTimeout)
+	}
+	ccReconciler := &controller.CLRKConfigReconciler{
+		Client:      cm.GetClient(),
+		Scheme:      cm.GetScheme(),
+		Phone:       phoneClient,
+		Namespace:   runtimeNS,
+		SecretName:  phoneHomeSecretName,
+		ClrkVersion: version.Current(),
+	}
+	if phoneClient != nil && loopback != nil {
+		if poller := sentry.NewAdvisoryPoller(phoneClient, loopback.EventsV1(), ccReconciler.AuthState, runtimeNS, sentry.DefaultAdvisoryPoll); poller != nil {
+			if err := cm.Add(poller); err != nil {
+				log.Error(err, "Unable to add advisory poller")
+				os.Exit(1)
+			}
+		}
+	}
+	if err := ccReconciler.SetupWithManager(cm); err != nil {
+		log.Error(err, "Unable to register controller", "controller", "CLRKConfig")
+		os.Exit(1)
+	}
+
 	// Portable reconcilers: run in all modes.
 	if err := (&controller.WorkerPoolStatusReconciler{
 		Client: cm.GetClient(),
@@ -312,13 +422,15 @@ func main() {
 		Client:     cm.GetClient(),
 		Scheme:     cm.GetScheme(),
 		ActiveExec: invActiveCounter,
+		Recorder:   notifyRec,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "TaskAgentRevision")
 		os.Exit(1)
 	}
 	if err := (&controller.DaemonAgentRevisionReconciler{
-		Client: cm.GetClient(),
-		Scheme: cm.GetScheme(),
+		Client:   cm.GetClient(),
+		Scheme:   cm.GetScheme(),
+		Recorder: notifyRec,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "DaemonAgentRevision")
 		os.Exit(1)
@@ -451,6 +563,7 @@ func main() {
 		Scheme:         cm.GetScheme(),
 		CMOTLPEndpoint: *otlpAdvertiseURI,
 		CMNATSAddr:     cmNATSAddr,
+		Recorder:       notifyRec,
 	}).SetupWithManager(cm); err != nil {
 		log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
 		os.Exit(1)
@@ -658,7 +771,7 @@ func main() {
 				go devSink.Run(ctx)
 			}
 		}
-		otelSrv, err := otelreceiver.Start(ctx, *otlpAddr, writer, forwards, devSink)
+		otelSrv, err := otelreceiver.Start(ctx, *otlpAddr, writer, forwards, devSink, egressBridge)
 		if err != nil {
 			log.Error(err, "Unable to start OTLP receiver", "addr", *otlpAddr)
 			os.Exit(1)

@@ -199,3 +199,55 @@ func (l *WorkerPoolList) ConvertToTable(ctx context.Context, tableOptions runtim
 	t.RemainingItemCount = l.RemainingItemCount
 	return t, nil
 }
+
+// CLRKConfig.
+
+var clrkConfigColumns = []metav1.TableColumnDefinition{
+	{Name: "Name", Type: "string", Format: "name", Description: "Name of the CLRKConfig"},
+	{Name: "Email", Type: "string", Description: "Notifications signup email"},
+	{Name: "Registered", Type: "string", Description: "Phone-home registration state"},
+	{Name: "Age", Type: "string", Description: "Time since creation"},
+}
+
+func clrkConfigRow(c *CLRKConfig) metav1.TableRow {
+	return metav1.TableRow{
+		Cells: []interface{}{
+			c.Name,
+			dashIfEmpty(c.Spec.Notifications.Email),
+			conditionState(c.Status.Notifications.Conditions, "Registered"),
+			tableAge(c.CreationTimestamp),
+		},
+		Object: runtime.RawExtension{Object: c},
+	}
+}
+
+// ConvertToTable implements resourcestrategy.TableConverter.
+func (c *CLRKConfig) ConvertToTable(ctx context.Context, tableOptions runtime.Object) (*metav1.Table, error) {
+	t := newTable(tableOptions, clrkConfigColumns)
+	t.Rows = []metav1.TableRow{clrkConfigRow(c)}
+	t.ResourceVersion = c.ResourceVersion
+	return t, nil
+}
+
+// ConvertToTable implements resourcestrategy.TableConverter for list responses.
+func (l *CLRKConfigList) ConvertToTable(ctx context.Context, tableOptions runtime.Object) (*metav1.Table, error) {
+	t := newTable(tableOptions, clrkConfigColumns)
+	t.Rows = make([]metav1.TableRow, 0, len(l.Items))
+	for i := range l.Items {
+		t.Rows = append(t.Rows, clrkConfigRow(&l.Items[i]))
+	}
+	t.ResourceVersion = l.ResourceVersion
+	t.Continue = l.Continue
+	t.RemainingItemCount = l.RemainingItemCount
+	return t, nil
+}
+
+// conditionState returns the status of the named condition, or "-" when absent.
+func conditionState(conds []metav1.Condition, condType string) string {
+	for i := range conds {
+		if conds[i].Type == condType {
+			return string(conds[i].Status)
+		}
+	}
+	return "-"
+}

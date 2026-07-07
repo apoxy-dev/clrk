@@ -67,6 +67,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&AgentSandboxRevisionList{},
 		&Backend{},
 		&BackendList{},
+		&CLRKConfig{},
+		&CLRKConfigList{},
 		&CredentialInjectionPolicy{},
 		&CredentialInjectionPolicyList{},
 		&DaemonAgent{},

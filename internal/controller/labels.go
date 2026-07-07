@@ -56,6 +56,10 @@ const (
 	condAvailable        = "Available"
 	condProgressing      = "Progressing"
 	condScheduled        = "Scheduled"
+	// condHealthy persists a WorkerPool's ready>=desired health so fleet
+	// notifications fire on a genuine health flip rather than a scale-induced
+	// artifact of comparing old-ready against new-desired.
+	condHealthy = "Healthy"
 )
 
 // Reason values for the Scheduled condition.
