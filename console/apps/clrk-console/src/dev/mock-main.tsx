@@ -28,6 +28,17 @@ const consoleClient = createConsoleClient({
   fetch: backend.fetch,
 })
 
+// The mock entry is served at /mock.html, but the router matches on pathname --
+// so rewrite the initial location to a real route before first render. Land on
+// the Notification Center (the feature under active design) so opening the URL
+// drops straight into it; the rail then navigates anywhere client-side.
+if (
+  window.location.pathname === '/mock.html' ||
+  window.location.pathname === '/'
+) {
+  window.history.replaceState(null, '', '/notifications')
+}
+
 const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('#root not found')
 

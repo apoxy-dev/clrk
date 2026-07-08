@@ -25,7 +25,7 @@ export function NotificationRow({
   showCat = true,
 }: NotificationRowProps) {
   const Icon = CATEGORY_ICON[vm.category]
-  const hasTags = showCat || vm.count > 1
+  const hasTags = showCat || vm.count > 1 || Boolean(vm.action)
   return (
     <div
       className={
@@ -67,6 +67,11 @@ export function NotificationRow({
         </div>
         {hasTags ? (
           <div className="nc-tags">
+            {vm.action ? (
+              <span className="nc-verb" title="action">
+                {vm.action}
+              </span>
+            ) : null}
             {showCat ? (
               <span className="nc-cat">{categoryLabel(vm.category)}</span>
             ) : null}

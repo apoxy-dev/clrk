@@ -6,7 +6,7 @@
 
 import { useMemo, useState } from 'react'
 import { Search } from '@carbon/icons-react'
-import type { NotificationVM } from './notifications-data'
+import { relatedFor, type NotificationVM } from './notifications-data'
 import { NotificationList } from './notification-list'
 import { NotificationDetailTray } from './notification-detail'
 
@@ -82,6 +82,10 @@ export function NotificationCenterView({
     [rows, selectedId],
   )
 
+  // Sibling Events on the same object, derived from the same watched set -- no
+  // extra query -- so the tray's "Related events" list is real data.
+  const related = useMemo(() => relatedFor(rows, selected), [rows, selected])
+
   return (
     <>
       <div className="page-head">
@@ -104,7 +108,8 @@ export function NotificationCenterView({
         </div>
         <div className="page-head-r">
           <button
-            className="btn--secondary"
+            type="button"
+            className="btn btn--secondary"
             onClick={onMarkAllRead}
             disabled={unread === 0}
           >
@@ -149,6 +154,7 @@ export function NotificationCenterView({
       {selected ? (
         <NotificationDetailTray
           item={selected}
+          related={related}
           onClose={() => onSelect(undefined)}
           onOpenObject={onOpenObject}
         />

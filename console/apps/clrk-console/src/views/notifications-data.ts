@@ -16,18 +16,32 @@ export interface EventObj extends K8sObject {
   note?: string
   type?: string // "Normal" | "Warning"
   reportingController?: string
+  reportingInstance?: string
   regarding?: {
     kind?: string
     namespace?: string
     name?: string
     apiVersion?: string
     uid?: string
+    resourceVersion?: string
+    fieldPath?: string
   }
   series?: { count?: number; lastObservedTime?: string }
+  // The recording component/host (events.k8s.io keeps it under deprecatedSource).
+  deprecatedSource?: { component?: string; host?: string }
   // Deprecated core-v1 fallbacks.
   message?: string
-  involvedObject?: { kind?: string; namespace?: string; name?: string }
+  involvedObject?: {
+    kind?: string
+    namespace?: string
+    name?: string
+    apiVersion?: string
+    uid?: string
+    resourceVersion?: string
+    fieldPath?: string
+  }
   deprecatedCount?: number
+  deprecatedFirstTimestamp?: string
   deprecatedLastTimestamp?: string
 }
 
@@ -38,6 +52,17 @@ export type NotificationCategory =
   | 'fleet'
   | 'other'
 export type NotificationSeverity = 'critical' | 'warning' | 'info' | 'success'
+
+/** The full object reference an Event regards, as the detail tray surfaces it. */
+export interface InvolvedRef {
+  apiVersion: string
+  kind: string
+  name: string
+  namespace: string
+  uid: string
+  resourceVersion: string
+  fieldPath: string
+}
 
 export interface NotificationVM {
   id: string
@@ -53,6 +78,23 @@ export interface NotificationVM {
   count: number
   timeMs: number
   read: boolean
+  // Detail-tray fields: the full Event surfaced by NotificationDetailTray. The
+  // row/bell views ignore them; they are populated from the same Event object.
+  involved: InvolvedRef | null
+  meta: {
+    name: string
+    namespace: string
+    uid: string
+    resourceVersion: string
+    creationTimestamp: string
+  }
+  reportingController: string
+  reportingInstance: string
+  source: { component: string; host: string }
+  firstMs: number
+  lastMs: number
+  firstTimestamp: string
+  lastTimestamp: string
 }
 
 // The frozen reason vocabulary (mirror of internal/notify/reasons.go). Grouped
@@ -114,6 +156,37 @@ export function eventTimeMs(o: EventObj): number {
   )
 }
 
+/** First-observed time: eventTime is the first sighting under events.k8s.io/v1;
+ *  fall back to the deprecated core-v1 timestamp then creationTimestamp. */
+export function eventFirstMs(o: EventObj): number {
+  return (
+    toMs(o.eventTime) ||
+    toMs(o.deprecatedFirstTimestamp) ||
+    toMs(o.metadata.creationTimestamp)
+  )
+}
+
+/** First non-empty string among the candidates ('' when none). */
+function firstStr(...xs: (string | undefined)[]): string {
+  for (const x of xs) if (x) return x
+  return ''
+}
+
+/** The full object reference an Event regards, or null when it names none. */
+export function involvedRef(o: EventObj): InvolvedRef | null {
+  const r = o.regarding ?? o.involvedObject
+  if (!r || !r.kind || !r.name) return null
+  return {
+    apiVersion: r.apiVersion ?? '',
+    kind: r.kind,
+    name: r.name,
+    namespace: r.namespace ?? o.metadata.namespace ?? '',
+    uid: r.uid ?? '',
+    resourceVersion: r.resourceVersion ?? '',
+    fieldPath: r.fieldPath ?? '',
+  }
+}
+
 export function regardingRef(
   o: EventObj,
 ): { kind: string; name: string; namespace: string } | null {
@@ -138,6 +211,16 @@ export function mapEvents(
     const type = o.type === 'Warning' ? 'Warning' : 'Normal'
     const category = categorize(reason)
     const timeMs = eventTimeMs(o)
+    const firstMs = eventFirstMs(o)
+    // Resolve the "last seen" timestamp once so the numeric (lastMs) and string
+    // (lastTimestamp) forms share one precedence and can never disagree in the
+    // detail tray's "Last seen" fact.
+    const lastStr = firstStr(
+      o.series?.lastObservedTime,
+      o.deprecatedLastTimestamp,
+      o.eventTime,
+      o.metadata.creationTimestamp,
+    )
     return {
       id: o.metadata.uid ?? o.metadata.name ?? '',
       namespace: o.metadata.namespace ?? '',
@@ -152,6 +235,28 @@ export function mapEvents(
       count: o.series?.count ?? o.deprecatedCount ?? 1,
       timeMs,
       read: timeMs <= lastSeenMs,
+      involved: involvedRef(o),
+      meta: {
+        name: o.metadata.name ?? '',
+        namespace: o.metadata.namespace ?? '',
+        uid: o.metadata.uid ?? '',
+        resourceVersion: o.metadata.resourceVersion ?? '',
+        creationTimestamp: o.metadata.creationTimestamp ?? '',
+      },
+      reportingController: o.reportingController ?? '',
+      reportingInstance: o.reportingInstance ?? '',
+      source: {
+        component: o.deprecatedSource?.component ?? o.reportingController ?? '',
+        host: o.deprecatedSource?.host ?? '',
+      },
+      firstMs,
+      lastMs: toMs(lastStr) || timeMs,
+      firstTimestamp: firstStr(
+        o.eventTime,
+        o.deprecatedFirstTimestamp,
+        o.metadata.creationTimestamp,
+      ),
+      lastTimestamp: lastStr,
     } satisfies NotificationVM
   })
   vms.sort((a, b) => b.timeMs - a.timeMs)
@@ -225,4 +330,115 @@ export const SEVERITY_CHIP: Record<NotificationSeverity, string> = {
   warning: 'chip chip--amber',
   success: 'chip chip--leaf',
   info: 'chip',
+}
+
+/** A sibling Event on the same object, as the tray's "Related events" list wants
+ *  it. Derived client-side from the same watched Event set -- no extra query. */
+export interface RelatedEvent {
+  id: string
+  type: 'Normal' | 'Warning'
+  reason: string
+  message: string
+  count: number
+  agoMs: number
+}
+
+// Identity of the object an Event regards, for grouping siblings.
+function objectKey(vm: NotificationVM): string {
+  return vm.involved
+    ? `${vm.involved.kind}/${vm.involved.namespace}/${vm.involved.name}`
+    : ''
+}
+
+/** Other Events (newest-first) that regard the same object as `vm`, excluding
+ *  `vm` itself. `rows` is assumed already newest-first (mapEvents sorts it). */
+export function relatedFor(
+  rows: NotificationVM[],
+  vm: NotificationVM | undefined,
+  limit = 6,
+): RelatedEvent[] {
+  if (!vm || !vm.involved) return []
+  const key = objectKey(vm)
+  const out: RelatedEvent[] = []
+  for (const v of rows) {
+    if (v.id === vm.id || objectKey(v) !== key) continue
+    out.push({
+      id: v.id,
+      type: v.type,
+      reason: v.reason,
+      message: v.message,
+      count: v.count,
+      agoMs: v.lastMs,
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+// Drop empty-string / null / undefined leaves so the rendered YAML stays clean.
+function pruneEmpty<T>(o: T): T {
+  if (Array.isArray(o)) return o.map((x) => pruneEmpty(x)) as unknown as T
+  if (o && typeof o === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+      if (v === undefined || v === null || v === '') continue
+      out[k] = pruneEmpty(v)
+    }
+    return out as T
+  }
+  return o
+}
+
+/** Rebuild a faithful events.k8s.io/v1 Event object for the raw-YAML view. */
+export function eventToYamlObject(vm: NotificationVM): Record<string, unknown> {
+  const obj: Record<string, unknown> = {
+    apiVersion: 'events.k8s.io/v1',
+    kind: 'Event',
+    metadata: {
+      name: vm.meta.name,
+      namespace: vm.meta.namespace,
+      uid: vm.meta.uid,
+      resourceVersion: vm.meta.resourceVersion,
+      creationTimestamp: vm.meta.creationTimestamp,
+    },
+    eventTime: vm.firstTimestamp,
+    reason: vm.reason,
+    note: vm.message,
+    type: vm.type,
+    action: vm.action,
+    reportingController: vm.reportingController,
+    reportingInstance: vm.reportingInstance,
+  }
+  if (vm.involved) {
+    obj.regarding = {
+      apiVersion: vm.involved.apiVersion,
+      kind: vm.involved.kind,
+      name: vm.involved.name,
+      namespace: vm.involved.namespace,
+      uid: vm.involved.uid,
+      resourceVersion: vm.involved.resourceVersion,
+      fieldPath: vm.involved.fieldPath,
+    }
+  }
+  if (vm.count > 1) {
+    obj.series = { count: vm.count, lastObservedTime: vm.lastTimestamp }
+  }
+  if (vm.source.component || vm.source.host) {
+    obj.deprecatedSource = { component: vm.source.component, host: vm.source.host }
+  }
+  return pruneEmpty(obj)
+}
+
+// NOTE: there is deliberately no `kubectl get event` helper. Notification Events
+// are recorded to the controller-manager's own embedded apiserver (the loopback
+// events.k8s.io/v1 surface the console proxies), not the main apiserver's event
+// store, and events.k8s.io is not aggregated to the clrk apiserver -- so
+// `kubectl get event <name>` (which hits the main apiserver) never finds them.
+// The YAML tab shows the object directly instead. describeCmd is fine: it targets
+// the involved clrk.apoxy.dev object, which IS reachable via API aggregation.
+
+/** `kubectl describe` for the regarded object (empty when there is none). */
+export function describeCmd(vm: NotificationVM): string {
+  if (!vm.involved) return ''
+  return `kubectl -n ${vm.involved.namespace} describe ${vm.involved.kind.toLowerCase()} ${vm.involved.name}`
 }

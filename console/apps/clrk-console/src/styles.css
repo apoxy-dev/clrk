@@ -124,6 +124,10 @@
   gap: 8px;
   line-height: 1;
 }
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .btn--primary {
   background: var(--apx-ink);
   color: var(--apx-bone);
@@ -2889,6 +2893,30 @@
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
 }
+/* Action verb token on the list row -- the Event `action`, leading the tag row
+   as a small secondary chip (distinct from .nc-act, which is a button). */
+.nc-verb {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  background: var(--apx-bone);
+  border: 1px solid var(--border-subtle);
+  padding: 1px 5px 1px 4px;
+}
+.nc-verb::before {
+  content: "\25B8";
+  font-size: 7.5px;
+  color: var(--text-disabled);
+}
+[data-theme="dark"] .nc-verb {
+  background: var(--surface-inset);
+}
 
 /* ---- Action button (detail + gate) --------------------------------------- */
 .nc-act {
@@ -3120,6 +3148,17 @@
      sticky header would bind to a non-scrolling ancestor and never pin. Keep
      the inbox day headers static (sticky still applies inside the popover). */
   position: static;
+}
+.inbox-list .nc-list {
+  /* The base .nc-list is a scroll container (overflow:auto + overscroll:contain)
+     sized for the bell popover. On the full page the shell <main> is the
+     scroller, so a nested scroll container here traps the wheel: its content
+     fits exactly (nothing to scroll) and overscroll:contain blocks the wheel
+     from chaining up to <main>, so the list refuses to scroll on wheel/trackpad
+     (keyboard still works, which is the tell). Neutralize it so wheel reaches
+     <main>. */
+  overflow: visible;
+  overscroll-behavior: auto;
 }
 
 /* ---- Detail tray inner (reuses .attrs-tray shell) ------------------------ */
@@ -3418,4 +3457,699 @@
   color: var(--text-muted);
   line-height: 1.5;
   margin: 16px 0 0;
+}
+
+/* ============================================================
+   Notification Event Detail Tray (.evt-*)
+   Slides in from the right when a notification is opened. Every
+   notification is backed by an events.k8s.io/v1 Event; this tray
+   surfaces that Event in full -- reason + message, occurrences
+   (count / first / last seen) with a series timeline, the object
+   it regards, the reporting controller, related events, and the
+   raw object as YAML. Reuses .attrs-tray-scrim + attrs-tray-in.
+   ============================================================ */
+.evt-tray {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 94vw);
+  z-index: 91;
+  background: var(--surface-card);
+  border-left: 1px solid var(--apx-ink);
+  box-shadow: -18px 0 48px rgba(30, 29, 28, 0.16);
+  display: flex;
+  flex-direction: column;
+  --evt-tone: var(--apx-coral);
+  --evt-tint: var(--apx-coral-tint);
+}
+[data-theme="dark"] .evt-tray {
+  box-shadow: -18px 0 48px rgba(0, 0, 0, 0.5);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .evt-tray {
+    animation: attrs-tray-in 220ms var(--ease-out, cubic-bezier(0.2, 0.7, 0.2, 1));
+  }
+}
+@media (max-width: 640px) {
+  .evt-tray {
+    width: 100vw;
+    max-width: 100vw;
+  }
+}
+
+/* ---- Header ---- */
+.evt-hd {
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 18px 18px 16px 20px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--apx-mist);
+}
+.evt-hd::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--evt-tone);
+}
+.evt-glyph {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--evt-tint);
+  color: var(--evt-tone);
+  border: 1px solid color-mix(in srgb, var(--evt-tone) 32%, transparent);
+}
+.evt-glyph svg {
+  width: 20px;
+  height: 20px;
+}
+.evt-hd-titles {
+  flex: 1;
+  min-width: 0;
+}
+.evt-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.evt-eyebrow .dot {
+  width: 3px;
+  height: 3px;
+  background: var(--apx-stone);
+}
+.evt-reason {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin-top: 5px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.evt-objline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+.evt-objline .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.evt-hd-close {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.evt-hd-close svg {
+  width: 12px;
+  height: 12px;
+}
+.evt-hd-close:hover {
+  border-color: var(--apx-ink);
+  color: var(--text-primary);
+}
+
+/* ---- Body ---- */
+.evt-bd {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.evt-bd::-webkit-scrollbar {
+  width: 10px;
+}
+.evt-bd::-webkit-scrollbar-thumb {
+  background: var(--apx-fog);
+  border: 3px solid var(--surface-card);
+}
+.evt-sec {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.evt-sec:last-child {
+  border-bottom: 0;
+}
+.evt-sec-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.evt-sec-lab {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.evt-sec-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ---- Message + badges ---- */
+.evt-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 13px;
+}
+.evt-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 9px 3px 7px;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+.evt-badge svg {
+  width: 12px;
+  height: 12px;
+}
+.evt-badge--warning {
+  background: var(--apx-coral-tint);
+  color: #b34a31;
+  border-color: color-mix(in srgb, var(--apx-coral) 40%, transparent);
+}
+.evt-badge--normal {
+  background: var(--apx-blue-tint);
+  color: var(--apx-blue-deep);
+  border-color: color-mix(in srgb, var(--apx-blue) 40%, transparent);
+}
+.evt-badge--success {
+  background: var(--apx-leaf-tint);
+  color: color-mix(in srgb, var(--apx-leaf) 55%, var(--apx-ink));
+  border-color: color-mix(in srgb, var(--apx-leaf) 40%, transparent);
+}
+[data-theme="dark"] .evt-badge--warning {
+  background: color-mix(in srgb, var(--apx-coral) 22%, var(--surface-card));
+  color: #f0a48e;
+}
+[data-theme="dark"] .evt-badge--normal {
+  background: #1a2c42;
+  color: #8ac4f0;
+}
+[data-theme="dark"] .evt-badge--success {
+  background: color-mix(in srgb, var(--apx-leaf) 22%, var(--surface-card));
+  color: #9cd3a6;
+}
+.evt-badge--count {
+  background: var(--apx-ink);
+  color: var(--apx-bone);
+  border-color: var(--apx-ink);
+}
+[data-theme="dark"] .evt-badge--count {
+  background: var(--apx-bone);
+  color: var(--apx-ink);
+  border-color: var(--apx-bone);
+}
+.evt-badge--muted {
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+}
+/* reason -- the primary machine token (camelCase, medium gray). */
+.evt-badge--reason {
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  border-color: var(--border-default);
+}
+/* action -- the verb. Same token family but visually secondary to reason:
+   lighter tint, UPPERCASE single word, and a leading marker that reads as "do". */
+.evt-badge--action {
+  background: var(--apx-bone);
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10.5px;
+  gap: 5px;
+  padding-left: 8px;
+}
+.evt-badge--action::before {
+  content: "\25B8";
+  font-size: 8.5px;
+  line-height: 1;
+  color: var(--text-disabled);
+  margin-right: -1px;
+}
+[data-theme="dark"] .evt-badge--action {
+  background: var(--surface-inset);
+}
+.evt-msg {
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--apx-paper);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--evt-tone);
+  padding: 13px 15px;
+}
+.evt-msg code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  padding: 0 4px;
+}
+
+/* ---- Occurrence facts ---- */
+.evt-facts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+}
+.evt-fact {
+  padding: 11px 14px;
+  border-right: 1px solid var(--border-subtle);
+}
+.evt-fact:last-child {
+  border-right: 0;
+}
+.evt-fact .k {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.evt-fact .v {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin-top: 5px;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 1.05;
+}
+.evt-fact .v.mono {
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+.evt-fact .v .unit {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.evt-fact .sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* ---- Series timeline ---- */
+.evt-tl {
+  margin-top: 14px;
+}
+.evt-tl-track {
+  position: relative;
+  height: 34px;
+  border: 1px solid var(--border-subtle);
+  background: var(--apx-paper);
+  overflow: hidden;
+}
+.evt-tl-track::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--border-subtle);
+}
+.evt-tl-tick {
+  position: absolute;
+  bottom: 0;
+  width: 2px;
+  background: var(--evt-tone);
+  opacity: 0.55;
+  transform: translateX(-1px);
+}
+.evt-tl-tick.is-last {
+  opacity: 1;
+  width: 3px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--evt-tone) 18%, transparent);
+}
+.evt-tl-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+/* ---- Involved-object card ---- */
+.evt-obj {
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+}
+.evt-obj-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+}
+.evt-obj-ico {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  background: var(--apx-bone);
+}
+.evt-obj-ico svg {
+  width: 17px;
+  height: 17px;
+}
+.evt-obj-txt {
+  flex: 1;
+  min-width: 0;
+}
+.evt-obj-name {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.evt-obj-tags {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.evt-obj-ns {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.evt-obj-field {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-inset);
+  padding: 1px 6px;
+}
+.evt-obj-goto {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--apx-bone);
+  cursor: pointer;
+  text-decoration: none;
+  color: var(--text-primary);
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  font: inherit;
+  text-align: left;
+}
+.evt-obj-goto:hover {
+  background: var(--surface-inset);
+}
+.evt-obj-goto .lead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.evt-obj-goto .owner-ico {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.evt-obj-goto .owner-ico svg {
+  width: 15px;
+  height: 15px;
+}
+.evt-obj-goto .txt {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.evt-obj-goto .r1 {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.evt-obj-goto .r2 {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evt-obj-goto .arrow {
+  flex: none;
+  color: var(--text-muted);
+  display: flex;
+}
+.evt-obj-goto .arrow svg {
+  width: 15px;
+  height: 15px;
+}
+.evt-obj-goto:hover .arrow {
+  color: var(--text-link-hover);
+}
+
+/* ---- Key/value blocks (reporting + metadata) ---- */
+.evt-kv {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.evt-kv .row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 14px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+  align-items: baseline;
+}
+.evt-kv .row:first-child {
+  padding-top: 0;
+}
+.evt-kv .row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.evt-kv .k {
+  color: var(--text-muted);
+}
+.evt-kv .v {
+  color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.evt-kv .v.dim {
+  color: var(--text-secondary);
+}
+
+/* ---- Related events ---- */
+.evt-rel {
+  display: flex;
+  flex-direction: column;
+}
+.evt-rel-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.evt-rel-row:last-child {
+  border-bottom: 0;
+}
+.evt-rel-pip {
+  width: 8px;
+  height: 8px;
+  flex: none;
+}
+.evt-rel-pip--warning {
+  background: var(--apx-coral);
+}
+.evt-rel-pip--normal {
+  background: var(--apx-blue);
+}
+.evt-rel-txt {
+  flex: 1;
+  min-width: 0;
+}
+.evt-rel-reason {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.evt-rel-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evt-rel-meta {
+  flex: none;
+  text-align: right;
+}
+.evt-rel-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.evt-rel-ago {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ---- Tabs (Details / Metadata / YAML) -- matches the app tab underline ---- */
+.evt-tabs {
+  flex: none;
+  display: flex;
+  gap: 22px;
+  padding: 0 20px;
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-default);
+}
+.evt-tab {
+  position: relative;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 12px 1px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+}
+.evt-tab:hover {
+  color: var(--text-secondary);
+}
+.evt-tab.is-active {
+  color: var(--text-primary);
+  border-bottom-color: var(--evt-tone);
+}
+
+/* ---- YAML tab ---- */
+.evt-yaml-sec {
+  padding: 16px 20px 22px;
+}
+.evt-yaml-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 11px;
+}
+.evt-yaml-bar .spacer {
+  flex: 1;
+}
+.evt-yaml-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.evt-yaml-body {
+  border: 1px solid var(--border-default);
+  background: var(--apx-paper);
+}
+.evt-copy-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  cursor: pointer;
+  padding: 4px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.evt-copy-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+.evt-copy-btn:hover {
+  border-color: var(--apx-ink);
+  color: var(--text-primary);
+}
+/* ---- Footer ---- */
+.evt-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 20px;
+  border-top: 1px solid var(--border-default);
+  background: var(--apx-mist);
+}
+.evt-foot .spacer {
+  flex: 1;
+}
+.evt-foot .btn {
+  font-size: 13px;
 }

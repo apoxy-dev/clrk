@@ -128,6 +128,244 @@ export class MockBackend {
   seedDemo(): void {
     this.seedEgress();
     this.seedAgents();
+    this.seedNotifications();
+  }
+
+  // --- Notification Center (events.k8s.io/v1 Events + signed-up CLRKConfig) ----
+  //
+  // The Notification Center reads real Events, gated behind an email signup in
+  // the CLRKConfig singleton. Seed a signed-up config (so the gate opens and the
+  // security indicator reads "active") plus a spread of Events across the frozen
+  // reason vocabulary -- Warning/Normal, aggregated counts, full regarding refs,
+  // reporting controllers -- so the day-grouped list, the bell badge, and the
+  // detail tray (occurrences, involved object, reporting, related events, raw
+  // YAML) all render against the read path rather than a fixture. Two Events
+  // share the review-bot TaskAgent so the tray's "Related events" list is real.
+  private seedNotifications(): void {
+    this.putGVR(GROUP, VERSION, "clrkconfigs", {
+      apiVersion: `${GROUP}/${VERSION}`,
+      kind: "CLRKConfig",
+      metadata: { name: "default", namespace: "clrk", uid: "clrkconfig-default" },
+      spec: { notifications: { email: "sre@acme.co", advisoryPollEnabled: true } },
+      status: {
+        notifications: {
+          deploymentID: "dep-7f3a1c9e",
+          registeredAt: "2026-07-06T12:00:00Z",
+          conditions: [
+            {
+              type: "Registered",
+              status: "True",
+              reason: "Registered",
+              message: "Phoned home to api.apoxy.dev",
+              lastTransitionTime: "2026-07-06T12:00:00Z",
+            },
+          ],
+        },
+      },
+    } as unknown as StoredObject);
+
+    const now = Date.now();
+    const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+    const MIN = 60_000;
+    const HOUR = 60 * MIN;
+    const CLRK = `${GROUP}/${VERSION}`;
+    const AGENTS = "agents";
+
+    interface Seed {
+      name: string;
+      reason: string;
+      type: "Warning" | "Normal";
+      note: string;
+      count: number;
+      firstAgo: number;
+      lastAgo: number;
+      regarding: {
+        apiVersion: string;
+        kind: string;
+        name: string;
+        namespace: string;
+        uid: string;
+        resourceVersion: string;
+        fieldPath?: string;
+      };
+      reportingController: string;
+      reportingInstance: string;
+      source: { component: string; host?: string };
+    }
+
+    const seeds: Seed[] = [
+      {
+        name: "review-bot.evt-invfail",
+        reason: "InvocationFailed",
+        type: "Warning",
+        note: "Invocation `inv-9f2c1d` failed: upstream `anthropic-egress` returned 529 overloaded after 3 retries.",
+        count: 11,
+        firstAgo: 42 * MIN,
+        lastAgo: 3 * MIN,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "TaskAgent",
+          name: "review-bot",
+          namespace: AGENTS,
+          uid: "ta-review-bot",
+          resourceVersion: "48213412",
+          fieldPath: "status.lastInvocation",
+        },
+        reportingController: "clrk-invocation-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-invocation-controller" },
+      },
+      {
+        name: "review-bot.evt-invtimeout",
+        reason: "InvocationTimeout",
+        type: "Warning",
+        note: "Invocation `inv-8b1a0c` exceeded the 120s deadline and was cancelled.",
+        count: 4,
+        firstAgo: 55 * MIN,
+        lastAgo: 12 * MIN,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "TaskAgent",
+          name: "review-bot",
+          namespace: AGENTS,
+          uid: "ta-review-bot",
+          resourceVersion: "48211980",
+          fieldPath: "status.lastInvocation",
+        },
+        reportingController: "clrk-invocation-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-invocation-controller" },
+      },
+      {
+        name: "llm-egress.evt-denied",
+        reason: "EgressDenied",
+        type: "Warning",
+        note: "Blocked egress to `api.openai.com:443` from `incident-triager` — no matching AIProviderRoute under deny-all default.",
+        count: 27,
+        firstAgo: 2 * HOUR,
+        lastAgo: 6 * MIN,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "EgressGateway",
+          name: "llm-egress",
+          namespace: AGENTS,
+          uid: "eg-llm-egress",
+          resourceVersion: "48191002",
+          fieldPath: "spec.defaultPolicy",
+        },
+        reportingController: "clrk-egress-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-egress-controller", host: "gpu-a10g-node-3" },
+      },
+      {
+        name: "llm-egress.evt-advisory",
+        reason: "SecurityAdvisory",
+        type: "Warning",
+        note: "Advisory `APOXY-2026-014`: credential-injection upstream `api.anthropic.com` should pin SANs. Review additionalTrustBundle.",
+        count: 1,
+        firstAgo: 3 * HOUR,
+        lastAgo: 3 * HOUR,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "EgressGateway",
+          name: "llm-egress",
+          namespace: AGENTS,
+          uid: "eg-llm-egress",
+          resourceVersion: "48170554",
+        },
+        reportingController: "clrk-sentry",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-sentry" },
+      },
+      {
+        name: "gpu-a10g.evt-degraded",
+        reason: "WorkerPoolDegraded",
+        type: "Warning",
+        note: "Worker pool `gpu-a10g` degraded: 2/5 replicas NotReady — `nvidia.com/gpu` allocatable dropped on node `gpu-a10g-node-1`.",
+        count: 6,
+        firstAgo: 30 * MIN,
+        lastAgo: 8 * MIN,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "WorkerPool",
+          name: "gpu-a10g",
+          namespace: AGENTS,
+          uid: "wp-gpu-a10g",
+          resourceVersion: "48210077",
+          fieldPath: "status.readyReplicas",
+        },
+        reportingController: "clrk-workerpool-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-workerpool-controller" },
+      },
+      {
+        name: "gpu-a10g.evt-healthy",
+        reason: "WorkerPoolHealthy",
+        type: "Normal",
+        note: "Worker pool `gpu-a10g` recovered: 5/5 replicas Ready.",
+        count: 1,
+        firstAgo: 20 * HOUR,
+        lastAgo: 20 * HOUR,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "WorkerPool",
+          name: "gpu-a10g",
+          namespace: AGENTS,
+          uid: "wp-gpu-a10g",
+          resourceVersion: "48090441",
+        },
+        reportingController: "clrk-workerpool-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-workerpool-controller" },
+      },
+      {
+        name: "incident-triager.evt-revready",
+        reason: "RevisionReady",
+        type: "Normal",
+        note: "Revision `incident-triager-7c9b4d5` is Ready — image digest verified, sandbox spec frozen.",
+        count: 1,
+        firstAgo: 26 * HOUR,
+        lastAgo: 26 * HOUR,
+        regarding: {
+          apiVersion: CLRK,
+          kind: "AgentSandboxRevision",
+          name: "incident-triager-7c9b4d5",
+          namespace: AGENTS,
+          uid: "asr-incident-triager",
+          resourceVersion: "48012004",
+        },
+        reportingController: "clrk-revision-controller",
+        reportingInstance: "clrk-controller-manager-0",
+        source: { component: "clrk-revision-controller" },
+      },
+    ];
+
+    seeds.forEach((s, i) => {
+      this.putGVR("events.k8s.io", "v1", "events", {
+        apiVersion: "events.k8s.io/v1",
+        kind: "Event",
+        metadata: {
+          name: s.name,
+          namespace: s.regarding.namespace,
+          uid: `evt-uid-${i}`,
+          resourceVersion: String(48213990 + i),
+          creationTimestamp: iso(s.firstAgo),
+        },
+        eventTime: iso(s.firstAgo),
+        reason: s.reason,
+        note: s.note,
+        type: s.type,
+        action: "",
+        regarding: s.regarding,
+        series:
+          s.count > 1
+            ? { count: s.count, lastObservedTime: iso(s.lastAgo) }
+            : undefined,
+        reportingController: s.reportingController,
+        reportingInstance: s.reportingInstance,
+        deprecatedSource: s.source,
+      } as unknown as StoredObject);
+    });
   }
 
   // --- Egress Gateways + attaching routes + policies (design's data-egress.js) -
