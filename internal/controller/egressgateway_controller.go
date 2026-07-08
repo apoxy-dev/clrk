@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -38,6 +39,14 @@ const (
 	// Kept as a constant here to avoid importing the extension package into
 	// the reconciler layer.
 	GatewayNamePrefix = "clrk-eg-"
+
+	// EgressGatewayFinalizer guards EgressGateway deletion so the
+	// reconciler can reap the upstream-trust mirror Secret before the
+	// object disappears. The mirror lives in the EG control-plane
+	// namespace (EnvoyGatewayNamespace), not the EG's own namespace, so
+	// it cannot carry an EG owner reference (SetControllerReference
+	// rejects cross-namespace owners) and would otherwise leak on delete.
+	EgressGatewayFinalizer = "clrk.apoxy.dev/egressgateway-upstream-trust"
 
 	// EgressListenerBasePort is the first TCP port the EG-managed Envoy
 	// binds. Each EgressListener in spec.listeners is assigned
@@ -118,7 +127,7 @@ type EgressGatewayReconciler struct {
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=aiproviderroutes;backends;fallbackroutingpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch;delete
@@ -132,6 +141,31 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// The upstream-trust mirror lives in EnvoyGatewayNamespace and carries
+	// no EG owner reference (owner refs can't cross namespaces), so garbage
+	// collection won't reap it. A finalizer lets us delete it explicitly
+	// before the EgressGateway object goes away.
+	if !eg.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&eg, EgressGatewayFinalizer) {
+			if err := r.deleteUpstreamTrustMirror(ctx, eg.Name); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reaping upstream trust mirror: %w", err)
+			}
+			controllerutil.RemoveFinalizer(&eg, EgressGatewayFinalizer)
+			if err := r.Update(ctx, &eg); err != nil {
+				return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	if controllerutil.AddFinalizer(&eg, EgressGatewayFinalizer) {
+		// Persist the finalizer before the mirror is created (below), so a
+		// crash between the two still leaves a finalizer that reaps the
+		// mirror on delete. Continue the reconcile in the same pass.
+		if err := r.Update(ctx, &eg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
+		}
 	}
 
 	if err := validateEgressGatewaySpec(&eg); err != nil {
@@ -430,11 +464,15 @@ func upstreamTrustMirrorName(egName string) string {
 //
 // Cross-namespace reference is allowed without a ReferenceGrant gate
 // today: the source must live in the EG's own namespace (we don't
-// honor SecretObjectReference.Namespace), and the mirror is owned by
-// the EG so it cascade-deletes.
+// honor SecretObjectReference.Namespace). The mirror cannot carry an EG
+// owner reference (owner refs can't cross namespaces), so it is reaped
+// explicitly by deleteUpstreamTrustMirror — from the EgressGatewayFinalizer
+// deletion path, and here when the additionalTrustBundle ref is cleared.
 func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
 	if eg.Spec.UpstreamTLS == nil || eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef == nil {
-		return nil
+		// The ref was never set, or was cleared from a live EG — make sure
+		// no stale mirror lingers in the control-plane namespace.
+		return r.deleteUpstreamTrustMirror(ctx, eg.Name)
 	}
 	sourceName := string(eg.Spec.UpstreamTLS.AdditionalTrustBundleSecretRef.Name)
 	if sourceName == "" {
@@ -470,15 +508,33 @@ func (r *EgressGatewayReconciler) ensureUpstreamTrustMirror(ctx context.Context,
 			mirror.Data[k] = v
 		}
 		// Owner ref crosses namespaces; SetControllerReference rejects
-		// that. The mirror is hand-cleaned in the deletion path
-		// (Owns(&corev1.Secret{}) on the source namespace's secret
-		// already covers cascade for the source); for the mirror we
-		// rely on labels to find and reap on EG delete. Add labels
-		// above so future cleanup can list-and-delete by them.
+		// that, so this mirror is reaped by deleteUpstreamTrustMirror
+		// (the EG finalizer path) rather than by garbage collection. The
+		// labels are kept for operator observability and any future
+		// label-scoped cleanup.
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+// deleteUpstreamTrustMirror removes the mirrored upstream-trust Secret
+// from the EG control-plane namespace. It is idempotent: a missing
+// mirror (the EG never had an additionalTrustBundle, or it was already
+// reaped) is not an error. Called from the finalizer deletion path and
+// whenever the additionalTrustBundle ref is cleared from a live EG.
+func (r *EgressGatewayReconciler) deleteUpstreamTrustMirror(ctx context.Context, egName string) error {
+	mirror := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      upstreamTrustMirrorName(egName),
+			Namespace: r.EnvoyGatewayNamespace,
+		},
+	}
+	if err := r.Delete(ctx, mirror); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting upstream trust mirror %s/%s: %w",
+			r.EnvoyGatewayNamespace, mirror.Name, err)
 	}
 	return nil
 }
