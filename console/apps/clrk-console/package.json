@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@apoxy/console-core": "github:apoxy-dev/apoxy#0758df91094cdbb1ce93828c92be2151b00baf88&path:console/packages/core",
+    "@apoxy/console-core": "github:apoxy-dev/apoxy#370a86c2393805e86140ff0c12047cfbaf2e5d3d&path:console/packages/core",
     "@carbon/icons-react": "^11.48.0",
     "@tanstack/react-query": "^5.101.0",
     "@tanstack/react-router": "^1.95.0",
