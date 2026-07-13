@@ -159,6 +159,8 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.MetricSeriesSet":                  schema_clrk_api_metrics_v1alpha1_MetricSeriesSet(ref),
 		"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.TaskAgentMetrics":                 schema_clrk_api_metrics_v1alpha1_TaskAgentMetrics(ref),
 		"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.TaskAgentMetricsList":             schema_clrk_api_metrics_v1alpha1_TaskAgentMetricsList(ref),
+		"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.WorkerPoolMetrics":                schema_clrk_api_metrics_v1alpha1_WorkerPoolMetrics(ref),
+		"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.WorkerPoolMetricsList":            schema_clrk_api_metrics_v1alpha1_WorkerPoolMetricsList(ref),
 		"k8s.io/api/coordination/v1.Lease":                                                schema_k8sio_api_coordination_v1_Lease(ref),
 		"k8s.io/api/coordination/v1.LeaseList":                                            schema_k8sio_api_coordination_v1_LeaseList(ref),
 		"k8s.io/api/coordination/v1.LeaseSpec":                                            schema_k8sio_api_coordination_v1_LeaseSpec(ref),
@@ -6486,6 +6488,117 @@ func schema_clrk_api_metrics_v1alpha1_TaskAgentMetricsList(ref common.ReferenceC
 		},
 		Dependencies: []string{
 			"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.TaskAgentMetrics", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_clrk_api_metrics_v1alpha1_WorkerPoolMetrics(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "WorkerPoolMetrics is a point-in-time rollup of one WorkerPool over Window, backing the console pools list. Its name and namespace match the WorkerPool it summarizes. Usage carries both CR-status gauges (replica counts, execution-slot capacity, in-flight executions) and window aggregates over the pool's ingress.dispatch spans (invocations dispatched, dispatch errors, dispatch-latency percentiles).\n\nThe dispatch counters count only requests that resolved a ready revision and reached worker selection, because clrk.worker.pool is stamped on the dispatch span only past that point: a request rejected earlier (unknown TaskAgent, no ready revision, malformed) carries no pool and belongs to no pool snapshot. Within that set, UsageInvocations is the successfully-dispatched count and UsageErrors is the pool-attributable failures (at cluster MaxConcurrent, no ready worker).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"timestamp": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Timestamp is when the rollup was computed (the query time).",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"window": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Window is the look-back the aggregate usage values cover, e.g. 24h. The gauge keys are point-in-time reads and do not depend on it.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"usage": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Usage is the scalar rollup. See the Usage* key constants.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"timestamp", "window", "usage"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_clrk_api_metrics_v1alpha1_WorkerPoolMetricsList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "WorkerPoolMetricsList is a list of WorkerPoolMetrics.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/apoxy-dev/clrk/api/metrics/v1alpha1.WorkerPoolMetrics"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/apoxy-dev/clrk/api/metrics/v1alpha1.WorkerPoolMetrics", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
 	}
 }
 

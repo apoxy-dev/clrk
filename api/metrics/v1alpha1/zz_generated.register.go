@@ -70,6 +70,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&MetricSeriesSet{},
 		&TaskAgentMetrics{},
 		&TaskAgentMetricsList{},
+		&WorkerPoolMetrics{},
+		&WorkerPoolMetricsList{},
 	)
 	// AddToGroupVersion allows the serialization of client types like ListOptions.
 	v1.AddToGroupVersion(scheme, SchemeGroupVersion)

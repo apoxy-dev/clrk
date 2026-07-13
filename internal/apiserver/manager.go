@@ -47,6 +47,7 @@ import (
 	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
 	"github.com/apoxy-dev/clrk/internal/apiserver/metricsquery"
 	"github.com/apoxy-dev/clrk/internal/apiserver/telemetry"
+	"github.com/apoxy-dev/clrk/internal/apiserver/workerpoolmetrics"
 	"github.com/apoxy-dev/clrk/internal/invevent"
 )
 
@@ -515,6 +516,23 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	srvBuilder = srvBuilder.WithStorage(
 		metricsv1alpha1.SchemeGroupVersion.WithResource("egressgatewaymetrics"),
 		egressmetrics.NewEgressGatewayMetricsProvider(egressmetrics.Deps{
+			Pool:   lazyPool,
+			Client: metricsClient,
+		}),
+	)
+
+	// workerpoolmetrics: the Tier-1 pool snapshot (the console pools list).
+	// A flat {timestamp, window, usage} object per WorkerPool joining
+	// point-in-time CR gauges (replica counts, execution-slot capacity,
+	// in-flight executions) to a window aggregate over the pool's
+	// ingress.dispatch spans (invocations dispatched, dispatch errors,
+	// dispatch-latency percentiles). No series subresource: the Tier-2
+	// catalog recipes read agent/gateway spans that never carry
+	// clrk.worker.pool, so a pool time-series needs its own dispatch-sourced
+	// recipes rather than a scope over the existing catalog (follow-up).
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("workerpoolmetrics"),
+		workerpoolmetrics.NewWorkerPoolMetricsProvider(workerpoolmetrics.Deps{
 			Pool:   lazyPool,
 			Client: metricsClient,
 		}),
