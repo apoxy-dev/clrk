@@ -3,7 +3,7 @@ module github.com/apoxy-dev/clrk
 go 1.25.5
 
 require (
-	github.com/apoxy-dev/apoxy v0.20.1-0.20260707190119-a30d1e9a4323
+	github.com/apoxy-dev/apoxy v0.20.1-0.20260713064824-4c986f267661
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
 	github.com/bytedance/sonic v1.15.1
 	github.com/charmbracelet/bubbles v0.21.0
@@ -373,3 +373,12 @@ replace github.com/docker/docker => github.com/docker/docker v27.0.3+incompatibl
 replace github.com/docker/cli => github.com/docker/cli v27.0.3+incompatible
 
 replace github.com/docker/go-connections => github.com/docker/go-connections v0.5.0
+
+// Mirrors the quic-go fork replaces in apoxy-dev/apoxy's go.mod; the apoxy
+// pin above (pkg/tunnel) resolves against these forks, so clrk's module
+// graph must carry the same replaces to build coherently.
+replace github.com/quic-go/quic-go => github.com/apoxy-dev/quic-go v0.0.0-20260402225711-bc93b3ff7555
+
+replace github.com/quic-go/qpack => github.com/quic-go/qpack v0.5.1
+
+replace github.com/quic-go/connect-ip-go => github.com/apoxy-dev/connect-ip-go v0.0.0-20250530062404-603929a73f45

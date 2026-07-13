@@ -12,6 +12,7 @@ import (
 
 	otellog "go.opentelemetry.io/otel/log"
 	corev1 "k8s.io/api/core/v1"
+	"oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/apoxy-dev/clrk/internal/egress"
 	"github.com/apoxy-dev/clrk/internal/egress/proxyproto"
@@ -87,9 +88,11 @@ func NewManager(cfg ManagerConfig) *Manager {
 }
 
 // EnsureImage pulls (or returns cached metadata for) ref via the core
-// image store.
+// image store. clrk pulls anonymously today (agent images are public or
+// pre-provisioned on the node), so it passes the empty credential; if a
+// registry-pull-secret plane lands it threads through here.
 func (m *Manager) EnsureImage(ctx context.Context, ref string) (*ImageInfo, error) {
-	return m.core.EnsureImage(ctx, ref)
+	return m.core.EnsureImage(ctx, ref, auth.EmptyCredential)
 }
 
 // ImageStore returns the core image store so callers that need the
@@ -136,7 +139,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Instance, err
 	// Resolve the rootfs up front so the trust-bundle mounts only overlay
 	// CA paths that exist in it. The pull is singleflight-cached, so the
 	// re-pull inside core.Create is free.
-	imgInfo, err := m.core.EnsureImage(ctx, req.Sandbox.Image)
+	imgInfo, err := m.core.EnsureImage(ctx, req.Sandbox.Image, auth.EmptyCredential)
 	if err != nil {
 		return nil, fmt.Errorf("ensuring image: %w", err)
 	}
