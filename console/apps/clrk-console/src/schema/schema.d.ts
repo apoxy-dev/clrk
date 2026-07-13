@@ -1480,6 +1480,64 @@ export interface components {
             /** @default {} */
             metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
         };
+        /** @description EgressGatewayMetrics is a point-in-time rollup of one EgressGateway's proxied traffic over Window, derived by aggregating the gateway's egress ext_proc spans (EGRef-scoped otel_traces rows). Its name and namespace match the EgressGateway it summarizes. Usage carries the gateway-wide totals; Listeners nests a usage per listener and per attached route, the way PodMetrics carries a usage per container. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetrics": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @description Listeners breaks the rollup down by the gateway's declared listeners and the routes attached to each. */
+            listeners?: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressListenerMetrics"][];
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            timestamp: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /** @description Usage is the gateway-wide rollup, including traffic that matched no attached route (default-policy traffic), which no listener entry can carry. */
+            usage: {
+                [key: string]: components["schemas"]["io.k8s.apimachinery.pkg.api.resource.Quantity"];
+            };
+            window: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Duration"];
+        };
+        /** @description EgressGatewayMetricsList is a list of EgressGatewayMetrics. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetricsList": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            items: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetrics"][];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
+        };
+        /** @description EgressListenerMetrics is the rollup for one declared listener: the sum of its attached routes' usage. Egress spans carry route identity, not listener identity, so a route attached to several listeners (a parentRef with no sectionName) contributes its full usage to each -- per-listener rows may overlap; the top-level Usage never double-counts. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressListenerMetrics": {
+            /**
+             * @description Name is the listener name from the EgressGateway spec.
+             * @default
+             */
+            name: string;
+            /** @description Routes is the per-attached-route breakdown. */
+            routes?: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressRouteMetrics"][];
+            /** @description Usage is the sum over Routes. */
+            usage: {
+                [key: string]: components["schemas"]["io.k8s.apimachinery.pkg.api.resource.Quantity"];
+            };
+        };
+        /** @description EgressRouteMetrics is the rollup for one route attached to a listener. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressRouteMetrics": {
+            /**
+             * @description Kind is the route CRD kind ("AIProviderRoute" / "MCPRoute").
+             * @default
+             */
+            kind: string;
+            /**
+             * @description Name is the route's object name. Its namespace is not carried: a route attaches from its own namespace and the listener entry is already scoped to one gateway.
+             * @default
+             */
+            name: string;
+            /** @description Usage is the route's windowed rollup. */
+            usage: {
+                [key: string]: components["schemas"]["io.k8s.apimachinery.pkg.api.resource.Quantity"];
+            };
+        };
         /** @description Metric is one entry of the Tier-2 catalog: a named aggregation recipe over the otel_traces / otel_logs spans, with the dimensions it may be grouped by. Its Name is the stable metric id (e.g. "gen_ai.tokens") used as the path element of the series subresource. The catalog is the LIST of this resource, so the console renders its metric menus, units, and legends from a typed object instead of hardcoded JS, and `kubectl get metrics` prints it. */
         "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.Metric": {
             /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
@@ -7637,20 +7695,6 @@ export interface components {
          * @description BackendRef defines how a Route should forward a request to a Kubernetes resource.
          *
          *     Note that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
-         *
-         *     <gateway:experimental:description>
-         *
-         *     When the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.
-         *
-         *     Implementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.
-         *
-         *     If a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.
-         *
-         *     If a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the "ResolvedRefs" condition to "False" with the "UnsupportedProtocol" reason.
-         *
-         *     </gateway:experimental:description>
-         *
-         *     Note that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.
          */
         "io.k8s.sigs.gateway-api.apis.v1.BackendRef": {
             /** @description Group is the group of the referent. For example, "gateway.networking.k8s.io". When unspecified or empty string, core API group is inferred. */
@@ -9700,11 +9744,9 @@ export interface components {
             namespace?: string;
         };
         /**
-         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with "Core" support:
+         * @description ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with "Core" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.
          *
-         *     * Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)
-         *
-         *     This API may be extended in the future to support additional kinds of parent resources.
+         *     Note that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.
          *
          *     The API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.
          */

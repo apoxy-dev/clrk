@@ -63,6 +63,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&DaemonAgentMetrics{},
 		&DaemonAgentMetricsList{},
+		&EgressGatewayMetrics{},
+		&EgressGatewayMetricsList{},
 		&Metric{},
 		&MetricList{},
 		&MetricSeriesSet{},

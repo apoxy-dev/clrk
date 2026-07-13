@@ -3055,6 +3055,136 @@
           }
         }
       },
+      "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetrics": {
+        "description": "EgressGatewayMetrics is a point-in-time rollup of one EgressGateway's proxied traffic over Window, derived by aggregating the gateway's egress ext_proc spans (EGRef-scoped otel_traces rows). Its name and namespace match the EgressGateway it summarizes. Usage carries the gateway-wide totals; Listeners nests a usage per listener and per attached route, the way PodMetrics carries a usage per container.",
+        "type": "object",
+        "required": [
+          "timestamp",
+          "window",
+          "usage"
+        ],
+        "properties": {
+          "apiVersion": {
+            "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+            "type": "string"
+          },
+          "listeners": {
+            "description": "Listeners breaks the rollup down by the gateway's declared listeners and the routes attached to each.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressListenerMetrics"
+            }
+          },
+          "metadata": {
+            "default": {},
+            "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+          },
+          "timestamp": {
+            "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+          },
+          "usage": {
+            "description": "Usage is the gateway-wide rollup, including traffic that matched no attached route (default-policy traffic), which no listener entry can carry.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.api.resource.Quantity"
+            }
+          },
+          "window": {
+            "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Duration"
+          }
+        }
+      },
+      "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetricsList": {
+        "description": "EgressGatewayMetricsList is a list of EgressGatewayMetrics.",
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "apiVersion": {
+            "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressGatewayMetrics"
+            }
+          },
+          "kind": {
+            "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+            "type": "string"
+          },
+          "metadata": {
+            "default": {},
+            "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"
+          }
+        }
+      },
+      "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressListenerMetrics": {
+        "description": "EgressListenerMetrics is the rollup for one declared listener: the sum of its attached routes' usage. Egress spans carry route identity, not listener identity, so a route attached to several listeners (a parentRef with no sectionName) contributes its full usage to each -- per-listener rows may overlap; the top-level Usage never double-counts.",
+        "type": "object",
+        "required": [
+          "name",
+          "usage"
+        ],
+        "properties": {
+          "name": {
+            "description": "Name is the listener name from the EgressGateway spec.",
+            "type": "string",
+            "default": ""
+          },
+          "routes": {
+            "description": "Routes is the per-attached-route breakdown.",
+            "type": "array",
+            "items": {
+              "default": {},
+              "$ref": "#/components/schemas/com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressRouteMetrics"
+            }
+          },
+          "usage": {
+            "description": "Usage is the sum over Routes.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.api.resource.Quantity"
+            }
+          }
+        }
+      },
+      "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.EgressRouteMetrics": {
+        "description": "EgressRouteMetrics is the rollup for one route attached to a listener.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "usage"
+        ],
+        "properties": {
+          "kind": {
+            "description": "Kind is the route CRD kind (\"AIProviderRoute\" / \"MCPRoute\").",
+            "type": "string",
+            "default": ""
+          },
+          "name": {
+            "description": "Name is the route's object name. Its namespace is not carried: a route attaches from its own namespace and the listener entry is already scoped to one gateway.",
+            "type": "string",
+            "default": ""
+          },
+          "usage": {
+            "description": "Usage is the route's windowed rollup.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.api.resource.Quantity"
+            }
+          }
+        }
+      },
       "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.Metric": {
         "description": "Metric is one entry of the Tier-2 catalog: a named aggregation recipe over the otel_traces / otel_logs spans, with the dimensions it may be grouped by. Its Name is the stable metric id (e.g. \"gen_ai.tokens\") used as the path element of the series subresource. The catalog is the LIST of this resource, so the console renders its metric menus, units, and legends from a typed object instead of hardcoded JS, and `kubectl get metrics` prints it.",
         "type": "object",
@@ -13419,7 +13549,7 @@
         }
       },
       "io.k8s.sigs.gateway-api.apis.v1.BackendRef": {
-        "description": "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.\n\n\u003cgateway:experimental:description\u003e\n\nWhen the BackendRef points to a Kubernetes Service, implementations SHOULD honor the appProtocol field if it is set for the target Service Port.\n\nImplementations supporting appProtocol SHOULD recognize the Kubernetes Standard Application Protocols defined in KEP-3726.\n\nIf a Service appProtocol isn't specified, an implementation MAY infer the backend protocol through its own means. Implementations MAY infer the protocol from the Route type referring to the backend Service.\n\nIf a Route is not able to send traffic to the backend using the specified protocol then the backend is considered invalid. Implementations MUST set the \"ResolvedRefs\" condition to \"False\" with the \"UnsupportedProtocol\" reason.\n\n\u003c/gateway:experimental:description\u003e\n\nNote that when the BackendTLSPolicy object is enabled by the implementation, there are some extra rules about validity to consider here. See the fields where this struct is used for more information about the exact behavior.",
+        "description": "BackendRef defines how a Route should forward a request to a Kubernetes resource.\n\nNote that when a namespace different than the local namespace is specified, a ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.",
         "type": "object",
         "required": [
           "name"
@@ -14922,7 +15052,7 @@
         }
       },
       "io.k8s.sigs.gateway-api.apis.v1.ParentReference": {
-        "description": "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). There are two kinds of parent resources with \"Core\" support:\n\n* Gateway (Gateway conformance profile) * Service (Mesh conformance profile, ClusterIP Services only)\n\nThis API may be extended in the future to support additional kinds of parent resources.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
+        "description": "ParentReference identifies an API object (usually a Gateway) that can be considered a parent of this resource (usually a route). The only kind of parent resource with \"Core\" support is Gateway. This API may be extended in the future to support additional kinds of parent resources, such as HTTPRoute.\n\nNote that there are specific rules for ParentRefs which cross namespace boundaries. Cross-namespace references are only valid if they are explicitly allowed by something in the namespace they are referring to. For example: Gateway has the AllowedRoutes field, and ReferenceGrant provides a generic way to enable any other kind of cross-namespace reference.\n\nThe API object must be valid in the cluster; the Group and Kind must be registered in the cluster for this reference to be valid.",
         "type": "object",
         "required": [
           "name"
@@ -15723,7 +15853,7 @@
     }
   },
   "info": {
-    "title": "CLRK Console API",
+    "title": "CLRK API",
     "version": "v0"
   },
   "openapi": "3.0.0",

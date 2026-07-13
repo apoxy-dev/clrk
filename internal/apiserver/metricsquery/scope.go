@@ -22,6 +22,9 @@ const (
 	// EntityDaemonAgent scopes to the named DaemonAgent
 	// (daemonagentmetrics/{name}/series).
 	EntityDaemonAgent EntityKind = "daemonagent"
+	// EntityEgressGateway scopes to the named EgressGateway
+	// (egressgatewaymetrics/{name}/series).
+	EntityEgressGateway EntityKind = "egressgateway"
 )
 
 // scope is the server-enforced read scope: a set of WHERE pins narrowing the
@@ -42,15 +45,18 @@ type scope struct {
 }
 
 // entityScope builds the fixed scope for a per-entity series Connecter from the
-// path namespace + agent name. Only agents have a per-entity surface (their
-// Tier-1 snapshot resource carries the series subresource); an agent scope pins
-// namespace + kind + name.
+// path namespace + entity name. An agent scope pins namespace + kind + name; a
+// gateway scope pins EGRef only (it already encodes the namespace, and an
+// agent.namespace predicate would drop egress spans that never recorded it --
+// same reasoning as refineFleetScope's gateway case).
 func entityScope(kind EntityKind, namespace, name string) scope {
 	switch kind {
 	case EntityTaskAgent:
 		return scope{namespace: namespace, agentKind: clrkv1alpha1.AgentKindTask, agent: name}
 	case EntityDaemonAgent:
 		return scope{namespace: namespace, agentKind: clrkv1alpha1.AgentKindDaemon, agent: name}
+	case EntityEgressGateway:
+		return scope{egRef: namespace + "/" + name}
 	default:
 		// Fail closed: an unhandled kind (a wiring bug) pins an impossible Agent
 		// so it matches nothing, rather than broadening to the whole namespace.

@@ -42,6 +42,7 @@ import (
 	clrkopenapi "github.com/apoxy-dev/clrk/api/generated"
 	metricsv1alpha1 "github.com/apoxy-dev/clrk/api/metrics/v1alpha1"
 	"github.com/apoxy-dev/clrk/internal/apiserver/agentmetrics"
+	"github.com/apoxy-dev/clrk/internal/apiserver/egressmetrics"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invocation"
 	"github.com/apoxy-dev/clrk/internal/apiserver/invoke"
 	"github.com/apoxy-dev/clrk/internal/apiserver/metricsquery"
@@ -484,18 +485,19 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	// over the shared LazyPool, not the kine-backed generic store. Its own
 	// aggregated group, so it needs its own scheme installer.
 	srvBuilder = srvBuilder.WithAdditionalSchemeInstallers(metricsv1alpha1.Install)
+	// Resolved per request: the Storage is built before the ctrl.Manager
+	// client exists, but List/Get enumerate the CRs only once the control
+	// plane is up (same lazy pattern as the invoke subresource).
+	metricsClient := func() client.Client {
+		mgr := m.CtrlManager()
+		if mgr == nil {
+			return nil
+		}
+		return mgr.GetClient()
+	}
 	agentMetricsDeps := agentmetrics.Deps{
-		Pool: lazyPool,
-		// Resolved per request: the Storage is built before the ctrl.Manager
-		// client exists, but List/Get enumerate agent CRs only once the
-		// control plane is up (same lazy pattern as the invoke subresource).
-		Client: func() client.Client {
-			mgr := m.CtrlManager()
-			if mgr == nil {
-				return nil
-			}
-			return mgr.GetClient()
-		},
+		Pool:   lazyPool,
+		Client: metricsClient,
 	}
 	srvBuilder = srvBuilder.WithStorage(
 		metricsv1alpha1.SchemeGroupVersion.WithResource("taskagentmetrics"),
@@ -504,6 +506,18 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	srvBuilder = srvBuilder.WithStorage(
 		metricsv1alpha1.SchemeGroupVersion.WithResource("daemonagentmetrics"),
 		agentmetrics.NewDaemonAgentMetricsProvider(agentMetricsDeps),
+	)
+
+	// egressgatewaymetrics: the Tier-1 gateway snapshot (the egress list +
+	// miller view). Same read-time aggregation over otel_traces, keyed by
+	// the EGRef leading sort key; the per-listener/route nesting joins the
+	// scan's route-attributed rows to the route CR topology.
+	srvBuilder = srvBuilder.WithStorage(
+		metricsv1alpha1.SchemeGroupVersion.WithResource("egressgatewaymetrics"),
+		egressmetrics.NewEgressGatewayMetricsProvider(egressmetrics.Deps{
+			Pool:   lazyPool,
+			Client: metricsClient,
+		}),
 	)
 
 	// Tier-2: the metric catalog + time-series query (the charts the Tier-1
@@ -532,6 +546,7 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	}{
 		{"taskagentmetrics/series", metricsquery.EntityTaskAgent},
 		{"daemonagentmetrics/series", metricsquery.EntityDaemonAgent},
+		{"egressgatewaymetrics/series", metricsquery.EntityEgressGateway},
 	} {
 		srvBuilder = srvBuilder.WithStorage(
 			metricsv1alpha1.SchemeGroupVersion.WithResource(sub.resource),
