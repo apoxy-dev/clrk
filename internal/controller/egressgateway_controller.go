@@ -26,6 +26,7 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
+	"github.com/apoxy-dev/clrk/internal/egpki"
 	"github.com/apoxy-dev/clrk/internal/llmroute"
 )
 
@@ -122,6 +123,21 @@ type EgressGatewayReconciler struct {
 	// upstream-CA Secrets and to list EG-managed Services for
 	// listener status. Required.
 	EnvoyGatewayNamespace string
+
+	// InsecureGRPC mirrors controller-manager's --insecure-grpc-no-mtls.
+	// When true (dev), the :9443 control plane is plaintext and identity is
+	// derived from :authority, so the per-EG client cert + CA mounts are
+	// skipped. When false (the secure default), the reconciler mints a
+	// per-EG client cert and the Envoy Deployment mounts it plus the shared
+	// control-plane CA.
+	InsecureGRPC bool
+
+	// ControlPlaneRootCert / ControlPlaneRootKey are the control-plane root
+	// CA the controller-manager minted at startup (see controlplane_pki.go).
+	// Held in memory so per-EG client certs mint without a cross-namespace
+	// read of the root private key. Empty when InsecureGRPC is true.
+	ControlPlaneRootCert []byte
+	ControlPlaneRootKey  []byte
 }
 
 // +kubebuilder:rbac:groups=clrk.apoxy.dev,resources=egressgateways,verbs=get;list;watch;update;patch
@@ -152,6 +168,9 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.deleteUpstreamTrustMirror(ctx, eg.Name); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reaping upstream trust mirror: %w", err)
 			}
+			if err := r.deleteControlPlaneClientCert(ctx, eg.Namespace, eg.Name); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reaping control-plane client cert: %w", err)
+			}
 			controllerutil.RemoveFinalizer(&eg, EgressGatewayFinalizer)
 			if err := r.Update(ctx, &eg); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
@@ -177,6 +196,12 @@ func (r *EgressGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.ensureCASecret(ctx, &eg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring CA secret: %w", err)
+	}
+
+	// Mint the per-EG control-plane mTLS client cert before ensureEnvoyProxy
+	// so the Deployment's Secret mount resolves on first roll.
+	if err := r.ensureControlPlaneClientCert(ctx, &eg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensuring control-plane client cert: %w", err)
 	}
 
 	if err := r.ensureUpstreamTrustMirror(ctx, &eg); err != nil {
@@ -334,7 +359,7 @@ func (r *EgressGatewayReconciler) ensureEnvoyProxy(ctx context.Context, eg *clrk
 				EnvoyService: &egv1alpha1.KubernetesServiceSpec{
 					Type: &svcType,
 				},
-				EnvoyDeployment: buildEnvoyDeploymentSpec(eg, img),
+				EnvoyDeployment: buildEnvoyDeploymentSpec(eg, img, !r.InsecureGRPC),
 			},
 		}
 		return ctrl.SetControllerReference(eg, ep, r.Scheme)
@@ -356,13 +381,44 @@ const systemTrustPath = "/etc/ssl/certs/ca-certificates.crt"
 // patch for HostAliases when the EG pins specific upstream hostnames.
 // When neither is requested the result is just the image override
 // (matching the previous behavior).
-func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string) *egv1alpha1.KubernetesDeploymentSpec {
+func buildEnvoyDeploymentSpec(eg *clrkv1alpha1.EgressGateway, image string, mtls bool) *egv1alpha1.KubernetesDeploymentSpec {
 	dep := &egv1alpha1.KubernetesDeploymentSpec{}
 	if image != "" {
 		dep.Container = &egv1alpha1.KubernetesContainerSpec{Image: &image}
 	}
 
 	dep.Patch = envoyDeploymentPatch(eg)
+
+	// mTLS toward the control plane: mount the per-EG client cert and the
+	// shared control-plane CA so the Envoy's GoogleGrpc channels present a
+	// client cert to :9443 and verify its server cert. Unconditional (not
+	// gated on the upstream-trust bundle below) but skipped in insecure dev.
+	if mtls {
+		if dep.Pod == nil {
+			dep.Pod = &egv1alpha1.KubernetesPodSpec{}
+		}
+		dep.Pod.Volumes = append(dep.Pod.Volumes,
+			corev1.Volume{
+				Name: "clrk-cp-client",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: ControlPlaneClientSecretName(eg.Namespace, eg.Name)},
+				},
+			},
+			corev1.Volume{
+				Name: "clrk-cp-ca",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: ControlPlaneCASecretName},
+				},
+			},
+		)
+		if dep.Container == nil {
+			dep.Container = &egv1alpha1.KubernetesContainerSpec{}
+		}
+		dep.Container.VolumeMounts = append(dep.Container.VolumeMounts,
+			corev1.VolumeMount{Name: "clrk-cp-client", MountPath: "/etc/clrk/client", ReadOnly: true},
+			corev1.VolumeMount{Name: "clrk-cp-ca", MountPath: "/etc/clrk/ca", ReadOnly: true},
+		)
+	}
 
 	bundleSecret := upstreamAdditionalTrustSecret(eg)
 	if bundleSecret == "" {
@@ -535,6 +591,107 @@ func (r *EgressGatewayReconciler) deleteUpstreamTrustMirror(ctx context.Context,
 	if err := r.Delete(ctx, mirror); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("deleting upstream trust mirror %s/%s: %w",
 			r.EnvoyGatewayNamespace, mirror.Name, err)
+	}
+	return nil
+}
+
+// ControlPlaneClientSecretLabel marks a Secret as a per-EG control-plane mTLS
+// client cert.
+const ControlPlaneClientSecretLabel = "clrk.apoxy.dev/egressgateway-cp-client"
+
+// ControlPlaneClientSecretName is the deterministic name for a per-EG mTLS
+// client-cert Secret. Like the upstream-trust mirror it lives in the EG
+// control-plane namespace (r.EnvoyGatewayNamespace) so the EG-managed Envoy
+// pod, which runs there, can mount it. Every EG across every namespace shares
+// that one namespace, so the name embeds a short hash of the EG's namespaced
+// name: two EGs of the same name in different namespaces must not collide onto
+// a single Secret, or the second would mount the first's cert and present the
+// wrong tenant identity (a namespace-qualified SAN) to the control plane.
+func ControlPlaneClientSecretName(egNamespace, egName string) string {
+	sum := sha256.Sum256([]byte(egNamespace + "/" + egName))
+	return fmt.Sprintf("clrk-eg-%s-cp-client-%s", egName, hex.EncodeToString(sum[:4]))
+}
+
+// ensureControlPlaneClientCert mints (once) the per-EG client certificate the
+// EG-managed Envoy presents when dialing controller-manager's :9443 control
+// plane over mTLS, and writes it to a Secret in the EG control-plane namespace.
+// The cert's sole SAN is egidentity.AuthorityFor(eg), which the server maps to
+// the calling EG. Like the upstream-trust mirror it carries no owner reference
+// (owner refs can't cross namespaces) and is reaped by the finalizer.
+//
+// When InsecureGRPC is set the control plane is plaintext, so no client cert is
+// needed -- any stale Secret from a prior secure run is removed.
+func (r *EgressGatewayReconciler) ensureControlPlaneClientCert(ctx context.Context, eg *clrkv1alpha1.EgressGateway) error {
+	if r.InsecureGRPC {
+		return r.deleteControlPlaneClientCert(ctx, eg.Namespace, eg.Name)
+	}
+	name := ControlPlaneClientSecretName(eg.Namespace, eg.Name)
+	key := types.NamespacedName{Namespace: r.EnvoyGatewayNamespace, Name: name}
+	egNN := types.NamespacedName{Namespace: eg.Namespace, Name: eg.Name}
+
+	var existing corev1.Secret
+	getErr := r.Get(ctx, key, &existing)
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		return fmt.Errorf("reading control-plane client cert %s/%s: %w", r.EnvoyGatewayNamespace, name, getErr)
+	}
+	exists := getErr == nil
+	// Reuse only if the existing cert still chains to the current root. On root
+	// rotation the shared CA bundle advances, so an old-root-signed client cert
+	// would be rejected by the control plane and every mTLS dial from this EG's
+	// Envoy would fail; certChainsTo also catches an expired leaf.
+	if exists && certChainsTo(existing.Data[corev1.TLSCertKey], r.ControlPlaneRootCert) {
+		return nil
+	}
+
+	certPEM, keyPEM, err := egpki.MintEGClientCert(r.ControlPlaneRootCert, r.ControlPlaneRootKey, egNN)
+	if err != nil {
+		return fmt.Errorf("minting control-plane client cert for %s/%s: %w", eg.Namespace, eg.Name, err)
+	}
+	if exists {
+		// Re-mint in place (root rotation / expiry). A Conflict here is a
+		// benign concurrent reconcile; returning the error requeues.
+		if existing.Data == nil {
+			existing.Data = map[string][]byte{}
+		}
+		existing.Data[corev1.TLSCertKey] = certPEM
+		existing.Data[corev1.TLSPrivateKeyKey] = keyPEM
+		if err := r.Update(ctx, &existing); err != nil {
+			return fmt.Errorf("updating control-plane client cert %s/%s: %w", r.EnvoyGatewayNamespace, name, err)
+		}
+		return nil
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.EnvoyGatewayNamespace,
+			Labels: map[string]string{
+				ControlPlaneClientSecretLabel:            eg.Name,
+				"clrk.apoxy.dev/egressgateway-namespace": eg.Namespace,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{corev1.TLSCertKey: certPEM, corev1.TLSPrivateKeyKey: keyPEM},
+	}
+	// No SetControllerReference: owner refs can't cross namespaces (the EG
+	// lives in eg.Namespace, this Secret in r.EnvoyGatewayNamespace), so the
+	// finalizer reaps it. Tolerate AlreadyExists on a reconcile race.
+	if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating control-plane client cert %s/%s: %w", r.EnvoyGatewayNamespace, name, err)
+	}
+	return nil
+}
+
+// deleteControlPlaneClientCert removes a per-EG client-cert Secret from the EG
+// control-plane namespace. Idempotent: a missing Secret is not an error.
+func (r *EgressGatewayReconciler) deleteControlPlaneClientCert(ctx context.Context, egNamespace, egName string) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ControlPlaneClientSecretName(egNamespace, egName),
+			Namespace: r.EnvoyGatewayNamespace,
+		},
+	}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting control-plane client cert %s/%s: %w", r.EnvoyGatewayNamespace, secret.Name, err)
 	}
 	return nil
 }

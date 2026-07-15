@@ -91,6 +91,13 @@ func controllerManagerObjects(p Profile) (preDeploy []client.Object, deploy *app
 	if p.EgressBackendHost != "" {
 		args = append(args, "--dev-egress-backend-host="+p.EgressBackendHost)
 	}
+	// Dev keeps the :9443 control plane plaintext (EG identity from
+	// :authority): the docker-network data plane has no control-plane PKI
+	// wired, so requiring client mTLS would break the cert-provider/ext_proc
+	// dial. Cluster installs omit this and run mTLS by default.
+	if p.Dev {
+		args = append(args, "--insecure-grpc-no-mtls")
+	}
 	// On a cluster the cm serves the aggregated API with a real cert mounted at
 	// --cert-dir (cert-manager- or installer-minted); dev leaves it empty and
 	// self-signs in-memory (with InsecureSkipTLSVerify on the APIService).

@@ -19,6 +19,7 @@ package egextension
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,15 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// Data-plane client mTLS material, file-mounted on the EG-managed Envoy pod
+// by the EgressGateway reconciler. Consumed by the GoogleGrpc channels that
+// dial the controller-manager's cert-provider + ext_proc services.
+const (
+	clientCertChainPath      = "/etc/clrk/client/tls.crt"
+	clientPrivKeyPath        = "/etc/clrk/client/tls.key"
+	clientServerCABundlePath = "/etc/clrk/ca/ca.crt"
 )
 
 // Well-known extension names.
@@ -195,6 +205,19 @@ type Server struct {
 	// matching clrk-llm-* clusters. Same EG v1.4 no-listener-context
 	// rationale (and the same bounded non-eviction) as dnsCacheByEG.
 	llmByEG sync.Map // egKey → *llmConfig
+
+	// mtls programs the GoogleGrpc channels toward the controller-manager
+	// with client mTLS (SslCredentials from the file-mounted client cert +
+	// server CA). When false (dev, --insecure-grpc-no-mtls) the channels
+	// stay plaintext and the synthetic per-EG :authority is the identity
+	// claim, matching the pre-mTLS behavior.
+	mtls bool
+
+	// advertiseHost is the controller-manager host (the target URI host
+	// without port). In mTLS mode it is the grpc.default_authority the
+	// ext_proc channels use, so gRPC verifies the server cert against a
+	// matching SAN rather than the synthetic per-EG authority.
+	advertiseHost string
 }
 
 // New constructs an extension server. The URIs are the gRPC addresses
@@ -202,17 +225,66 @@ type Server struct {
 // by the clrk controller-manager). c reads EgressGateway resources for
 // per-EG knobs; pass nil only in tests that exercise the shape rewrite
 // without per-EG configuration.
-func New(c client.Client, certProviderURI, extProcURI string) (*Server, error) {
+//
+// In mTLS mode advertiseHost (the per-call authority for every channel toward
+// controller-manager, cert-provider and ext_proc alike) is derived from
+// certProviderURI. The caller MUST pass a certProviderURI and extProcURI that
+// share a host so the server cert's SANs cover both -- today they are the same
+// URI (grpc-advertise-uri).
+func New(c client.Client, certProviderURI, extProcURI string, mtls bool) (*Server, error) {
 	origDst, err := buildOriginalDstCluster()
 	if err != nil {
 		return nil, err
+	}
+	host := certProviderURI
+	if h, _, splitErr := net.SplitHostPort(certProviderURI); splitErr == nil {
+		host = h
 	}
 	return &Server{
 		Client:                c,
 		CertProviderTargetURI: certProviderURI,
 		ExtProcTargetURI:      extProcURI,
 		origDstCluster:        origDst,
+		mtls:                  mtls,
+		advertiseHost:         host,
 	}, nil
+}
+
+// clientChannelCreds returns the mTLS channel credentials the data-plane Envoy
+// presents when dialing the controller-manager, or nil in insecure (dev) mode.
+// The cert/key/CA are file-mounted by the EgressGateway reconciler.
+func (s *Server) clientChannelCreds() *corev3.GrpcService_GoogleGrpc_ChannelCredentials {
+	if !s.mtls {
+		return nil
+	}
+	file := func(p string) *corev3.DataSource {
+		return &corev3.DataSource{Specifier: &corev3.DataSource_Filename{Filename: p}}
+	}
+	return &corev3.GrpcService_GoogleGrpc_ChannelCredentials{
+		CredentialSpecifier: &corev3.GrpcService_GoogleGrpc_ChannelCredentials_SslCredentials{
+			SslCredentials: &corev3.GrpcService_GoogleGrpc_SslCredentials{
+				RootCerts:  file(clientServerCABundlePath),
+				CertChain:  file(clientCertChainPath),
+				PrivateKey: file(clientPrivKeyPath),
+			},
+		},
+	}
+}
+
+// channelAuthorityFor returns the per-call :authority the GoogleGrpc channels
+// toward the controller-manager use (the ext_proc default_authority and the
+// cert-provider handshaker's Authority field). In mTLS mode it is the
+// controller-manager's advertised host: gRPC C-core runs a per-call
+// check_call_host against the verified server cert's SANs, so the authority
+// MUST be a host the server cert covers -- the synthetic per-EG authority is
+// not a SAN and would be rejected. Identity in mTLS mode comes from the client
+// cert, not this header. In insecure (dev) mode it is the synthetic per-EG
+// authority, which is the identity claim the server parses.
+func (s *Server) channelAuthorityFor(eg types.NamespacedName) string {
+	if s.mtls {
+		return s.advertiseHost
+	}
+	return egidentity.AuthorityFor(eg)
 }
 
 // dnsCacheConfigFor returns the DnsCacheConfig the DFP filter and clusters
@@ -593,10 +665,13 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 	// SNI to FetchCertificate; GrpcService.InitialMetadata is dropped.
 	// We use the apoxy fork's `authority` field instead, which the
 	// patched handshaker wires through grpc::ClientContext::set_authority
-	// per call. The controller-manager's gRPC interceptor parses
-	// :authority off incoming metadata and resolves the calling EG from
-	// it — no peer-IP introspection, works under NAT and with N EGs.
-	authority := egidentity.AuthorityFor(types.NamespacedName{
+	// per call. In insecure (dev) mode this carries the synthetic per-EG
+	// authority the interceptor parses to resolve the calling EG. In mTLS
+	// mode identity comes from the client cert, so the authority is the
+	// server's advertised host instead -- gRPC's per-call check_call_host
+	// verifies it against the server cert SANs, and the synthetic per-EG
+	// authority is not one of them (see channelAuthorityFor).
+	authority := s.channelAuthorityFor(types.NamespacedName{
 		Namespace: key.namespace,
 		Name:      key.name,
 	})
@@ -606,6 +681,12 @@ func (s *Server) injectHandshaker(fc *listenerv3.FilterChain, key egKey) error {
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
 					TargetUri:  s.CertProviderTargetURI,
 					StatPrefix: "clrk_cert_provider",
+					// mTLS toward the cert-provider. gRPC verifies the server
+					// cert against the per-call authority (below), which in
+					// mTLS mode is the advertised host and thus a server-cert
+					// SAN; in insecure mode this is nil and the channel is
+					// plaintext.
+					ChannelCredentials: s.clientChannelCreds(),
 				},
 			},
 		},
@@ -646,10 +727,8 @@ func (s *Server) rewriteHCM(fc *listenerv3.FilterChain, key egKey, dnsCacheCfg *
 	if err != nil {
 		return fmt.Errorf("build dfp http filter: %w", err)
 	}
-	extProcFilter, err := buildExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
-		Namespace: key.namespace,
-		Name:      key.name,
-	}))
+	egNN := types.NamespacedName{Namespace: key.namespace, Name: key.name}
+	extProcFilter, err := buildExtProcFilter(s.ExtProcTargetURI, s.channelAuthorityFor(egNN), s.clientChannelCreds())
 	if err != nil {
 		return fmt.Errorf("build ext_proc filter: %w", err)
 	}
@@ -842,10 +921,8 @@ func shapeFromListener(l *listenerv3.Listener) (clrkv1alpha1.EgressListenerShape
 // resolves; tcp_proxy forwards encrypted bytes through. No
 // TransportSocket — the listener doesn't terminate TLS.
 func (s *Server) buildTLSPassthroughChain(key egKey, dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*listenerv3.FilterChain, error) {
-	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
-		Namespace: key.namespace,
-		Name:      key.name,
-	}))
+	egNN := types.NamespacedName{Namespace: key.namespace, Name: key.name}
+	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, s.channelAuthorityFor(egNN), s.clientChannelCreds())
 	if err != nil {
 		return nil, fmt.Errorf("build network_ext_proc filter: %w", err)
 	}
@@ -874,10 +951,8 @@ func (s *Server) buildTLSPassthroughChain(key egKey, dnsCacheCfg *dfpcommonv3.Dn
 // no TLS termination — the connection is whatever the agent dialed
 // (Postgres wire, SMTP, raw nc, etc.).
 func (s *Server) buildPlainTCPChain(key egKey) (*listenerv3.FilterChain, error) {
-	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
-		Namespace: key.namespace,
-		Name:      key.name,
-	}))
+	egNN := types.NamespacedName{Namespace: key.namespace, Name: key.name}
+	netExtProc, err := buildNetworkExtProcFilter(s.ExtProcTargetURI, s.channelAuthorityFor(egNN), s.clientChannelCreds())
 	if err != nil {
 		return nil, fmt.Errorf("build network_ext_proc filter: %w", err)
 	}
@@ -897,13 +972,14 @@ func (s *Server) buildPlainTCPChain(key egKey) (*listenerv3.FilterChain, error) 
 // modes — those are HTTP-only fields). ProcessRead = STREAMED and
 // ProcessWrite = SKIP: the filter rejects SKIP/SKIP, and observing
 // the agent-direction (read) path is the audit-relevant direction.
-func buildNetworkExtProcFilter(targetURI, authority string) (*listenerv3.Filter, error) {
+func buildNetworkExtProcFilter(targetURI, authority string, creds *corev3.GrpcService_GoogleGrpc_ChannelCredentials) (*listenerv3.Filter, error) {
 	any, err := anypb.New(&netextprocv3.NetworkExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
-					TargetUri:  targetURI,
-					StatPrefix: "clrk_l4_ext_proc",
+					TargetUri:          targetURI,
+					StatPrefix:         "clrk_l4_ext_proc",
+					ChannelCredentials: creds,
 					ChannelArgs: &corev3.GrpcService_GoogleGrpc_ChannelArgs{
 						Args: map[string]*corev3.GrpcService_GoogleGrpc_ChannelArgs_Value{
 							"grpc.default_authority": {
@@ -1007,13 +1083,14 @@ func buildDFPHTTPFilter(dnsCacheCfg *dfpcommonv3.DnsCacheConfig) (*hcmv3.HttpFil
 // source/common/grpc/google_async_client_impl.cc) — the
 // `grpc.default_authority` arg overrides the channel-default authority
 // derived from target_uri.
-func buildExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) {
+func buildExtProcFilter(targetURI, authority string, creds *corev3.GrpcService_GoogleGrpc_ChannelCredentials) (*hcmv3.HttpFilter, error) {
 	any, err := anypb.New(&extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
-					TargetUri:  targetURI,
-					StatPrefix: "clrk_ext_proc",
+					TargetUri:          targetURI,
+					StatPrefix:         "clrk_ext_proc",
+					ChannelCredentials: creds,
 					ChannelArgs: &corev3.GrpcService_GoogleGrpc_ChannelArgs{
 						Args: map[string]*corev3.GrpcService_GoogleGrpc_ChannelArgs_Value{
 							"grpc.default_authority": {

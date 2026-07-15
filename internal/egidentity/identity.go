@@ -1,24 +1,30 @@
 // Package egidentity carries the EgressGateway identity from a calling
 // Envoy proxy to the controller-manager's gRPC services (certprovider,
-// ext_proc) over the HTTP/2 :authority pseudo-header.
+// ext_proc).
 //
-// The handshaker and ext_proc filters are programmed with a per-EG
-// authority of the form `<eg-name>.<eg-namespace>.eg.clrk.local`. On
-// the server side, the gRPC interceptor in this package parses
-// :authority off incoming metadata and stashes the resolved EG identity
-// on the request context. certprovider and ext_proc read it from there
-// instead of doing peer-IP introspection — peer IP breaks under NAT
-// (docker-bridge dev environments, ingress gateways) and doesn't scale
-// to multiple EGs in one cluster.
+// The default (secure) path derives identity from the verified client
+// certificate presented over mTLS: the per-EG client cert carries a single
+// DNS SAN of the form `<eg-name>.<eg-namespace>.eg.clrk.local`, and the
+// server interceptor maps that verified SAN to the calling EG. Because the
+// SAN is signed by the control-plane root CA it cannot be forged — unlike
+// the HTTP/2 :authority header, which any caller can set.
+//
+// The legacy path (behind --insecure-grpc-no-mtls, dev only) parses the
+// per-EG authority off :authority instead. Peer-IP introspection is avoided
+// either way — peer IP breaks under NAT (docker-bridge dev environments,
+// ingress gateways) and doesn't scale to multiple EGs in one cluster.
 package egidentity
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -88,11 +94,12 @@ func authorityFromIncomingContext(ctx context.Context) string {
 	return ""
 }
 
-// UnaryServerInterceptor returns a grpc.UnaryServerInterceptor that
-// parses :authority and stashes the resolved EG identity on ctx.
-// Requests with non-EG :authority pass through unchanged — handlers
-// using FromContext will see ok=false.
-func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
+// LegacyAuthorityUnaryServerInterceptor returns a grpc.UnaryServerInterceptor
+// that parses :authority and stashes the resolved EG identity on ctx. This is
+// the dev-only path behind --insecure-grpc-no-mtls; the secure default is
+// PeerCertUnaryServerInterceptor. Requests with non-EG :authority pass through
+// unchanged — handlers using FromContext will see ok=false.
+func LegacyAuthorityUnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if eg, ok := ParseAuthority(authorityFromIncomingContext(ctx)); ok {
 			ctx = WithEG(ctx, eg)
@@ -101,9 +108,10 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
-// StreamServerInterceptor mirrors UnaryServerInterceptor for streaming
-// RPCs (ext_proc, the FetchCertificate-style streams).
-func StreamServerInterceptor() grpc.StreamServerInterceptor {
+// LegacyAuthorityStreamServerInterceptor mirrors
+// LegacyAuthorityUnaryServerInterceptor for streaming RPCs (ext_proc, the
+// FetchCertificate-style streams).
+func LegacyAuthorityStreamServerInterceptor() grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := ss.Context()
 		if eg, ok := ParseAuthority(authorityFromIncomingContext(ctx)); ok {
@@ -120,13 +128,68 @@ type wrappedStream struct {
 
 func (w *wrappedStream) Context() context.Context { return w.ctx }
 
+// FromPeerCert returns the EG identity encoded in a verified client
+// certificate: the first DNS SAN that parses as a synthetic EG authority.
+func FromPeerCert(cert *x509.Certificate) (types.NamespacedName, bool) {
+	for _, dns := range cert.DNSNames {
+		if eg, ok := ParseAuthority(dns); ok {
+			return eg, true
+		}
+	}
+	return types.NamespacedName{}, false
+}
+
+// peerCertEG extracts the EG identity from the verified client-cert chain on
+// ctx. It reads only VerifiedChains (the chain the TLS stack validated against
+// the control-plane root under RequireAndVerifyClientCert), never the
+// unverified PeerCertificates.
+func peerCertEG(ctx context.Context) (types.NamespacedName, bool) {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return types.NamespacedName{}, false
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return types.NamespacedName{}, false
+	}
+	chains := tlsInfo.State.VerifiedChains
+	if len(chains) == 0 || len(chains[0]) == 0 {
+		return types.NamespacedName{}, false
+	}
+	return FromPeerCert(chains[0][0])
+}
+
+// PeerCertUnaryServerInterceptor returns a grpc.UnaryServerInterceptor that
+// resolves the EG identity from the verified client certificate and stashes it
+// on ctx. This is the secure default; the :authority header is ignored.
+func PeerCertUnaryServerInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if eg, ok := peerCertEG(ctx); ok {
+			ctx = WithEG(ctx, eg)
+		}
+		return handler(ctx, req)
+	}
+}
+
+// PeerCertStreamServerInterceptor mirrors PeerCertUnaryServerInterceptor for
+// streaming RPCs.
+func PeerCertStreamServerInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := ss.Context()
+		if eg, ok := peerCertEG(ctx); ok {
+			return handler(srv, &wrappedStream{ServerStream: ss, ctx: WithEG(ctx, eg)})
+		}
+		return handler(srv, ss)
+	}
+}
+
 // MustFromContext is a convenience for handlers that require an EG
 // identity. Returns a clean gRPC error suitable for surfacing through
 // to the calling Envoy.
 func MustFromContext(ctx context.Context) (types.NamespacedName, error) {
 	eg, ok := FromContext(ctx)
 	if !ok {
-		return types.NamespacedName{}, fmt.Errorf("no EgressGateway identity on request — :authority did not match %q", "*"+authoritySuffix)
+		return types.NamespacedName{}, fmt.Errorf("no EgressGateway identity on request — client certificate SAN did not match %q (or, under --insecure-grpc-no-mtls, :authority did not)", "*"+authoritySuffix)
 	}
 	return eg, nil
 }

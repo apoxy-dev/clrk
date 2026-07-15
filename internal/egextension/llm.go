@@ -42,7 +42,6 @@ import (
 	tlsv3 "github.com/apoxy-dev/envoy-go/envoy/extensions/transport_sockets/tls/v3"
 
 	clrkv1alpha1 "github.com/apoxy-dev/clrk/api/clrk/v1alpha1"
-	"github.com/apoxy-dev/clrk/internal/egidentity"
 	"github.com/apoxy-dev/clrk/internal/llmroute"
 )
 
@@ -515,10 +514,8 @@ func buildLLMEndpointTLS(c llmroute.Candidate) (*anypb.Any, error) {
 // filter, stamped with the per-EG authority (so the stream resolves
 // its EG registry/credentials) plus the upstream role marker.
 func (s *Server) buildLLMUpstreamHTTPOptions(key egKey) (*anypb.Any, error) {
-	extProc, err := buildLLMUpstreamExtProcFilter(s.ExtProcTargetURI, egidentity.AuthorityFor(types.NamespacedName{
-		Namespace: key.namespace,
-		Name:      key.name,
-	}))
+	egNN := types.NamespacedName{Namespace: key.namespace, Name: key.name}
+	extProc, err := buildLLMUpstreamExtProcFilter(s.ExtProcTargetURI, s.channelAuthorityFor(egNN), s.clientChannelCreds())
 	if err != nil {
 		return nil, err
 	}
@@ -564,13 +561,14 @@ func (s *Server) buildLLMUpstreamHTTPOptions(key egKey) (*anypb.Any, error) {
 // doesn't need to run per attempt at all: translation and capture key
 // off the FINAL serving attempt, which the downstream filter handles
 // with the backend identity recorded by this filter's request phase.
-func buildLLMUpstreamExtProcFilter(targetURI, authority string) (*hcmv3.HttpFilter, error) {
+func buildLLMUpstreamExtProcFilter(targetURI, authority string, creds *corev3.GrpcService_GoogleGrpc_ChannelCredentials) (*hcmv3.HttpFilter, error) {
 	any, err := anypb.New(&extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_GoogleGrpc_{
 				GoogleGrpc: &corev3.GrpcService_GoogleGrpc{
-					TargetUri:  targetURI,
-					StatPrefix: "clrk_ext_proc_upstream",
+					TargetUri:          targetURI,
+					StatPrefix:         "clrk_ext_proc_upstream",
+					ChannelCredentials: creds,
 					ChannelArgs: &corev3.GrpcService_GoogleGrpc_ChannelArgs{
 						Args: map[string]*corev3.GrpcService_GoogleGrpc_ChannelArgs_Value{
 							"grpc.default_authority": {

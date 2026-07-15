@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -54,8 +57,12 @@ import (
 )
 
 const (
-	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:665aebbf"
+	defaultEnvoyImage = "us-west1-docker.pkg.dev/apoxy-dev/public/envoy:31edd08e"
 	defaultGRPCPort   = 9443
+	// defaultEGExtensionPort is the loopback port the Envoy Gateway extension
+	// service binds, split off the mTLS-only :9443 so the supervised
+	// envoy-gateway child can dial it in-process without a client cert.
+	defaultEGExtensionPort = 9445
 	// defaultNamespace is the controller-manager's fallback runtime
 	// namespace when POD_NAMESPACE is unset (e.g. `go run`,
 	// out-of-cluster invocations). Production runs in-cluster set
@@ -101,6 +108,8 @@ func main() {
 		envoyImage           = flag.String("envoy-image", defaultEnvoyImage, "Container image used for Envoy Gateway-managed Envoy pods. Must contain the clrk grpc_certificate_provider handshaker extension.")
 		grpcAddr             = flag.String("grpc-addr", fmt.Sprintf(":%d", defaultGRPCPort), "gRPC bind address for the cert-provider / ext_proc / Envoy Gateway extension services.")
 		grpcAdvertiseURI     = flag.String("grpc-advertise-uri", fmt.Sprintf("controller-manager.%s.svc:%d", runtimeNS, defaultGRPCPort), "gRPC target URI the EG extension programs into Envoy's cert-provider + ext_proc filter configs.")
+		insecureGRPCNoMTLS   = flag.Bool("insecure-grpc-no-mtls", false, "DEV ONLY: serve the :9443 control plane in plaintext and derive EgressGateway identity from the caller-controlled :authority instead of a verified client certificate. clrk dev sets this; production leaves mTLS on.")
+		egExtensionAddr      = flag.String("eg-extension-addr", fmt.Sprintf("127.0.0.1:%d", defaultEGExtensionPort), "Loopback bind address for the Envoy Gateway extension gRPC service, split off the mTLS :9443 server so the supervised envoy-gateway child dials it without a client certificate.")
 		devEgressBackendHost = flag.String("dev-egress-backend-host", "", "When set, EgressGateway.Status.Listeners[*].BackendAddress entries are published as <host>:<NodePort> instead of the in-cluster Service DNS name. Used by clrk dev where workers run on the docker network and can't route to k3s ClusterIPs; in-cluster deployments leave this empty.")
 		envoyGatewayBinary   = flag.String("envoy-gateway-binary", "/usr/local/bin/envoy-gateway", "Path to the upstream envoy-gateway binary that this process supervises as a child for the EG control plane.")
 		crdInstallMode       = flag.String("crd-install-mode", "always", "How to apply embedded Gateway API + Envoy Gateway CRDs at startup. One of: always | if-missing | skip.")
@@ -568,6 +577,35 @@ func main() {
 		log.Error(err, "Unable to register controller", "controller", "WorkerPoolDeployment")
 		os.Exit(1)
 	}
+	// Control-plane PKI: mint (or load) the root CA, the :9443 server cert,
+	// and the shared CA bundle before wiring the gRPC server + EG reconciler.
+	// Reads use the uncached API reader (the manager cache is not started
+	// yet); writes use the delegating client. Skipped in insecure dev mode and
+	// when there is no Secret store (pure single-binary), where the control
+	// plane falls back to plaintext + :authority identity.
+	var cpRootCert, cpRootKey, cpServerCert, cpServerKey []byte
+	if !*insecureGRPCNoMTLS && clusterCfg == nil {
+		slog.Warn("Control-plane mTLS requires a Secret store; none configured, serving plaintext gRPC")
+		*insecureGRPCNoMTLS = true
+	}
+	if !*insecureGRPCNoMTLS {
+		rc, rk, perr := controller.EnsureControlPlaneRoot(ctx, cm.GetAPIReader(), cm.GetClient(), runtimeNS)
+		if perr != nil {
+			log.Error(perr, "Unable to ensure control-plane root CA")
+			os.Exit(1)
+		}
+		sc, sk, ca, perr := controller.EnsureControlPlaneServerCert(ctx, cm.GetAPIReader(), cm.GetClient(), runtimeNS, *grpcAdvertiseURI, rc, rk)
+		if perr != nil {
+			log.Error(perr, "Unable to ensure control-plane server cert")
+			os.Exit(1)
+		}
+		if perr := controller.EnsureControlPlaneCABundle(ctx, cm.GetAPIReader(), cm.GetClient(), runtimeNS, ca); perr != nil {
+			log.Error(perr, "Unable to ensure control-plane CA bundle")
+			os.Exit(1)
+		}
+		cpRootCert, cpRootKey, cpServerCert, cpServerKey = rc, rk, sc, sk
+	}
+
 	if *egController {
 		if err := (&controller.EgressGatewayReconciler{
 			Client:                cm.GetClient(),
@@ -575,6 +613,9 @@ func main() {
 			EnvoyImage:            *envoyImage,
 			DevBackendHost:        *devEgressBackendHost,
 			EnvoyGatewayNamespace: runtimeNS,
+			InsecureGRPC:          *insecureGRPCNoMTLS,
+			ControlPlaneRootCert:  cpRootCert,
+			ControlPlaneRootKey:   cpRootKey,
 		}).SetupWithManager(cm); err != nil {
 			log.Error(err, "Unable to register controller", "controller", "EgressGateway")
 			os.Exit(1)
@@ -623,10 +664,42 @@ func main() {
 	go invocations.Run(ctx)
 	defer invocations.Close()
 
-	grpcSrv := grpc.NewServer(
-		grpc.UnaryInterceptor(egidentity.UnaryServerInterceptor()),
-		grpc.StreamInterceptor(egidentity.StreamServerInterceptor()),
-	)
+	var grpcOpts []grpc.ServerOption
+	if *insecureGRPCNoMTLS {
+		slog.Warn("SECURITY: --insecure-grpc-no-mtls set; the :9443 control plane is plaintext and EgressGateway identity is derived from the caller-controlled :authority. Never use in production.")
+		grpcOpts = []grpc.ServerOption{
+			grpc.UnaryInterceptor(egidentity.LegacyAuthorityUnaryServerInterceptor()),
+			grpc.StreamInterceptor(egidentity.LegacyAuthorityStreamServerInterceptor()),
+		}
+	} else {
+		serverPair, err := tls.X509KeyPair(cpServerCert, cpServerKey)
+		if err != nil {
+			log.Error(err, "Unable to load control-plane server keypair")
+			os.Exit(1)
+		}
+		clientCAs := x509.NewCertPool()
+		if !clientCAs.AppendCertsFromPEM(cpRootCert) {
+			log.Error(errors.New("no certificates parsed from control-plane root"), "Unable to build control-plane client CA pool")
+			os.Exit(1)
+		}
+		creds := credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{serverPair},
+			ClientCAs:    clientCAs,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			// TLS 1.2 floor, not 1.3: the data-plane dialer is Envoy's
+			// grpc-core (BoringSSL) client, and a hard 1.3 server floor with no
+			// matching client floor would fail every handshake with no fallback
+			// if that client caps at 1.2. mTLS with RequireAndVerifyClientCert
+			// is the security control here; 1.2 is fully sufficient.
+			MinVersion: tls.VersionTLS12,
+		})
+		grpcOpts = []grpc.ServerOption{
+			grpc.Creds(creds),
+			grpc.UnaryInterceptor(egidentity.PeerCertUnaryServerInterceptor()),
+			grpc.StreamInterceptor(egidentity.PeerCertStreamServerInterceptor()),
+		}
+	}
+	grpcSrv := grpc.NewServer(grpcOpts...)
 	envoytlsv3.RegisterCertificateProviderServiceServer(grpcSrv, certprovider.New(cm.GetClient()))
 	extprocSrv := extproc.New(cm.GetClient(), extproc.WithInvocationContext(invocations))
 	extprocv3.RegisterExternalProcessorServer(grpcSrv, extprocSrv)
@@ -635,12 +708,6 @@ func main() {
 	// emitted on this service represent TCP/TLS connections handled
 	// by the egress listener's TCP-fallback chain.
 	extproc.RegisterNetworkServer(grpcSrv, extprocSrv)
-	egExt, err := egextension.New(cm.GetClient(), *grpcAdvertiseURI, *grpcAdvertiseURI)
-	if err != nil {
-		log.Error(err, "Unable to construct EG extension server")
-		os.Exit(1)
-	}
-	egextpb.RegisterEnvoyGatewayExtensionServer(grpcSrv, egExt)
 	go func() {
 		slog.Info("Serving control-plane gRPC", "addr", grpcLis.Addr().String())
 		if err := grpcSrv.Serve(grpcLis); err != nil {
@@ -653,6 +720,29 @@ func main() {
 		defer cancel()
 		extprocSrv.Stop(shutCtx)
 	}()
+
+	// EG extension on a separate loopback listener. Split off :9443 (now
+	// mTLS-only) because the supervised envoy-gateway child dials this service
+	// in-process without a client certificate.
+	egExtLis, err := net.Listen("tcp", *egExtensionAddr)
+	if err != nil {
+		log.Error(err, "Unable to bind EG extension listener", "addr", *egExtensionAddr)
+		os.Exit(1)
+	}
+	egExt, err := egextension.New(cm.GetClient(), *grpcAdvertiseURI, *grpcAdvertiseURI, !*insecureGRPCNoMTLS)
+	if err != nil {
+		log.Error(err, "Unable to construct EG extension server")
+		os.Exit(1)
+	}
+	egExtGRPC := grpc.NewServer()
+	egextpb.RegisterEnvoyGatewayExtensionServer(egExtGRPC, egExt)
+	go func() {
+		slog.Info("Serving EG extension gRPC", "addr", egExtLis.Addr().String())
+		if err := egExtGRPC.Serve(egExtLis); err != nil {
+			log.Error(err, "EG extension gRPC server exited")
+		}
+	}()
+	defer egExtGRPC.GracefulStop()
 
 	// Ingress ext_proc — separate gRPC listener so the egress and
 	// ingress ExternalProcessor service registrations don't collide.
@@ -699,7 +789,7 @@ func main() {
 
 	egErrCh := make(chan error, 1)
 	if clusterCfg != nil && (*ingressController || *egController) {
-		host, port := splitGRPCAddr(*grpcAddr, defaultGRPCPort)
+		host, port := splitGRPCAddr(*egExtensionAddr, defaultEGExtensionPort)
 		go func() {
 			egErrCh <- egcontrolplane.Run(ctx, egcontrolplane.Config{
 				BinaryPath:          *envoyGatewayBinary,
