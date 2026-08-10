@@ -117,7 +117,7 @@ func main() {
 		ingressExtProcHost   = flag.String("ingress-extproc-host", "", "FQDN/IP the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port. Required when --ingress-controller is on.")
 		ingressExtProcPort   = flag.Int("ingress-extproc-port", 9444, "TCP port the in-cluster Backend uses to reach this controller-manager's ingress ext_proc port.")
 		adminAddr            = flag.String("admin-addr", ":8085", "Bind address for the /admin/* system-state HTTP endpoint. Read-only, unauthenticated; gate via network reachability (bind to loopback or to the in-cluster Service only).")
-		consoleAddr          = flag.String("console-addr", ":8086", "Bind address for the embedded web console. Plain HTTP: serves the SPA bundle and reverse-proxies /api,/apis to the loopback apiserver so the browser sees one same-origin, plain-HTTP endpoint. Unauthenticated like /admin; gate via network reachability. Empty disables.")
+		consoleAddr          = flag.String("console-addr", ":8086", "Bind address for the embedded web console. Plain HTTP: serves the SPA bundle and reverse-proxies /api, /apis, and /console/watch to the loopback apiserver so the browser sees one same-origin endpoint. Unauthenticated like /admin; gate via network reachability. Empty disables.")
 		// Embedded clickhouse: the cm process supervises a
 		// clickhouse-server child if the binary is layered into the
 		// image. Listener is 127.0.0.1-only — the engine is private

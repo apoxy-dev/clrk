@@ -10,4 +10,5 @@ import { baseUrl, projectId } from './project-context'
 
 export const consoleClient: ConsoleClient = createConsoleClient({
   decorator: new ProjectRequestDecorator({ baseUrl, projectId }),
+  watchTransport: 'websocket',
 })

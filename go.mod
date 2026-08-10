@@ -3,7 +3,7 @@ module github.com/apoxy-dev/clrk
 go 1.25.5
 
 require (
-	github.com/apoxy-dev/apoxy v0.20.1-0.20260713064824-4c986f267661
+	github.com/apoxy-dev/apoxy v0.22.1-0.20260810071540-9153270619df
 	github.com/apoxy-dev/envoy-go v0.0.0-20260429215216-4c1fa2da31e9
 	github.com/bytedance/sonic v1.15.1
 	github.com/charmbracelet/bubbles v0.21.0
@@ -46,6 +46,7 @@ require (
 
 require (
 	github.com/ClickHouse/ch-go v0.72.0
+	github.com/andybalholm/brotli v1.2.0
 	github.com/k3d-io/k3d/v5 v5.8.3
 )
 
@@ -54,8 +55,7 @@ require (
 	github.com/MicahParks/jwkset v0.9.6 // indirect
 	github.com/MicahParks/keyfunc/v3 v3.6.1 // indirect
 	github.com/alphadose/haxmap v1.4.1 // indirect
-	github.com/andybalholm/brotli v1.2.0 // indirect
-	github.com/apoxy-dev/icx v0.17.1-0.20260615171738-e5278a0a64d3 // indirect
+	github.com/apoxy-dev/icx v0.19.1-0.20260803031753-1500ee264731 // indirect
 	github.com/apparentlymart/go-cidr v1.1.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
@@ -63,6 +63,7 @@ require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/coder/websocket v1.8.12 // indirect
 	github.com/containerd/containerd v1.7.27 // indirect
 	github.com/coredns/caddy v1.1.2-0.20241029205200-8de985351a98 // indirect
 	github.com/coredns/coredns v1.11.3 // indirect
@@ -227,7 +228,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.6.8 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.18.6
 	github.com/kr/pty v1.1.8 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de // indirect

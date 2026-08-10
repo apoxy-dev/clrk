@@ -3,11 +3,11 @@
 //
 // The console is a same-origin SPA: it fetches the Kubernetes API on its
 // own window.location.origin. NewHandler therefore serves the embedded
-// bundle AND reverse-proxies the API surface (/api, /apis — discovery,
-// LIST/WATCH/SSA, the metrics group, and the /traces subresource all ride
-// under those two prefixes) to the loopback apiserver. Serving plain HTTP
-// avoids the apiserver's self-signed-cert browser wall, and the
-// same-origin proxy avoids CORS and a build-time API URL.
+// bundle AND reverse-proxies the API surface (/api, /apis, and
+// /console/watch) to the loopback apiserver. Serving plain HTTP avoids the
+// apiserver's self-signed-cert browser wall, and the same-origin proxy avoids
+// CORS and a build-time API URL. Native Kubernetes watches remain available;
+// the console uses /console/watch to multiplex them over one WebSocket.
 //
 // Auth posture: none. The v1 apiserver runs with authentication disabled
 // (--insecure-allow-public), so the proxy needs no credentials; gate the
@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"embed"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -78,25 +79,50 @@ func NewHandler(apiUpstream *url.URL) http.Handler {
 	spa := spaHandler(distRoot())
 
 	mux := http.NewServeMux()
-	// The aggregated API + discovery all live under these prefixes. Exact
-	// ("/api") and subtree ("/api/") patterns both route to the proxy;
-	// everything else is served from the embedded bundle. /openapi and
-	// /version are apiserver paths a k8s client may probe for schema/version
-	// discovery, so proxy them too rather than answering with the SPA shell.
-	mux.Handle("/api", proxy)
+	// The aggregated API + discovery all live under these prefixes. clrk does
+	// not serve a Kubernetes core group, so answer exact /api discovery with an
+	// empty aggregated-discovery document. This keeps discovery complete without
+	// claiming core resources or producing a browser 404. Core resource paths
+	// under /api/ still route to the apiserver and return its authoritative result.
+	mux.HandleFunc("/api", emptyCoreDiscovery)
 	mux.Handle("/api/", proxy)
 	mux.Handle("/apis", proxy)
 	mux.Handle("/apis/", proxy)
+	mux.Handle("/console/watch", proxy)
 	mux.Handle("/openapi/", proxy)
 	mux.Handle("/version", proxy)
 	mux.Handle("/", spa)
 	return mux
 }
 
+// emptyCoreDiscovery reports that clrk serves no Kubernetes core API group.
+func emptyCoreDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Items      []any  `json:"items"`
+	}{
+		APIVersion: "apidiscovery.k8s.io/v2",
+		Kind:       "APIGroupDiscoveryList",
+		Items:      []any{},
+	})
+}
+
 // newAPIProxy builds the reverse proxy to the loopback apiserver. It
 // preserves the request path and query verbatim (the apiserver serves the
 // same paths the console requests) and streams responses unbuffered so
-// Kubernetes watches (chunked NDJSON) flow straight through.
+// Kubernetes watches (chunked NDJSON) flow straight through. ReverseProxy
+// also tunnels WebSocket upgrades for the multiplexed console watcher.
 func newAPIProxy(upstream *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		FlushInterval: -1,

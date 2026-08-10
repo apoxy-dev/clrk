@@ -24,6 +24,7 @@ export default defineConfig({
         proxy: {
           '/api': { target: apiProxy, changeOrigin: true },
           '/apis': { target: apiProxy, changeOrigin: true },
+          '/console/watch': { target: apiProxy, changeOrigin: true, ws: true },
         },
       }
     : undefined,

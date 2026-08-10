@@ -23,6 +23,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/request/anonymous"
+	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	apiserver "k8s.io/apiserver/pkg/server"
 	genericfilters "k8s.io/apiserver/pkg/server/filters"
@@ -620,6 +622,10 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 			return so
 		}).
 		WithConfigFns(func(c *apiserver.RecommendedConfig) *apiserver.RecommendedConfig {
+			if o.disableAuth {
+				c = configureOpenAccess(c)
+			}
+
 			// FlowControl post-start hook LISTs FlowSchema / PriorityLevelConfiguration
 			// against CoreAPI, which we don't run. Nilling it prevents readyz from failing.
 			c.FlowControl = nil
@@ -689,6 +695,16 @@ func (m *Manager) startAPIServer(ctx context.Context) error {
 	}
 	slog.Info("CLRK apiserver is ready", "host", o.loopbackHostPort())
 	return nil
+}
+
+// configureOpenAccess keeps the unauthenticated development API open while
+// assigning the standard Kubernetes anonymous identity to each request. The
+// watch multiplexer authorizes logical watches after the WebSocket upgrade and
+// therefore needs a user in the request context even when access is unrestricted.
+func configureOpenAccess(c *apiserver.RecommendedConfig) *apiserver.RecommendedConfig {
+	c.Authentication.Authenticator = anonymous.NewAuthenticator(nil)
+	c.Authorization.Authorizer = authorizerfactory.NewAlwaysAllowAuthorizer()
+	return c
 }
 
 func newLoopbackConfig(hostPort string) *rest.Config {

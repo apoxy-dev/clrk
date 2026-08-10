@@ -41,6 +41,18 @@ const (
 	exposeRetryBackoff = 2 * time.Second
 )
 
+var exposeLoopbackAddresses = supportedLoopbackAddresses()
+
+func supportedLoopbackAddresses() []string {
+	addresses := []string{"127.0.0.1"}
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		return addresses
+	}
+	_ = listener.Close()
+	return append(addresses, "::1")
+}
+
 // exposedForward is the per-Service state owned by the reconciler. The
 // goroutine reading svcCh applies updates and exits on ctx cancel.
 type exposedForward struct {
@@ -389,9 +401,9 @@ func containerPortForService(p *corev1.Pod, sp corev1.ServicePort) (int32, bool)
 //  2. The sticky port the goroutine has been using, if still free.
 //  3. The first free port in [exposePortRangeLo, exposePortRangeHi].
 //
-// "Free" is probed by binding 127.0.0.1:p with net.Listen. The bind is
-// released immediately; brief TOCTOU is acceptable since the
-// portforward.NewOnAddresses bind will surface a clear error on retry.
+// "Free" is probed on each supported loopback address with net.Listen.
+// The binds are released immediately. A brief TOCTOU is acceptable because
+// portforward.NewOnAddresses returns a clear error on retry.
 func (r *exposeReconciler) allocatePort(key string, svc *corev1.Service, sticky int) (int, error) {
 	if hint := svc.Labels[clrkv1alpha1.LabelExposePort]; hint != "" {
 		if p, err := strconv.Atoi(hint); err == nil && p > 0 && p < 65536 {
@@ -431,16 +443,19 @@ func (r *exposeReconciler) portInUseByOther(key string, port int) bool {
 }
 
 func portFree(p int) bool {
-	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-	if err != nil {
-		return false
+	for _, address := range exposeLoopbackAddresses {
+		l, err := net.Listen("tcp", net.JoinHostPort(address, strconv.Itoa(p)))
+		if err != nil {
+			return false
+		}
+		_ = l.Close()
 	}
-	_ = l.Close()
 	return true
 }
 
-// doForward opens a SPDY port-forward from 127.0.0.1:hostPort to
-// <pod>:<podPort> and blocks until the stream closes or ctx is canceled.
+// doForward opens a SPDY port-forward from each supported loopback address
+// at hostPort to <pod>:<podPort>. It blocks until the stream closes or ctx
+// is canceled.
 func (r *exposeReconciler) doForward(ctx context.Context, ns, pod string, hostPort int, podPort int32) error {
 	transport, upgrader, err := spdy.RoundTripperFor(r.restConfig)
 	if err != nil {
@@ -462,7 +477,7 @@ func (r *exposeReconciler) doForward(ctx context.Context, ns, pod string, hostPo
 		close(stopCh)
 	}()
 	pf, err := portforward.NewOnAddresses(dialer,
-		[]string{"127.0.0.1"},
+		exposeLoopbackAddresses,
 		[]string{fmt.Sprintf("%d:%d", hostPort, podPort)},
 		stopCh, readyCh, io.Discard, io.Discard)
 	if err != nil {
