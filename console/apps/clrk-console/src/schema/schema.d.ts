@@ -1656,6 +1656,37 @@ export interface components {
             /** @default {} */
             metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
         };
+        /**
+         * @description WorkerPoolMetrics is a point-in-time rollup of one WorkerPool over Window, backing the console pools list. Its name and namespace match the WorkerPool it summarizes. Usage carries both CR-status gauges (replica counts, execution-slot capacity, in-flight executions) and window aggregates over the pool's ingress.dispatch spans (invocations dispatched, dispatch errors, dispatch-latency percentiles).
+         *
+         *     The dispatch counters count only requests that resolved a ready revision and reached worker selection, because clrk.worker.pool is stamped on the dispatch span only past that point: a request rejected earlier (unknown TaskAgent, no ready revision, malformed) carries no pool and belongs to no pool snapshot. Within that set, UsageInvocations is the successfully-dispatched count and UsageErrors is the pool-attributable failures (at cluster MaxConcurrent, no ready worker).
+         */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.WorkerPoolMetrics": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"];
+            /** @description Timestamp is when the rollup was computed (the query time). */
+            timestamp: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Time"];
+            /** @description Usage is the scalar rollup. See the Usage* key constants. */
+            usage: {
+                [key: string]: components["schemas"]["io.k8s.apimachinery.pkg.api.resource.Quantity"];
+            };
+            /** @description Window is the look-back the aggregate usage values cover, e.g. 24h. The gauge keys are point-in-time reads and do not depend on it. */
+            window: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.Duration"];
+        };
+        /** @description WorkerPoolMetricsList is a list of WorkerPoolMetrics. */
+        "com.github.apoxy-dev.clrk.api.metrics.v1alpha1.WorkerPoolMetricsList": {
+            /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */
+            apiVersion?: string;
+            items: components["schemas"]["com.github.apoxy-dev.clrk.api.metrics.v1alpha1.WorkerPoolMetrics"][];
+            /** @description Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds */
+            kind?: string;
+            /** @default {} */
+            metadata: components["schemas"]["io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"];
+        };
         /** @description Lease defines a lease concept. */
         "io.k8s.api.coordination.v1.Lease": {
             /** @description APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources */

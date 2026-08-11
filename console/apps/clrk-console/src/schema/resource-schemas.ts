@@ -4268,5 +4268,8 @@ export const RESOURCE_SCHEMAS: Record<string, JSONSchema> = {
   },
   "metrics.apoxy.dev/v1alpha1/TaskAgentMetrics": {
     "type": "object"
+  },
+  "metrics.apoxy.dev/v1alpha1/WorkerPoolMetrics": {
+    "type": "object"
   }
 }
